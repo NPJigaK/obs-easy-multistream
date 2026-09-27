@@ -37,7 +37,9 @@ Current OBS profile/basic.ini
   └─ SchemaVersion + YouTubeEnabled only
 ```
 
-The dock can save the non-secret enable setting and a masked YouTube key. It clearly labels the configuration as a preview and does not claim that either platform is connected or streaming. The key is intentionally shared across OBS profiles in v1; only the enabled flag is profile-specific.
+The dock can save the non-secret enable setting and a masked YouTube key. It states in ordinary user-facing language that streaming to YouTube is not yet available and does not claim that either platform is connected or streaming. The key is intentionally shared across OBS profiles in v1; only the enabled flag is profile-specific.
+
+User-visible text follows OBS and platform terminology. Internal milestone names, schema versions, implementation roles such as primary/secondary output, and release codenames stay in code and engineering documentation rather than appearing in the dock.
 
 ## Lifetime invariants
 

@@ -5,22 +5,22 @@
 
 A lightweight OBS Studio plugin intended to add YouTube multistreaming without replacing OBS's native Twitch workflow or running a second video encode.
 
-> **Pre-alpha:** the repository currently contains a profile-aware configuration preview. It does not stream to YouTube yet.
+> **Work in progress:** the settings interface is available, but streaming to YouTube is not implemented yet.
 
-## Intended v1 experience
+## Intended experience
 
 - Keep Twitch configured as the normal OBS service.
 - Start and stop from OBS's existing button.
-- Send the same encoded H.264/AAC stream to one additional YouTube RTMPS destination.
+- Send the same encoded H.264/AAC stream to YouTube as well.
 - Show Twitch and YouTube independently in a standard OBS dock.
 - Keep Twitch running if the YouTube connection fails.
-- Avoid OAuth, cloud relays, telemetry, installers, and a second video encode in v1.
+- Avoid OAuth, cloud relays, telemetry, installers, and a second video encode unless they become necessary.
 
-The first version will use a reusable YouTube custom stream key with YouTube Auto-start and Auto-stop. Scheduled YouTube events and per-stream metadata automation are not part of v1.
+The initial release will use a reusable YouTube custom stream key with YouTube Auto-start and Auto-stop. Scheduled YouTube events and per-stream metadata automation are outside the initial scope.
 
 ## Current status
 
-The current preview provides:
+The current build provides:
 
 - an OBS module built with the official plugin-template CMake infrastructure;
 - a standard dock registered through the public OBS Frontend API;
@@ -33,7 +33,7 @@ The current preview provides:
 - a pinned Windows x64 build against OBS Studio 32.2.2;
 - an installer-free portable ZIP with a validated directory layout.
 
-It intentionally does **not** create a service, output, encoder, network connection, or Start/Stop hook yet. Entering settings in this preview cannot start a YouTube stream. See [the architecture note](docs/architecture.md) for the boundaries and rollout order and [the security note](docs/security.md) for the credential and memory boundaries.
+It does **not** connect to YouTube yet, so saving these settings cannot start a YouTube stream. See [the architecture note](docs/architecture.md) for the implementation boundaries and rollout order and [the security note](docs/security.md) for the credential and memory boundaries.
 
 ## Compatibility
 
@@ -57,7 +57,7 @@ The first build also compiles the OBS development targets and can take several m
 release\obs-easy-multistream-0.1.0-windows-x64-obs32-portable.zip
 ```
 
-The ZIP is structured to be extracted directly into an OBS portable root containing `bin\64bit\obs64.exe`. There is no installer and no release should be treated as usable for multistreaming until the pre-alpha notice is removed.
+The ZIP is structured to be extracted directly into an OBS portable root containing `bin\64bit\obs64.exe`. There is no installer, and the plugin should not be used for multistreaming until YouTube streaming is implemented.
 
 Local and CI artifacts are unsigned development builds. A public release process and code-signing policy will be defined before recommending the plugin to general users.
 
