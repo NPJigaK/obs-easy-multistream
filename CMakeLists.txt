@@ -130,4 +130,19 @@ if(BUILD_TESTING)
       "${CMAKE_COMMAND}" -DPROJECT_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR} -P
       "${CMAKE_CURRENT_SOURCE_DIR}/tests/check-locales.cmake"
   )
+
+  set(test_runtime_environment)
+  foreach(prefix IN LISTS CMAKE_PREFIX_PATH)
+    if(EXISTS "${prefix}/bin")
+      list(APPEND test_runtime_environment "PATH=path_list_prepend:${prefix}/bin")
+    endif()
+  endforeach()
+  if(NOT test_runtime_environment)
+    message(FATAL_ERROR "No repository-local runtime dependency directories were found for tests")
+  endif()
+  set_tests_properties(
+    ${CMAKE_PROJECT_NAME}-unit
+    ${CMAKE_PROJECT_NAME}-ui
+    PROPERTIES ENVIRONMENT_MODIFICATION "${test_runtime_environment}"
+  )
 endif()
