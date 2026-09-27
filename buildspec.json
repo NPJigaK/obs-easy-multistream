@@ -1,0 +1,42 @@
+{
+  "dependencies": {
+    "obs-studio": {
+      "version": "32.2.2",
+      "baseUrl": "https://github.com/obsproject/obs-studio/archive/refs/tags",
+      "label": "OBS sources",
+      "hashes": {
+        "windows-x64": "f15f001f1fa526405318835f44f9910046502f496ebc3a30d5296a5018b831aa"
+      }
+    },
+    "prebuilt": {
+      "version": "2026-07-15",
+      "baseUrl": "https://github.com/obsproject/obs-deps/releases/download",
+      "label": "Pre-built obs-deps",
+      "hashes": {
+        "windows-x64": "6f90e9598fa10cff5ad23cdcfae49b87868c07bf896b02cd464582b4ce2f2ba9"
+      }
+    },
+    "qt6": {
+      "version": "2026-07-15",
+      "baseUrl": "https://github.com/obsproject/obs-deps/releases/download",
+      "label": "Pre-built Qt6",
+      "hashes": {
+        "windows-x64": "7c7f985711d80467bdc1795b6592275a27d5b0e5a2c7a61db1f2c1d08d6a5579"
+      },
+      "debugSymbols": {
+        "windows-x64": "471d0b2191c424a520a51d064f3741084f117e1ff6ee5af1d16aabcdbacc6659"
+      }
+    }
+  },
+  "platformConfig": {
+    "macos": {
+      "bundleId": "com.npjigak.obs-easy-multistream"
+    }
+  },
+  "name": "obs-easy-multistream",
+  "displayName": "Easy Multistream",
+  "version": "0.1.0",
+  "author": "NPJigaK",
+  "website": "https://github.com/NPJigaK/obs-easy-multistream",
+  "email": ""
+}

@@ -1,0 +1,7 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#pragma once
+
+namespace easy_multistream {
+inline constexpr char kVersion[] = "@PROJECT_VERSION@";
+}
