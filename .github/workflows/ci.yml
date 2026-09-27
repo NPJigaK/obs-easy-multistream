@@ -26,11 +26,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Build and validate portable package
+      - name: Build and validate Windows packages
         shell: pwsh
         run: ./scripts/build-windows.ps1 -Preset windows-ci-x64 -Configuration RelWithDebInfo
 
-      - name: Upload portable package
+      - name: Upload Windows packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: obs-easy-multistream-windows-x64-obs32

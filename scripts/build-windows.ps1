@@ -73,6 +73,39 @@ function Assert-WorkspacePath {
     return $Resolved
 }
 
+function Assert-ArchiveContents {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$ArchivePath,
+
+        [Parameter(Mandatory = $true)]
+        [string[]]$RequiredEntries,
+
+        [Parameter(Mandatory = $true)]
+        [string]$PackageName
+    )
+
+    $Archive = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
+    try {
+        $Entries = @($Archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
+        foreach ($RequiredEntry in $RequiredEntries) {
+            if ($Entries -notcontains $RequiredEntry) {
+                throw "$PackageName archive is missing: $RequiredEntry"
+            }
+        }
+
+        $ForbiddenEntry = $Entries | Where-Object {
+            $_ -match '(^|/)(obs64\.exe|obs-studio\.exe|libobs\.dll|Qt6[^/]*\.dll|.+\.(msi|exe|pdb))$'
+        } | Select-Object -First 1
+        if ($null -ne $ForbiddenEntry) {
+            throw "$PackageName archive contains a forbidden runtime, installer, or debug symbol: $ForbiddenEntry"
+        }
+    }
+    finally {
+        $Archive.Dispose()
+    }
+}
+
 $CMake = Resolve-CMakeExecutable
 Assert-CMakeVersion -Executable $CMake
 $CTest = Join-Path (Split-Path -Parent $CMake) "ctest.exe"
@@ -83,6 +116,7 @@ New-Item -ItemType Directory -Path $ReleaseDirectory -Force | Out-Null
 
 $StagingRoot = Assert-WorkspacePath (Join-Path $ReleaseDirectory (".stage-" + [System.Guid]::NewGuid().ToString("N")))
 $InstallRoot = Join-Path $StagingRoot "install"
+$StandardPackageRoot = Join-Path $StagingRoot "standard"
 $PortableRoot = Join-Path $StagingRoot "portable"
 
 try {
@@ -124,6 +158,15 @@ try {
         throw "Installed plugin data was not found: $InstalledData"
     }
 
+    $StandardPluginDirectory = Join-Path $StandardPackageRoot "obs-easy-multistream"
+    $StandardBinaryDirectory = Join-Path $StandardPluginDirectory "bin\64bit"
+    $StandardDataDirectory = Join-Path $StandardPluginDirectory "data"
+    New-Item -ItemType Directory -Path $StandardBinaryDirectory -Force | Out-Null
+    New-Item -ItemType Directory -Path $StandardDataDirectory -Force | Out-Null
+    Copy-Item -LiteralPath $InstalledDll -Destination $StandardBinaryDirectory
+    Get-ChildItem -LiteralPath $InstalledData | Copy-Item -Destination $StandardDataDirectory -Recurse
+    Copy-Item -LiteralPath (Join-Path $RepositoryRoot "LICENSE") -Destination (Join-Path $StandardPluginDirectory "LICENSE.txt")
+
     $PortableBinaryDirectory = Join-Path $PortableRoot "obs-plugins\64bit"
     $PortableDataDirectory = Join-Path $PortableRoot "data\obs-plugins\obs-easy-multistream"
     New-Item -ItemType Directory -Path $PortableBinaryDirectory -Force | Out-Null
@@ -134,44 +177,39 @@ try {
     Copy-Item -LiteralPath (Join-Path $RepositoryRoot "LICENSE") -Destination (Join-Path $PortableRoot "obs-easy-multistream-LICENSE.txt")
 
     $BuildSpec = Get-Content -LiteralPath (Join-Path $RepositoryRoot "buildspec.json") -Raw | ConvertFrom-Json
-    $ArchiveName = "obs-easy-multistream-$($BuildSpec.version)-windows-x64-obs32-portable.zip"
-    $ArchivePath = Assert-WorkspacePath (Join-Path $ReleaseDirectory $ArchiveName)
-    $StagedArchivePath = Assert-WorkspacePath (Join-Path $StagingRoot $ArchiveName)
-    Compress-Archive -Path (Join-Path $PortableRoot "*") -DestinationPath $StagedArchivePath -CompressionLevel Optimal -Force
-
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $Archive = [System.IO.Compression.ZipFile]::OpenRead($StagedArchivePath)
-    try {
-        $Entries = @($Archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
-        $RequiredEntries = @(
-            "obs-plugins/64bit/obs-easy-multistream.dll",
-            "data/obs-plugins/obs-easy-multistream/locale/en-US.ini",
-            "data/obs-plugins/obs-easy-multistream/locale/ja-JP.ini",
-            "obs-easy-multistream-LICENSE.txt"
-        )
 
-        foreach ($RequiredEntry in $RequiredEntries) {
-            if ($Entries -notcontains $RequiredEntry) {
-                throw "Portable archive is missing: $RequiredEntry"
-            }
-        }
+    $StandardArchiveName = "obs-easy-multistream-$($BuildSpec.version)-windows-x64-obs32.zip"
+    $StandardArchivePath = Assert-WorkspacePath (Join-Path $ReleaseDirectory $StandardArchiveName)
+    $StagedStandardArchivePath = Assert-WorkspacePath (Join-Path $StagingRoot $StandardArchiveName)
+    Compress-Archive -Path (Join-Path $StandardPackageRoot "*") -DestinationPath $StagedStandardArchivePath -CompressionLevel Optimal -Force
+    Assert-ArchiveContents -ArchivePath $StagedStandardArchivePath -PackageName "Standard" -RequiredEntries @(
+        "obs-easy-multistream/bin/64bit/obs-easy-multistream.dll",
+        "obs-easy-multistream/data/locale/en-US.ini",
+        "obs-easy-multistream/data/locale/ja-JP.ini",
+        "obs-easy-multistream/LICENSE.txt"
+    )
 
-        $ForbiddenEntry = $Entries | Where-Object {
-            $_ -match '(^|/)(obs64\.exe|obs-studio\.exe|libobs\.dll|Qt6[^/]*\.dll|.+\.(msi|exe))$'
-        } | Select-Object -First 1
-        if ($null -ne $ForbiddenEntry) {
-            throw "Portable archive contains a forbidden runtime or installer: $ForbiddenEntry"
-        }
-    }
-    finally {
-        $Archive.Dispose()
-    }
+    $PortableArchiveName = "obs-easy-multistream-$($BuildSpec.version)-windows-x64-obs32-portable.zip"
+    $PortableArchivePath = Assert-WorkspacePath (Join-Path $ReleaseDirectory $PortableArchiveName)
+    $StagedPortableArchivePath = Assert-WorkspacePath (Join-Path $StagingRoot $PortableArchiveName)
+    Compress-Archive -Path (Join-Path $PortableRoot "*") -DestinationPath $StagedPortableArchivePath -CompressionLevel Optimal -Force
+    Assert-ArchiveContents -ArchivePath $StagedPortableArchivePath -PackageName "Portable" -RequiredEntries @(
+        "obs-plugins/64bit/obs-easy-multistream.dll",
+        "data/obs-plugins/obs-easy-multistream/locale/en-US.ini",
+        "data/obs-plugins/obs-easy-multistream/locale/ja-JP.ini",
+        "obs-easy-multistream-LICENSE.txt"
+    )
 
-    Move-Item -LiteralPath $StagedArchivePath -Destination $ArchivePath -Force
-    $Hash = Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256
+    Move-Item -LiteralPath $StagedStandardArchivePath -Destination $StandardArchivePath -Force
+    Move-Item -LiteralPath $StagedPortableArchivePath -Destination $PortableArchivePath -Force
+    $StandardHash = Get-FileHash -LiteralPath $StandardArchivePath -Algorithm SHA256
+    $PortableHash = Get-FileHash -LiteralPath $PortableArchivePath -Algorithm SHA256
     Write-Host "Build and package completed."
-    Write-Host "Archive: $ArchivePath"
-    Write-Host "SHA256: $($Hash.Hash.ToLowerInvariant())"
+    Write-Host "Standard archive: $StandardArchivePath"
+    Write-Host "Standard SHA256: $($StandardHash.Hash.ToLowerInvariant())"
+    Write-Host "Portable archive: $PortableArchivePath"
+    Write-Host "Portable SHA256: $($PortableHash.Hash.ToLowerInvariant())"
 }
 finally {
     if (Test-Path -LiteralPath $StagingRoot) {

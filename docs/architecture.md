@@ -94,7 +94,19 @@ The first output adapter will not expose automatic or in-session manual retry. A
 
 ## Packaging
 
-The repository builds against pinned OBS and dependency archives. Packaging produces an installer-free ZIP with this OBS portable layout:
+The repository builds against pinned OBS and dependency archives. Packaging produces two installer-free ZIPs for the currently supported OBS Studio 32.2.2 target.
+
+The regular Windows package contains one plugin folder for
+`C:\ProgramData\obs-studio\plugins`:
+
+```text
+obs-easy-multistream/
+  bin/64bit/obs-easy-multistream.dll
+  data/locale/...
+  LICENSE.txt
+```
+
+The portable package is extracted into the root of an OBS Studio 32.2.2 portable installation:
 
 ```text
 obs-plugins/64bit/obs-easy-multistream.dll
