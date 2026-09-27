@@ -208,6 +208,41 @@ void testSettingsSafeSaveAndReload()
 	CHECK(std::filesystem::remove(path, removeError));
 }
 
+void testSettingsSaveFailureRollsBackInMemoryValues()
+{
+	const std::filesystem::path directory = std::filesystem::current_path() / "easy-multistream-save-failure-test";
+	const std::filesystem::path path = directory / "basic.ini";
+	std::error_code filesystemError;
+	std::filesystem::remove_all(directory, filesystemError);
+	CHECK(std::filesystem::create_directory(directory, filesystemError));
+
+	config_t *config = nullptr;
+	const std::string utf8Path = path.u8string();
+	CHECK(config_open(&config, utf8Path.c_str(), CONFIG_OPEN_ALWAYS) == CONFIG_SUCCESS);
+	CHECK(config != nullptr);
+	if (config == nullptr) {
+		std::filesystem::remove_all(directory, filesystemError);
+		return;
+	}
+
+	config_set_uint(config, "EasyMultistream", "SchemaVersion", easy_multistream::kSettingsSchemaVersion);
+	config_set_bool(config, "EasyMultistream", "YouTubeEnabled", false);
+	CHECK(config_save_safe(config, "tmp", nullptr) == CONFIG_SUCCESS);
+	CHECK(std::filesystem::remove(path, filesystemError));
+	CHECK(std::filesystem::remove(directory, filesystemError));
+
+	easy_multistream::Settings desired;
+	desired.youtubeEnabled = true;
+	CHECK(easy_multistream::saveProfileSettings(config, desired) != CONFIG_SUCCESS);
+	const auto afterFailure = easy_multistream::loadProfileSettings(config);
+	CHECK(afterFailure.status == easy_multistream::SettingsLoadStatus::Loaded);
+	CHECK(!afterFailure.settings.youtubeEnabled);
+	config_close(config);
+
+	CHECK(!std::filesystem::exists(path));
+	CHECK(!std::filesystem::exists(path.string() + ".tmp"));
+}
+
 void testFutureSchemaIsDisabled()
 {
 	Config config("[EasyMultistream]\nSchemaVersion=99\nYouTubeEnabled=true\n");
@@ -425,6 +460,7 @@ int main()
 	testSettingsDefaults();
 	testSettingsRoundTripAndPlaintextRemoval();
 	testSettingsSafeSaveAndReload();
+	testSettingsSaveFailureRollsBackInMemoryValues();
 	testFutureSchemaIsDisabled();
 	testInvalidSchemaAndUnavailableConfig();
 	testStreamKeyValidation();

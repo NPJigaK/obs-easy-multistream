@@ -56,6 +56,33 @@ bool parseSchemaVersion(config_t *config, std::uint64_t &schema) noexcept
 	}
 }
 
+struct ConfigValueSnapshot {
+	bool present = false;
+	std::string value;
+};
+
+ConfigValueSnapshot captureValue(config_t *config, const char *name)
+{
+	ConfigValueSnapshot snapshot;
+	snapshot.present = config_has_user_value(config, kSection, name);
+	if (!snapshot.present) {
+		return snapshot;
+	}
+
+	const char *value = config_get_string(config, kSection, name);
+	snapshot.value = value != nullptr ? value : "";
+	return snapshot;
+}
+
+void restoreValue(config_t *config, const char *name, const ConfigValueSnapshot &snapshot) noexcept
+{
+	if (snapshot.present) {
+		config_set_string(config, kSection, name, snapshot.value.c_str());
+	} else {
+		config_remove_value(config, kSection, name);
+	}
+}
+
 } // namespace
 
 SettingsLoadResult loadProfileSettings(config_t *config) noexcept
@@ -102,8 +129,22 @@ int saveProfileSettings(config_t *config, const Settings &settings) noexcept
 		return CONFIG_ERROR;
 	}
 
+	ConfigValueSnapshot schemaSnapshot;
+	ConfigValueSnapshot enabledSnapshot;
+	try {
+		schemaSnapshot = captureValue(config, kSchemaVersion);
+		enabledSnapshot = captureValue(config, kYouTubeEnabled);
+	} catch (...) {
+		return CONFIG_ERROR;
+	}
+
 	writeProfileSettings(config, settings);
-	return config_save_safe(config, "tmp", nullptr);
+	const int result = config_save_safe(config, "tmp", nullptr);
+	if (result != CONFIG_SUCCESS) {
+		restoreValue(config, kSchemaVersion, schemaSnapshot);
+		restoreValue(config, kYouTubeEnabled, enabledSnapshot);
+	}
+	return result;
 }
 
 StreamKeyValidationError validateYouTubeStreamKey(std::string_view streamKey) noexcept
