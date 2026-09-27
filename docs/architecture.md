@@ -1,6 +1,6 @@
 # Architecture
 
-Easy Multistream is being built in small, reviewable slices. The current slice adds profile-aware configuration and secure local credential storage to the verified OBS dock. It deliberately contains no streaming output code.
+Easy Multistream is being built in small, reviewable slices. The settings foundation adds profile-aware configuration and secure local credential storage to the verified OBS dock. The next stacked slice defines the session state contract independently from OBS and Qt. Neither slice contains streaming output code.
 
 ## v1 product boundary
 
@@ -66,9 +66,31 @@ User-visible text follows OBS and platform terminology. Internal milestone names
 
 ## Planned runtime boundary
 
-The streaming implementation will be added only after this configuration slice is verified inside OBS. Its session controller will be owned by the plugin context, not by the dock or settings controller. The dock will render immutable status snapshots and may be closed without affecting outputs. OBS callbacks and output callbacks will carry a session generation so stale events cannot mutate a newer session.
+`obs-easy-multistream-session-core` is a pure C++ library with no OBS, Qt, Windows Credential Manager, or network dependency. It is not linked into the plugin module yet. Its `SessionCoordinator` accepts value events and returns an immutable snapshot plus at most one requested effect. The only output effects are `StartYouTube` and `StopYouTube`; there is intentionally no effect capable of stopping the native OBS stream.
+
+`SessionCoordinator` is deliberately not thread-safe. A future runtime bridge will serialize every state event on one owner thread. Frontend callbacks and output callbacks will copy only lease/status values and post them to that owner; they will never call the state machine concurrently or capture a raw OBS pointer in queued work. Each returned effect must be handed to the adapter in transition order before the bridge processes its next state event.
+
+Each native OBS start attempt receives a `NativeLease`, and each YouTube start attempt receives an `OutputLease`. Both contain a profile/session generation and an attempt number. Callbacks for an old generation or attempt cannot update the current snapshot. Snapshot revisions advance only for accepted state changes, so a future view bridge can reject queued updates that arrive out of order. Profile changes and exit invalidate the current generation before delayed callbacks can be observed by a new session.
+
+The destination classifier accepts only exact known OBS service values. A Twitch session is eligible only when the service type is `rtmp_common` and the provider name is exactly `Twitch`. Known YouTube names are recognized for future role-neutral behavior, while custom RTMP, relays, substring matches, and unknown services remain unsupported rather than being guessed from a URL or stream key.
+
+The next integration slice will add an OBS Frontend bridge and an output adapter. The bridge will be owned by the plugin context, not by the dock or settings controller. The dock will render immutable status snapshots and may be closed without affecting outputs. Raw OBS pointers and secret values will never enter `SessionCoordinator` or its snapshots. The detailed ownership and callback rules are recorded in [the output integration contract](runtime-output-design.md).
 
 The future secondary output will reference the native primary encoders but will own its own service and output. Release order and failure paths will be tested before adding automatic reconnect.
+
+The first output adapter will not expose automatic or in-session manual retry. A YouTube start failure remains isolated while the native stream continues, and the next native Stop/Start begins a fresh attempt. A later retry action can be added as an explicit state event after teardown and backoff behavior have their own tests.
+
+## Session state invariants
+
+1. OBS remains the only owner of the native stream Start/Stop workflow.
+2. YouTube can start only while a recognized Twitch native stream is running and both the profile setting and saved-key status allow it.
+3. Duplicate native Start/Stop events do not emit duplicate YouTube effects.
+4. A YouTube failure changes only the YouTube state; it cannot request that OBS stop streaming.
+5. An unexpected YouTube stop does not enter an immediate restart loop.
+6. A rapid native restart waits until the prior YouTube output has been fully released before issuing a new start; the raw OBS `stop` signal is not sufficient.
+7. A delayed native stop from an older attempt cannot stop a newer native or YouTube session.
+8. Profile change and exit invalidate old leases, and exit is terminal.
+9. Internal generations, attempts, revisions, and output roles are never shown in the user interface.
 
 ## Packaging
 

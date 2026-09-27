@@ -27,13 +27,15 @@ The current build provides:
 - a profile-scoped YouTube enable setting saved atomically in the active OBS profile;
 - a masked stream-key field backed by Windows Credential Manager;
 - explicit handling for OBS profile changes, theme changes, dock closure, and shutdown;
-- unit tests for settings parsing, failed-save rollback, secret validation, and the credential backend;
+- an OBS- and Qt-independent session state model that rejects stale output events;
+- an exact-match destination classifier that treats custom and unknown services conservatively;
+- unit tests for settings parsing, failed-save rollback, secret validation, the credential backend, and session transitions;
 - English and Japanese UI resources;
 - explicit OBS-owned widget lifetime handling;
 - a pinned Windows x64 build against OBS Studio 32.2.2;
 - an installer-free portable ZIP with a validated directory layout.
 
-It does **not** connect to YouTube yet, so saving these settings cannot start a YouTube stream. See [the architecture note](docs/architecture.md) for the implementation boundaries and rollout order and [the security note](docs/security.md) for the credential and memory boundaries.
+It does **not** connect to YouTube yet, so saving these settings cannot start a YouTube stream. See [the architecture note](docs/architecture.md) for the implementation boundaries and rollout order, [the output integration contract](docs/runtime-output-design.md) for the future OBS ownership rules, and [the security note](docs/security.md) for the credential and memory boundaries.
 
 ## Compatibility
 
@@ -67,6 +69,7 @@ Local and CI artifacts are unsigned development builds. A public release process
 - no modification of OBS private UI internals;
 - one bounded secondary output in v1;
 - no secret values in logs, diagnostics, Git, or exported profiles;
+- runtime state, OBS integration, and output ownership remain separate layers;
 - deterministic cleanup before feature breadth;
 - source-pinned and reviewable release builds.
 
