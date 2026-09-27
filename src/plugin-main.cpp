@@ -2,6 +2,7 @@
 // Copyright (C) 2026 NPJigaK
 
 #include "dock-view.hpp"
+#include "settings-controller.hpp"
 #include "version.hpp"
 
 #include <obs-frontend-api.h>
@@ -26,6 +27,7 @@ constexpr char kDockId[] = "easy_multistream.dock";
 
 struct PluginState {
 	QPointer<easy_multistream::DockView> dock;
+	std::unique_ptr<easy_multistream::SettingsController> settingsController;
 	bool dockRegistered = false;
 	bool callbackRegistered = false;
 	bool exitSeen = false;
@@ -39,17 +41,92 @@ QString moduleText(const char *key)
 	return QString::fromUtf8(value != nullptr ? value : key);
 }
 
+easy_multistream::DockText loadDockText()
+{
+	easy_multistream::DockText text;
+	text.heading = moduleText("Dock.Heading");
+	text.destinations = moduleText("Dock.Destinations");
+	text.primaryName = moduleText("Dock.Primary");
+	text.primaryStatus = moduleText("Dock.PrimaryStatus");
+	text.youtubeName = moduleText("Dock.YouTube");
+	text.setup = moduleText("Dock.Setup");
+	text.profileLabel = moduleText("Dock.Profile");
+	text.enableYouTube = moduleText("Dock.EnableYouTube");
+	text.credentialLabel = moduleText("Dock.Credential.Label");
+	text.streamKeyLabel = moduleText("Dock.StreamKey.Label");
+	text.saveKey = moduleText("Dock.SaveKey");
+	text.removeKey = moduleText("Dock.RemoveKey");
+	text.keyPlaceholderMissing = moduleText("Dock.StreamKey.Placeholder.Missing");
+	text.keyPlaceholderPresent = moduleText("Dock.StreamKey.Placeholder.Present");
+	text.keyScope = moduleText("Dock.StreamKey.Scope");
+	text.credentialMissing = moduleText("Dock.Credential.Missing");
+	text.credentialPresent = moduleText("Dock.Credential.Present");
+	text.credentialUnavailable = moduleText("Dock.Credential.Unavailable");
+	text.youtubeDisabled = moduleText("Dock.YouTube.Disabled");
+	text.youtubeReady = moduleText("Dock.YouTube.Ready");
+	text.youtubeMissingKey = moduleText("Dock.YouTube.MissingKey");
+	text.youtubeUnavailable = moduleText("Dock.YouTube.Unavailable");
+	text.noticePreview = moduleText("Dock.Notice.Preview");
+	text.noticeProfileSaved = moduleText("Dock.Notice.ProfileSaved");
+	text.noticeKeySaved = moduleText("Dock.Notice.KeySaved");
+	text.noticeKeyRemoved = moduleText("Dock.Notice.KeyRemoved");
+	text.noticeMissingKey = moduleText("Dock.Notice.MissingKey");
+	text.noticeKeyTooLong = moduleText("Dock.Notice.KeyTooLong");
+	text.noticeKeyInvalidCharacters = moduleText("Dock.Notice.KeyInvalidCharacters");
+	text.noticeKeyInvalidUtf8 = moduleText("Dock.Notice.KeyInvalidUtf8");
+	text.noticeCredentialUnavailable = moduleText("Dock.Notice.CredentialUnavailable");
+	text.noticeCredentialSaveFailed = moduleText("Dock.Notice.CredentialSaveFailed");
+	text.noticeCredentialDeleteFailed = moduleText("Dock.Notice.CredentialDeleteFailed");
+	text.noticeProfileUnavailable = moduleText("Dock.Notice.ProfileUnavailable");
+	text.noticeProfileChanging = moduleText("Dock.Notice.ProfileChanging");
+	text.noticeInvalidSettings = moduleText("Dock.Notice.InvalidSettings");
+	text.noticeFutureSettings = moduleText("Dock.Notice.FutureSettings");
+	text.noticeSettingsSaveFailed = moduleText("Dock.Notice.SettingsSaveFailed");
+	text.noticeInternalError = moduleText("Dock.Notice.InternalError");
+	text.removeKeyTitle = moduleText("Dock.RemoveKey.Title");
+	text.removeKeyMessage = moduleText("Dock.RemoveKey.Message");
+	return text;
+}
+
 void removeFrontendObjects(PluginState &state) noexcept;
 
 void onFrontendEvent(enum obs_frontend_event event, void *privateData) noexcept
 {
 	auto *state = static_cast<PluginState *>(privateData);
-	if (state == nullptr || event != OBS_FRONTEND_EVENT_EXIT) {
+	if (state == nullptr) {
 		return;
 	}
 
-	state->exitSeen = true;
-	removeFrontendObjects(*state);
+	if (event == OBS_FRONTEND_EVENT_EXIT) {
+		state->exitSeen = true;
+		removeFrontendObjects(*state);
+		return;
+	}
+
+	if (state->settingsController == nullptr) {
+		return;
+	}
+
+	try {
+		switch (event) {
+		case OBS_FRONTEND_EVENT_FINISHED_LOADING:
+		case OBS_FRONTEND_EVENT_PROFILE_CHANGED:
+			state->settingsController->loadCurrentProfile();
+			break;
+		case OBS_FRONTEND_EVENT_PROFILE_CHANGING:
+			state->settingsController->beginProfileChange();
+			break;
+		case OBS_FRONTEND_EVENT_THEME_CHANGED:
+			state->settingsController->refreshTheme();
+			break;
+		default:
+			break;
+		}
+	} catch (const std::exception &error) {
+		blog(LOG_ERROR, "[obs-easy-multistream] Frontend event handling failed: %s", error.what());
+	} catch (...) {
+		blog(LOG_ERROR, "[obs-easy-multistream] Frontend event handling failed");
+	}
 }
 
 void removeFrontendObjects(PluginState &state) noexcept
@@ -57,6 +134,10 @@ void removeFrontendObjects(PluginState &state) noexcept
 	if (state.callbackRegistered) {
 		obs_frontend_remove_event_callback(onFrontendEvent, &state);
 		state.callbackRegistered = false;
+	}
+
+	if (state.settingsController != nullptr) {
+		state.settingsController->shutdown();
 	}
 
 	if (state.dockRegistered) {
@@ -95,14 +176,9 @@ bool obs_module_load(void)
 		}
 
 		auto state = std::make_unique<PluginState>();
-		easy_multistream::DockText text{
-			moduleText("Dock.Heading"),       moduleText("Dock.Destinations"),
-			moduleText("Dock.Primary"),       moduleText("Dock.PrimaryStatus"),
-			moduleText("Dock.YouTube"),       moduleText("Dock.YouTubeStatus"),
-			moduleText("Dock.PreviewNotice"),
-		};
-		auto dock = std::make_unique<easy_multistream::DockView>(std::move(text));
+		auto dock = std::make_unique<easy_multistream::DockView>(loadDockText());
 		state->dock = dock.get();
+		state->settingsController = std::make_unique<easy_multistream::SettingsController>(dock.get());
 
 		const QByteArray dockTitle = moduleText("Dock.Title").toUtf8();
 		if (!obs_frontend_add_dock_by_id(kDockId, dockTitle.constData(), dock.get())) {
@@ -122,6 +198,7 @@ bool obs_module_load(void)
 			pluginState.reset();
 			throw;
 		}
+		pluginState->settingsController->loadCurrentProfile();
 
 		blog(LOG_INFO, "[obs-easy-multistream] Loaded version %s", easy_multistream::kVersion);
 		return true;

@@ -75,6 +75,10 @@ function Assert-WorkspacePath {
 
 $CMake = Resolve-CMakeExecutable
 Assert-CMakeVersion -Executable $CMake
+$CTest = Join-Path (Split-Path -Parent $CMake) "ctest.exe"
+if (!(Test-Path -LiteralPath $CTest -PathType Leaf)) {
+    throw "CTest was not found next to CMake: $CTest"
+}
 New-Item -ItemType Directory -Path $ReleaseDirectory -Force | Out-Null
 
 $StagingRoot = Assert-WorkspacePath (Join-Path $ReleaseDirectory (".stage-" + [System.Guid]::NewGuid().ToString("N")))
@@ -84,12 +88,19 @@ $PortableRoot = Join-Path $StagingRoot "portable"
 try {
     Invoke-CheckedCommand -Executable $CMake -Arguments @(
         "--preset", $Preset,
+        "-DBUILD_TESTING=ON",
         "-DCMAKE_INSTALL_PREFIX=$InstallRoot"
     )
     Invoke-CheckedCommand -Executable $CMake -Arguments @(
         "--build", "--preset", $Preset,
         "--config", $Configuration,
         "--parallel"
+    )
+    Invoke-CheckedCommand -Executable $CTest -Arguments @(
+        "--test-dir", $BuildDirectory,
+        "--build-config", $Configuration,
+        "--no-tests=error",
+        "--output-on-failure"
     )
 
     if ($SkipPackage) {
@@ -125,10 +136,11 @@ try {
     $BuildSpec = Get-Content -LiteralPath (Join-Path $RepositoryRoot "buildspec.json") -Raw | ConvertFrom-Json
     $ArchiveName = "obs-easy-multistream-$($BuildSpec.version)-windows-x64-obs32-portable.zip"
     $ArchivePath = Assert-WorkspacePath (Join-Path $ReleaseDirectory $ArchiveName)
-    Compress-Archive -Path (Join-Path $PortableRoot "*") -DestinationPath $ArchivePath -CompressionLevel Optimal -Force
+    $StagedArchivePath = Assert-WorkspacePath (Join-Path $StagingRoot $ArchiveName)
+    Compress-Archive -Path (Join-Path $PortableRoot "*") -DestinationPath $StagedArchivePath -CompressionLevel Optimal -Force
 
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $Archive = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
+    $Archive = [System.IO.Compression.ZipFile]::OpenRead($StagedArchivePath)
     try {
         $Entries = @($Archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') })
         $RequiredEntries = @(
@@ -155,6 +167,7 @@ try {
         $Archive.Dispose()
     }
 
+    Move-Item -LiteralPath $StagedArchivePath -Destination $ArchivePath -Force
     $Hash = Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256
     Write-Host "Build and package completed."
     Write-Host "Archive: $ArchivePath"
