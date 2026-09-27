@@ -225,6 +225,16 @@ void testInvalidSchemaAndUnavailableConfig()
 	CHECK(!invalid.settings.youtubeEnabled);
 	CHECK(invalid.sourceSchemaVersion == 0);
 
+	Config trailing("[EasyMultistream]\nSchemaVersion=1garbage\nYouTubeEnabled=true\n");
+	const auto trailingResult = easy_multistream::loadProfileSettings(trailing.get());
+	CHECK(trailingResult.status == easy_multistream::SettingsLoadStatus::InvalidSchema);
+	CHECK(!trailingResult.settings.youtubeEnabled);
+
+	Config overflow("[EasyMultistream]\nSchemaVersion=18446744073709551616\nYouTubeEnabled=true\n");
+	const auto overflowResult = easy_multistream::loadProfileSettings(overflow.get());
+	CHECK(overflowResult.status == easy_multistream::SettingsLoadStatus::InvalidSchema);
+	CHECK(!overflowResult.settings.youtubeEnabled);
+
 	const auto unavailable = easy_multistream::loadProfileSettings(nullptr);
 	CHECK(unavailable.status == easy_multistream::SettingsLoadStatus::Unavailable);
 	CHECK(easy_multistream::saveProfileSettings(nullptr, {}) == CONFIG_ERROR);

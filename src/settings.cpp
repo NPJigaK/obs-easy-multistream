@@ -13,7 +13,10 @@
 #endif
 #include <Windows.h>
 
+#include <charconv>
 #include <limits>
+#include <string>
+#include <system_error>
 
 namespace easy_multistream {
 namespace {
@@ -31,6 +34,28 @@ constexpr const char *kUnsupportedPlaintextKeys[] = {
 	"Key",
 };
 
+bool parseSchemaVersion(config_t *config, std::uint64_t &schema) noexcept
+{
+	const char *rawSchema = config_get_string(config, kSection, kSchemaVersion);
+	if (rawSchema == nullptr) {
+		return false;
+	}
+
+	try {
+		const std::string value(rawSchema);
+		if (value.empty()) {
+			return false;
+		}
+
+		const char *first = value.data();
+		const char *last = first + value.size();
+		const auto parsed = std::from_chars(first, last, schema, 10);
+		return parsed.ec == std::errc{} && parsed.ptr == last;
+	} catch (...) {
+		return false;
+	}
+}
+
 } // namespace
 
 SettingsLoadResult loadProfileSettings(config_t *config) noexcept
@@ -45,9 +70,8 @@ SettingsLoadResult loadProfileSettings(config_t *config) noexcept
 		return {{}, SettingsLoadStatus::Defaults, kSettingsSchemaVersion};
 	}
 
-	const std::uint64_t schema = hasSchema ? config_get_uint(config, kSection, kSchemaVersion)
-					       : kSettingsSchemaVersion;
-	if (schema == 0) {
+	std::uint64_t schema = kSettingsSchemaVersion;
+	if ((hasSchema && !parseSchemaVersion(config, schema)) || schema == 0) {
 		return {{}, SettingsLoadStatus::InvalidSchema, schema};
 	}
 	if (schema > kSettingsSchemaVersion) {
