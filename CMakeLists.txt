@@ -13,8 +13,10 @@ endif()
 include(compilerconfig)
 include(defaults)
 include(helpers)
+include(CTest)
 
 add_library(${CMAKE_PROJECT_NAME} MODULE)
+add_library(${CMAKE_PROJECT_NAME}-core STATIC)
 
 find_package(libobs REQUIRED)
 find_package(obs-frontend-api REQUIRED)
@@ -22,8 +24,12 @@ find_package(Qt6 REQUIRED COMPONENTS Core Widgets)
 
 target_link_libraries(
   ${CMAKE_PROJECT_NAME}
-  PRIVATE OBS::libobs OBS::obs-frontend-api Qt6::Core Qt6::Widgets
+  PRIVATE ${CMAKE_PROJECT_NAME}-core OBS::libobs OBS::obs-frontend-api Qt6::Core Qt6::Widgets
 )
+
+target_link_libraries(${CMAKE_PROJECT_NAME}-core PUBLIC OBS::libobs PRIVATE Advapi32)
+
+target_include_directories(${CMAKE_PROJECT_NAME}-core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 configure_file(src/version.hpp.in generated/version.hpp @ONLY)
 
@@ -38,6 +44,18 @@ target_sources(
     src/version.hpp.in
 )
 
+target_sources(
+  ${CMAKE_PROJECT_NAME}-core
+  PRIVATE
+    src/credential-vault.hpp
+    src/secure-buffer.cpp
+    src/secure-buffer.hpp
+    src/settings.cpp
+    src/settings.hpp
+    src/windows-credential-vault.cpp
+    src/windows-credential-vault.hpp
+)
+
 set_target_properties(
   ${CMAKE_PROJECT_NAME}
   PROPERTIES
@@ -47,3 +65,22 @@ set_target_properties(
 )
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
+
+if(BUILD_TESTING)
+  add_executable(${CMAKE_PROJECT_NAME}-tests)
+  target_sources(${CMAKE_PROJECT_NAME}-tests PRIVATE tests/unit-tests.cpp)
+  target_link_libraries(${CMAKE_PROJECT_NAME}-tests PRIVATE ${CMAKE_PROJECT_NAME}-core)
+
+  add_custom_command(
+    TARGET ${CMAKE_PROJECT_NAME}-tests
+    POST_BUILD
+    COMMAND
+      "${CMAKE_COMMAND}" -E copy_if_different $<TARGET_RUNTIME_DLLS:${CMAKE_PROJECT_NAME}-tests>
+      $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}-tests>
+    COMMAND_EXPAND_LISTS
+    COMMENT "Copy test runtime dependencies"
+    VERBATIM
+  )
+
+  add_test(NAME ${CMAKE_PROJECT_NAME}-unit COMMAND ${CMAKE_PROJECT_NAME}-tests)
+endif()
