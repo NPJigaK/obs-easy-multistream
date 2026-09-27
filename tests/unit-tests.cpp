@@ -270,6 +270,24 @@ void testInvalidSchemaAndUnavailableConfig()
 	CHECK(overflowResult.status == easy_multistream::SettingsLoadStatus::InvalidSchema);
 	CHECK(!overflowResult.settings.youtubeEnabled);
 
+	Config trailingBool("[EasyMultistream]\nSchemaVersion=1\nYouTubeEnabled=1garbage\n");
+	const auto trailingBoolResult = easy_multistream::loadProfileSettings(trailingBool.get());
+	CHECK(trailingBoolResult.status == easy_multistream::SettingsLoadStatus::InvalidSchema);
+	CHECK(!trailingBoolResult.settings.youtubeEnabled);
+
+	Config textBool("[EasyMultistream]\nSchemaVersion=1\nYouTubeEnabled=garbage\n");
+	const auto textBoolResult = easy_multistream::loadProfileSettings(textBool.get());
+	CHECK(textBoolResult.status == easy_multistream::SettingsLoadStatus::InvalidSchema);
+	CHECK(!textBoolResult.settings.youtubeEnabled);
+
+	Config missingEnabled("[EasyMultistream]\nSchemaVersion=1\n");
+	const auto missingEnabledResult = easy_multistream::loadProfileSettings(missingEnabled.get());
+	CHECK(missingEnabledResult.status == easy_multistream::SettingsLoadStatus::InvalidSchema);
+
+	Config missingSchema("[EasyMultistream]\nYouTubeEnabled=true\n");
+	const auto missingSchemaResult = easy_multistream::loadProfileSettings(missingSchema.get());
+	CHECK(missingSchemaResult.status == easy_multistream::SettingsLoadStatus::InvalidSchema);
+
 	const auto unavailable = easy_multistream::loadProfileSettings(nullptr);
 	CHECK(unavailable.status == easy_multistream::SettingsLoadStatus::Unavailable);
 	CHECK(easy_multistream::saveProfileSettings(nullptr, {}) == CONFIG_ERROR);

@@ -41,6 +41,8 @@ target_sources(
     src/dock-view.cpp
     src/dock-view.hpp
     src/plugin-main.cpp
+    src/settings-controller.cpp
+    src/settings-controller.hpp
     src/version.hpp.in
 )
 
@@ -83,4 +85,49 @@ if(BUILD_TESTING)
   )
 
   add_test(NAME ${CMAKE_PROJECT_NAME}-unit COMMAND ${CMAKE_PROJECT_NAME}-tests)
+
+  add_executable(${CMAKE_PROJECT_NAME}-ui-tests)
+  target_sources(
+    ${CMAKE_PROJECT_NAME}-ui-tests
+    PRIVATE src/dock-view.cpp src/dock-view.hpp tests/ui-tests.cpp
+  )
+  target_include_directories(${CMAKE_PROJECT_NAME}-ui-tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(${CMAKE_PROJECT_NAME}-ui-tests PRIVATE Qt6::Core Qt6::Widgets)
+
+  add_custom_command(
+    TARGET ${CMAKE_PROJECT_NAME}-ui-tests
+    POST_BUILD
+    COMMAND
+      "${CMAKE_COMMAND}" -E copy_if_different $<TARGET_RUNTIME_DLLS:${CMAKE_PROJECT_NAME}-ui-tests>
+      $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}-ui-tests>
+    COMMAND_EXPAND_LISTS
+    COMMENT "Copy UI test runtime dependencies"
+    VERBATIM
+  )
+
+  if(TARGET Qt6::QMinimalIntegrationPlugin)
+    add_custom_command(
+      TARGET ${CMAKE_PROJECT_NAME}-ui-tests
+      POST_BUILD
+      COMMAND
+        "${CMAKE_COMMAND}" -E make_directory
+        "$<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}-ui-tests>/platforms"
+      COMMAND
+        "${CMAKE_COMMAND}" -E copy_if_different $<TARGET_FILE:Qt6::QMinimalIntegrationPlugin>
+        "$<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}-ui-tests>/platforms"
+      COMMENT "Copy the minimal Qt platform plugin"
+      VERBATIM
+    )
+  endif()
+
+  add_test(
+    NAME ${CMAKE_PROJECT_NAME}-ui
+    COMMAND ${CMAKE_PROJECT_NAME}-ui-tests -platform minimal
+  )
+  add_test(
+    NAME ${CMAKE_PROJECT_NAME}-locales
+    COMMAND
+      "${CMAKE_COMMAND}" -DPROJECT_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR} -P
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/check-locales.cmake"
+  )
 endif()

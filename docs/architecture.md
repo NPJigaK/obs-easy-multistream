@@ -1,6 +1,6 @@
 # Architecture
 
-Easy Multistream is being built in small, reviewable slices. The current slice proves only that OBS can load the module and own a standard dock safely. It deliberately contains no streaming output code.
+Easy Multistream is being built in small, reviewable slices. The current slice adds profile-aware configuration and secure local credential storage to the verified OBS dock. It deliberately contains no streaming output code.
 
 ## v1 product boundary
 
@@ -22,13 +22,22 @@ OAuth, scheduled YouTube events, three or more destinations, custom output scene
 ```text
 OBS module entry point
   └─ PluginState (plugin-owned)
+      ├─ SettingsController (plugin-owned, UI-thread only)
+      │   ├─ active profile config (borrowed only during each call)
+      │   └─ WindowsCredentialVault
       └─ QPointer<DockView> (non-owning after registration)
 
 OBS dock wrapper (OBS-owned)
   └─ DockView (QWidget)
+
+Windows Credential Manager
+  └─ one Easy Multistream YouTube key for the current Windows account
+
+Current OBS profile/basic.ini
+  └─ SchemaVersion + YouTubeEnabled only
 ```
 
-The dock contains only a clearly labelled preview. It does not claim that either platform is connected or streaming.
+The dock can save the non-secret enable setting and a masked YouTube key. It clearly labels the configuration as a preview and does not claim that either platform is connected or streaming. The key is intentionally shared across OBS profiles in v1; only the enabled flag is profile-specific.
 
 ## Lifetime invariants
 
@@ -38,13 +47,26 @@ The dock contains only a clearly labelled preview. It does not claim that either
 4. `OBS_FRONTEND_EVENT_EXIT` is the last point at which the plugin removes its callback and dock through the Frontend API.
 5. Teardown is idempotent: the callback and dock are removed at most once.
 6. The plugin keeps only a `QPointer` to the OBS-owned widget.
-7. No private OBS C++ headers, global style sheets, updater, telemetry, or background threads are used.
+7. The controller never retains `config_t *` or a pointer returned by `config_get_string()` across a call.
+8. Profile-changing and shutdown events clear the secret input and disable further actions before teardown.
+9. No private OBS C++ headers, global style sheets, updater, telemetry, or background threads are used.
+
+## Configuration and credential invariants
+
+1. `basic.ini` contains only `SchemaVersion` and `YouTubeEnabled` under `[EasyMultistream]`.
+2. The stream key is written only to Windows Credential Manager and is never read back into the editor.
+3. Saving a key and changing a profile's enabled flag are independent operations; there is no cross-store transaction to partially commit.
+4. An explicit Save Key action requires a non-empty, valid key. Deleting the shared key requires confirmation and does not rewrite any profile setting.
+5. An enabled profile without a stored key is treated as incomplete and cannot stream until a new key is saved. A profile cannot be newly enabled while the key is missing.
+6. Invalid and unknown future schemas are read-only and are never downgraded by this version.
+7. A failed safe-save restores the previous in-memory non-secret settings.
+8. Credential failure cannot alter the OBS primary output; this slice has no output APIs at all.
 
 ## Planned runtime boundary
 
-The streaming implementation will be added only after this scaffold is verified inside OBS. Its controller will be owned by the plugin context, not by the dock. The dock will render immutable status snapshots and may be closed without affecting outputs. OBS callbacks and output callbacks will carry a session generation so stale events cannot mutate a newer session.
+The streaming implementation will be added only after this configuration slice is verified inside OBS. Its session controller will be owned by the plugin context, not by the dock or settings controller. The dock will render immutable status snapshots and may be closed without affecting outputs. OBS callbacks and output callbacks will carry a session generation so stale events cannot mutate a newer session.
 
-The future secondary output will reference the native primary encoders but will own its own service and output. Release order and failure paths will be tested before adding automatic reconnect or credential storage.
+The future secondary output will reference the native primary encoders but will own its own service and output. Release order and failure paths will be tested before adding automatic reconnect.
 
 ## Packaging
 

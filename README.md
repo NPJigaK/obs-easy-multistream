@@ -5,7 +5,7 @@
 
 A lightweight OBS Studio plugin intended to add YouTube multistreaming without replacing OBS's native Twitch workflow or running a second video encode.
 
-> **Pre-alpha:** the repository currently contains a buildable OBS dock scaffold only. It does not stream to YouTube yet.
+> **Pre-alpha:** the repository currently contains a profile-aware configuration preview. It does not stream to YouTube yet.
 
 ## Intended v1 experience
 
@@ -20,16 +20,20 @@ The first version will use a reusable YouTube custom stream key with YouTube Aut
 
 ## Current status
 
-The current scaffold provides:
+The current preview provides:
 
 - an OBS module built with the official plugin-template CMake infrastructure;
 - a standard dock registered through the public OBS Frontend API;
+- a profile-scoped YouTube enable setting saved atomically in the active OBS profile;
+- a masked stream-key field backed by Windows Credential Manager;
+- explicit handling for OBS profile changes, theme changes, dock closure, and shutdown;
+- unit tests for settings parsing, failed-save rollback, secret validation, and the credential backend;
 - English and Japanese UI resources;
 - explicit OBS-owned widget lifetime handling;
 - a pinned Windows x64 build against OBS Studio 32.2.2;
 - an installer-free portable ZIP with a validated directory layout.
 
-It intentionally does **not** contain output, encoder, credential, profile, network, or Start/Stop logic yet. See [the architecture note](docs/architecture.md) for the boundaries and rollout order.
+It intentionally does **not** create a service, output, encoder, network connection, or Start/Stop hook yet. Entering settings in this preview cannot start a YouTube stream. See [the architecture note](docs/architecture.md) for the boundaries and rollout order and [the security note](docs/security.md) for the credential and memory boundaries.
 
 ## Compatibility
 

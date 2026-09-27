@@ -56,6 +56,25 @@ bool parseSchemaVersion(config_t *config, std::uint64_t &schema) noexcept
 	}
 }
 
+bool parseYouTubeEnabled(config_t *config, bool &enabled) noexcept
+{
+	const char *rawEnabled = config_get_string(config, kSection, kYouTubeEnabled);
+	if (rawEnabled == nullptr) {
+		return false;
+	}
+
+	const std::string_view value(rawEnabled);
+	if (value == "true") {
+		enabled = true;
+		return true;
+	}
+	if (value == "false") {
+		enabled = false;
+		return true;
+	}
+	return false;
+}
+
 struct ConfigValueSnapshot {
 	bool present = false;
 	std::string value;
@@ -97,8 +116,8 @@ SettingsLoadResult loadProfileSettings(config_t *config) noexcept
 		return {{}, SettingsLoadStatus::Defaults, kSettingsSchemaVersion};
 	}
 
-	std::uint64_t schema = kSettingsSchemaVersion;
-	if ((hasSchema && !parseSchemaVersion(config, schema)) || schema == 0) {
+	std::uint64_t schema = 0;
+	if (!hasSchema || !parseSchemaVersion(config, schema) || schema == 0) {
 		return {{}, SettingsLoadStatus::InvalidSchema, schema};
 	}
 	if (schema > kSettingsSchemaVersion) {
@@ -106,7 +125,9 @@ SettingsLoadResult loadProfileSettings(config_t *config) noexcept
 	}
 
 	Settings settings;
-	settings.youtubeEnabled = config_get_bool(config, kSection, kYouTubeEnabled);
+	if (!hasEnabled || !parseYouTubeEnabled(config, settings.youtubeEnabled)) {
+		return {{}, SettingsLoadStatus::InvalidSchema, schema};
+	}
 	return {settings, SettingsLoadStatus::Loaded, schema};
 }
 
