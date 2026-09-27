@@ -17,6 +17,7 @@ include(CTest)
 
 add_library(${CMAKE_PROJECT_NAME} MODULE)
 add_library(${CMAKE_PROJECT_NAME}-core STATIC)
+add_library(${CMAKE_PROJECT_NAME}-session-core STATIC)
 
 find_package(libobs REQUIRED)
 find_package(obs-frontend-api REQUIRED)
@@ -30,6 +31,12 @@ target_link_libraries(
 target_link_libraries(${CMAKE_PROJECT_NAME}-core PUBLIC OBS::libobs PRIVATE Advapi32)
 
 target_include_directories(${CMAKE_PROJECT_NAME}-core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+target_sources(
+  ${CMAKE_PROJECT_NAME}-session-core
+  PRIVATE src/session-coordinator.cpp src/session-coordinator.hpp
+)
+target_include_directories(${CMAKE_PROJECT_NAME}-session-core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 configure_file(src/version.hpp.in generated/version.hpp @ONLY)
 
@@ -85,6 +92,11 @@ if(BUILD_TESTING)
   )
 
   add_test(NAME ${CMAKE_PROJECT_NAME}-unit COMMAND ${CMAKE_PROJECT_NAME}-tests)
+
+  add_executable(${CMAKE_PROJECT_NAME}-session-tests)
+  target_sources(${CMAKE_PROJECT_NAME}-session-tests PRIVATE tests/session-tests.cpp)
+  target_link_libraries(${CMAKE_PROJECT_NAME}-session-tests PRIVATE ${CMAKE_PROJECT_NAME}-session-core)
+  add_test(NAME ${CMAKE_PROJECT_NAME}-session COMMAND ${CMAKE_PROJECT_NAME}-session-tests)
 
   add_executable(${CMAKE_PROJECT_NAME}-ui-tests)
   target_sources(
