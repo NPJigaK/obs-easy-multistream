@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include "session-coordinator.hpp"
+
 #include <QByteArray>
 #include <QPointer>
 #include <QString>
@@ -25,10 +27,20 @@ struct DockText {
 	QString destinations;
 	QString primaryName;
 	QString primaryStatus;
+	QString nativeTwitch;
+	QString nativeYouTube;
+	QString nativeNotStreaming;
+	QString nativeStarting;
+	QString nativeStreaming;
+	QString nativeStopping;
+	QString nativeUnavailable;
 	QString youtubeName;
 	QString setup;
 	QString profileLabel;
 	QString enableYouTube;
+	QString serverUrlLabel;
+	QString serverUrlPlaceholder;
+	QString saveServerUrl;
 	QString credentialLabel;
 	QString streamKeyLabel;
 	QString saveKey;
@@ -41,10 +53,24 @@ struct DockText {
 	QString credentialUnavailable;
 	QString youtubeDisabled;
 	QString youtubeReady;
+	QString youtubeMissingServerUrl;
 	QString youtubeMissingKey;
 	QString youtubeUnavailable;
+	QString youtubeRequiresTwitch;
+	QString youtubeNotStreaming;
+	QString youtubeConnecting;
+	QString youtubeStreaming;
+	QString youtubeReconnecting;
+	QString youtubeStopping;
+	QString youtubeFailed;
+	QString youtubeSetupRequired;
+	QString retryYouTube;
 	QString noticePreview;
 	QString noticeProfileSaved;
+	QString noticeServerUrlSaved;
+	QString noticeMissingServerUrl;
+	QString noticeInvalidServerUrl;
+	QString noticeServerUrlTooLong;
 	QString noticeKeySaved;
 	QString noticeKeyRemoved;
 	QString noticeMissingKey;
@@ -60,6 +86,7 @@ struct DockText {
 	QString noticeFutureSettings;
 	QString noticeSettingsSaveFailed;
 	QString noticeInternalError;
+	QString noticeYouTubeFailed;
 	QString removeKeyTitle;
 	QString removeKeyMessage;
 };
@@ -73,6 +100,10 @@ enum class CredentialDisplayState {
 enum class DockNotice {
 	Preview,
 	ProfileSaved,
+	ServerUrlSaved,
+	MissingServerUrl,
+	InvalidServerUrl,
+	ServerUrlTooLong,
 	KeySaved,
 	KeyRemoved,
 	MissingKey,
@@ -92,22 +123,28 @@ enum class DockNotice {
 
 struct DockState {
 	QString profileName;
+	QString youtubeServerUrl;
 	bool settingsEditable = false;
 	bool youtubeEnabled = false;
 	CredentialDisplayState credential = CredentialDisplayState::Unavailable;
 	DockNotice notice = DockNotice::Preview;
+	bool runtimeAvailable = false;
+	SessionSnapshot session;
 };
 
 class DockView final : public QWidget {
 public:
 	using EnabledHandler = std::function<void(bool)>;
+	using SaveServerUrlHandler = std::function<void(QByteArray)>;
 	using SaveKeyHandler = std::function<void(QByteArray)>;
 	using RemoveKeyHandler = std::function<void()>;
+	using RetryYouTubeHandler = std::function<void()>;
 
 	explicit DockView(DockText text, QWidget *parent = nullptr);
 
-	void bindActions(QObject *context, EnabledHandler enabledHandler, SaveKeyHandler saveKeyHandler,
-			 RemoveKeyHandler removeKeyHandler);
+	void bindActions(QObject *context, EnabledHandler enabledHandler, SaveServerUrlHandler saveServerUrlHandler,
+			 SaveKeyHandler saveKeyHandler, RemoveKeyHandler removeKeyHandler,
+			 RetryYouTubeHandler retryYouTubeHandler);
 	void applyState(const DockState &state);
 	void clearStreamKey();
 	void requestCredentialRemovalConfirmation(QObject *context, RemoveKeyHandler confirmedHandler);
@@ -120,12 +157,17 @@ private:
 
 	DockText text_;
 	QLabel *profileNameLabel_ = nullptr;
+	QLabel *primaryDestinationLabel_ = nullptr;
+	QLabel *primaryStatusLabel_ = nullptr;
 	QLabel *youtubeStatusLabel_ = nullptr;
 	QCheckBox *youtubeEnabledCheckBox_ = nullptr;
+	QLineEdit *serverUrlEdit_ = nullptr;
+	QPushButton *saveServerUrlButton_ = nullptr;
 	QLabel *credentialStatusLabel_ = nullptr;
 	QLineEdit *streamKeyEdit_ = nullptr;
 	QPushButton *saveKeyButton_ = nullptr;
 	QPushButton *removeKeyButton_ = nullptr;
+	QPushButton *retryYouTubeButton_ = nullptr;
 	QLabel *noticeLabel_ = nullptr;
 	QPointer<QMessageBox> credentialRemovalDialog_;
 };

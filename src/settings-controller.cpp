@@ -61,6 +61,32 @@ DockNotice validationNotice(StreamKeyValidationError error) noexcept
 	return DockNotice::InternalError;
 }
 
+DockNotice validationNotice(YouTubeServerUrlValidationError error) noexcept
+{
+	switch (error) {
+	case YouTubeServerUrlValidationError::None:
+		return DockNotice::Preview;
+	case YouTubeServerUrlValidationError::Empty:
+		return DockNotice::MissingServerUrl;
+	case YouTubeServerUrlValidationError::TooLong:
+		return DockNotice::ServerUrlTooLong;
+	case YouTubeServerUrlValidationError::EmbeddedNull:
+	case YouTubeServerUrlValidationError::WhitespaceOrControlCharacter:
+	case YouTubeServerUrlValidationError::InvalidUtf8:
+	case YouTubeServerUrlValidationError::InvalidScheme:
+	case YouTubeServerUrlValidationError::MissingHostname:
+	case YouTubeServerUrlValidationError::UnsupportedHostname:
+	case YouTubeServerUrlValidationError::UserInfoNotAllowed:
+	case YouTubeServerUrlValidationError::InvalidPort:
+	case YouTubeServerUrlValidationError::QueryNotAllowed:
+	case YouTubeServerUrlValidationError::FragmentNotAllowed:
+	case YouTubeServerUrlValidationError::InvalidPath:
+		return DockNotice::InvalidServerUrl;
+	}
+
+	return DockNotice::InternalError;
+}
+
 QString currentProfileName()
 {
 	char *rawName = obs_frontend_get_current_profile();
@@ -97,6 +123,14 @@ SettingsController::SettingsController(DockView *view, QObject *parent)
 			} catch (...) {
 				blog(LOG_ERROR,
 				     "[obs-easy-multistream] Updating the profile setting failed unexpectedly");
+					renderInternalError();
+			}
+		},
+		[this](QByteArray serverUrl) {
+			try {
+				handleSaveServerUrl(std::move(serverUrl));
+			} catch (...) {
+				blog(LOG_ERROR, "[obs-easy-multistream] Saving the server URL failed unexpectedly");
 				renderInternalError();
 			}
 		},
@@ -113,12 +147,17 @@ SettingsController::SettingsController(DockView *view, QObject *parent)
 				handleRemoveKey();
 			} catch (...) {
 				blog(LOG_ERROR, "[obs-easy-multistream] Removing the credential failed unexpectedly");
-				renderInternalError();
+				 renderInternalError();
+			}
+		},
+		[this]() {
+			if (retryYouTubeHandler_) {
+				retryYouTubeHandler_();
 			}
 		});
 }
 
-void SettingsController::loadCurrentProfile(DockNotice successNotice)
+void SettingsController::loadCurrentProfile(DockNotice successNotice, bool profileChanged)
 {
 	if (closing_) {
 		return;
@@ -133,13 +172,17 @@ void SettingsController::loadCurrentProfile(DockNotice successNotice)
 	settings_ = loaded.settings;
 	profileName_ = currentProfileName();
 	loadStatus_ = loaded.status;
-	settingsEditable_ = loadStatus_ == SettingsLoadStatus::Loaded || loadStatus_ == SettingsLoadStatus::Defaults;
+	settingsEditable_ = loadStatus_ == SettingsLoadStatus::Loaded || loadStatus_ == SettingsLoadStatus::Defaults ||
+			    loadStatus_ == SettingsLoadStatus::SetupRequired;
 	credentialState_ = refreshCredentialState();
 
 	DockNotice notice = successNotice;
 	switch (loadStatus_) {
 	case SettingsLoadStatus::Loaded:
 	case SettingsLoadStatus::Defaults:
+		break;
+	case SettingsLoadStatus::SetupRequired:
+		notice = DockNotice::MissingServerUrl;
 		break;
 	case SettingsLoadStatus::InvalidSchema:
 		notice = DockNotice::InvalidSettings;
@@ -154,12 +197,16 @@ void SettingsController::loadCurrentProfile(DockNotice successNotice)
 
 	const bool mayReplaceSuccessNotice = notice == DockNotice::Preview || notice == DockNotice::ProfileSaved;
 	if (mayReplaceSuccessNotice && settingsEditable_ && settings_.youtubeEnabled &&
+	    settings_.youtubeServerUrl.empty()) {
+		notice = DockNotice::MissingServerUrl;
+	} else if (mayReplaceSuccessNotice && settingsEditable_ && settings_.youtubeEnabled &&
 	    credentialState_ == CredentialDisplayState::Missing) {
 		notice = DockNotice::MissingKey;
 	} else if (mayReplaceSuccessNotice && settingsEditable_ && settings_.youtubeEnabled &&
 		   credentialState_ == CredentialDisplayState::Unavailable) {
 		notice = DockNotice::CredentialUnavailable;
 	}
+	notifySettingsChanged(profileChanged);
 	render(notice);
 }
 
@@ -189,11 +236,34 @@ void SettingsController::refreshTheme()
 	}
 }
 
+void SettingsController::setSettingsChangedHandler(SettingsChangedHandler handler)
+{
+	settingsChangedHandler_ = std::move(handler);
+}
+
+void SettingsController::setRetryYouTubeHandler(std::function<void()> handler)
+{
+	retryYouTubeHandler_ = std::move(handler);
+}
+
+void SettingsController::applyRuntimeSnapshot(SessionSnapshot snapshot)
+{
+	if (closing_) {
+		return;
+	}
+	hasRuntimeSnapshot_ = true;
+	runtimeSnapshot_ = std::move(snapshot);
+	render(lastNotice_);
+}
+
 void SettingsController::shutdown() noexcept
 {
 	closing_ = true;
 	++contextGeneration_;
 	settingsEditable_ = false;
+	settingsChangedHandler_ = {};
+	retryYouTubeHandler_ = {};
+	hasRuntimeSnapshot_ = false;
 	if (view_ != nullptr) {
 		try {
 			view_->cancelCredentialRemoval();
@@ -217,7 +287,8 @@ void SettingsController::handleEnabledChanged(bool enabled)
 		loadCurrentProfile(DockNotice::ProfileUnavailable);
 		return;
 	}
-	if (loaded.status != SettingsLoadStatus::Loaded && loaded.status != SettingsLoadStatus::Defaults) {
+	if (loaded.status != SettingsLoadStatus::Loaded && loaded.status != SettingsLoadStatus::Defaults &&
+	    loaded.status != SettingsLoadStatus::SetupRequired) {
 		loadCurrentProfile(loaded.status == SettingsLoadStatus::UnsupportedFutureSchema
 					   ? DockNotice::FutureSettings
 					   : DockNotice::InvalidSettings);
@@ -229,13 +300,17 @@ void SettingsController::handleEnabledChanged(bool enabled)
 	settingsEditable_ = true;
 	credentialState_ = refreshCredentialState();
 
+	if (enabled && settings_.youtubeServerUrl.empty()) {
+		render(DockNotice::MissingServerUrl);
+		return;
+	}
 	if (enabled && credentialState_ != CredentialDisplayState::Present) {
 		render(credentialState_ == CredentialDisplayState::Unavailable ? DockNotice::CredentialUnavailable
 									       : DockNotice::MissingKey);
 		return;
 	}
 
-	Settings desired;
+	Settings desired = settings_;
 	desired.youtubeEnabled = enabled;
 	if (saveProfileSettings(config, desired) != CONFIG_SUCCESS) {
 		blog(LOG_WARNING, "[obs-easy-multistream] Failed to save the current OBS profile settings");
@@ -244,6 +319,51 @@ void SettingsController::handleEnabledChanged(bool enabled)
 	}
 
 	loadCurrentProfile(DockNotice::ProfileSaved);
+}
+
+void SettingsController::handleSaveServerUrl(QByteArray serverUrlBytes)
+{
+	if (closing_) {
+		return;
+	}
+
+	config_t *config = obs_frontend_get_profile_config();
+	const SettingsLoadResult loaded = loadProfileSettings(config);
+	if (loaded.status == SettingsLoadStatus::Unavailable) {
+		loadCurrentProfile(DockNotice::ProfileUnavailable);
+		return;
+	}
+	if (loaded.status != SettingsLoadStatus::Loaded && loaded.status != SettingsLoadStatus::Defaults &&
+	    loaded.status != SettingsLoadStatus::SetupRequired) {
+		loadCurrentProfile(loaded.status == SettingsLoadStatus::UnsupportedFutureSchema
+					   ? DockNotice::FutureSettings
+					   : DockNotice::InvalidSettings);
+		return;
+	}
+
+	settings_ = loaded.settings;
+	profileName_ = currentProfileName();
+	loadStatus_ = loaded.status;
+	settingsEditable_ = true;
+	credentialState_ = refreshCredentialState();
+
+	const std::string_view serverUrl(serverUrlBytes.constData(),
+					 static_cast<std::size_t>(serverUrlBytes.size()));
+	const YouTubeServerUrlValidationError validation = validateYouTubeServerUrl(serverUrl);
+	if (validation != YouTubeServerUrlValidationError::None) {
+		render(validationNotice(validation));
+		return;
+	}
+
+	Settings desired = settings_;
+	desired.youtubeServerUrl.assign(serverUrl.data(), serverUrl.size());
+	if (saveProfileSettings(config, desired) != CONFIG_SUCCESS) {
+		blog(LOG_WARNING, "[obs-easy-multistream] Failed to save the YouTube server URL");
+		loadCurrentProfile(DockNotice::SettingsSaveFailed);
+		return;
+	}
+
+	loadCurrentProfile(DockNotice::ServerUrlSaved);
 }
 
 void SettingsController::handleSaveKey(QByteArray streamKeyBytes)
@@ -259,7 +379,8 @@ void SettingsController::handleSaveKey(QByteArray streamKeyBytes)
 		loadCurrentProfile(DockNotice::ProfileUnavailable);
 		return;
 	}
-	if (loaded.status != SettingsLoadStatus::Loaded && loaded.status != SettingsLoadStatus::Defaults) {
+	if (loaded.status != SettingsLoadStatus::Loaded && loaded.status != SettingsLoadStatus::Defaults &&
+	    loaded.status != SettingsLoadStatus::SetupRequired) {
 		loadCurrentProfile(loaded.status == SettingsLoadStatus::UnsupportedFutureSchema
 					   ? DockNotice::FutureSettings
 					   : DockNotice::InvalidSettings);
@@ -302,7 +423,8 @@ void SettingsController::handleRemoveKey()
 
 	config_t *config = obs_frontend_get_profile_config();
 	const SettingsLoadResult loaded = loadProfileSettings(config);
-	if (loaded.status != SettingsLoadStatus::Loaded && loaded.status != SettingsLoadStatus::Defaults) {
+	if (loaded.status != SettingsLoadStatus::Loaded && loaded.status != SettingsLoadStatus::Defaults &&
+	    loaded.status != SettingsLoadStatus::SetupRequired) {
 		DockNotice notice = DockNotice::InvalidSettings;
 		if (loaded.status == SettingsLoadStatus::UnsupportedFutureSchema) {
 			notice = DockNotice::FutureSettings;
@@ -340,7 +462,8 @@ void SettingsController::commitRemoveKey(std::uint64_t generation, QString profi
 	}
 
 	const SettingsLoadResult loaded = loadProfileSettings(obs_frontend_get_profile_config());
-	if (loaded.status != SettingsLoadStatus::Loaded && loaded.status != SettingsLoadStatus::Defaults) {
+	if (loaded.status != SettingsLoadStatus::Loaded && loaded.status != SettingsLoadStatus::Defaults &&
+	    loaded.status != SettingsLoadStatus::SetupRequired) {
 		loadCurrentProfile(loaded.status == SettingsLoadStatus::UnsupportedFutureSchema
 					   ? DockNotice::FutureSettings
 				   : loaded.status == SettingsLoadStatus::Unavailable ? DockNotice::ProfileUnavailable
@@ -370,12 +493,31 @@ void SettingsController::render(DockNotice notice)
 	}
 
 	DockState state;
+	lastNotice_ = notice;
 	state.profileName = profileName_;
+	state.youtubeServerUrl = QString::fromUtf8(settings_.youtubeServerUrl.data(),
+					  static_cast<qsizetype>(settings_.youtubeServerUrl.size()));
 	state.settingsEditable = settingsEditable_;
 	state.youtubeEnabled = settings_.youtubeEnabled;
 	state.credential = credentialState_;
 	state.notice = notice;
+	state.runtimeAvailable = hasRuntimeSnapshot_;
+	if (hasRuntimeSnapshot_) {
+		state.session = runtimeSnapshot_;
+	}
 	view_->applyState(state);
+}
+
+void SettingsController::notifySettingsChanged(bool profileChanged)
+{
+	if (closing_ || !settingsChangedHandler_) {
+		return;
+	}
+	try {
+		settingsChangedHandler_(settings_, credentialState_, profileChanged);
+	} catch (...) {
+		blog(LOG_ERROR, "[obs-easy-multistream] Runtime settings notification failed");
+	}
 }
 
 void SettingsController::renderInternalError() noexcept

@@ -25,7 +25,13 @@ find_package(Qt6 REQUIRED COMPONENTS Core Widgets)
 
 target_link_libraries(
   ${CMAKE_PROJECT_NAME}
-  PRIVATE ${CMAKE_PROJECT_NAME}-core OBS::libobs OBS::obs-frontend-api Qt6::Core Qt6::Widgets
+  PRIVATE
+    ${CMAKE_PROJECT_NAME}-core
+    ${CMAKE_PROJECT_NAME}-session-core
+    OBS::libobs
+    OBS::obs-frontend-api
+    Qt6::Core
+    Qt6::Widgets
 )
 
 target_link_libraries(${CMAKE_PROJECT_NAME}-core PUBLIC OBS::libobs PRIVATE Advapi32)
@@ -48,9 +54,13 @@ target_sources(
     src/dock-view.cpp
     src/dock-view.hpp
     src/plugin-main.cpp
+    src/runtime-controller.cpp
+    src/runtime-controller.hpp
     src/settings-controller.cpp
     src/settings-controller.hpp
     src/version.hpp.in
+    src/youtube-output-adapter.cpp
+    src/youtube-output-adapter.hpp
 )
 
 target_sources(
@@ -97,6 +107,30 @@ if(BUILD_TESTING)
   target_sources(${CMAKE_PROJECT_NAME}-session-tests PRIVATE tests/session-tests.cpp)
   target_link_libraries(${CMAKE_PROJECT_NAME}-session-tests PRIVATE ${CMAKE_PROJECT_NAME}-session-core)
   add_test(NAME ${CMAKE_PROJECT_NAME}-session COMMAND ${CMAKE_PROJECT_NAME}-session-tests)
+
+  add_executable(${CMAKE_PROJECT_NAME}-runtime-tests)
+  target_sources(
+    ${CMAKE_PROJECT_NAME}-runtime-tests
+    PRIVATE src/runtime-controller.cpp src/runtime-controller.hpp tests/runtime-controller-tests.cpp
+  )
+  target_include_directories(${CMAKE_PROJECT_NAME}-runtime-tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+  target_link_libraries(
+    ${CMAKE_PROJECT_NAME}-runtime-tests
+    PRIVATE ${CMAKE_PROJECT_NAME}-core ${CMAKE_PROJECT_NAME}-session-core
+  )
+
+  add_custom_command(
+    TARGET ${CMAKE_PROJECT_NAME}-runtime-tests
+    POST_BUILD
+    COMMAND
+      "${CMAKE_COMMAND}" -E copy_if_different $<TARGET_RUNTIME_DLLS:${CMAKE_PROJECT_NAME}-runtime-tests>
+      $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}-runtime-tests>
+    COMMAND_EXPAND_LISTS
+    COMMENT "Copy runtime test dependencies"
+    VERBATIM
+  )
+
+  add_test(NAME ${CMAKE_PROJECT_NAME}-runtime COMMAND ${CMAKE_PROJECT_NAME}-runtime-tests)
 
   add_executable(${CMAKE_PROJECT_NAME}-ui-tests)
   target_sources(

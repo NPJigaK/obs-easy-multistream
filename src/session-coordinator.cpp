@@ -187,6 +187,17 @@ SessionTransition SessionCoordinator::youtubeReconnectSucceeded(OutputLease leas
 	return result(std::nullopt, true);
 }
 
+SessionTransition SessionCoordinator::retryYouTube()
+{
+	if (snapshot_.phase != SessionPhase::Ready || snapshot_.youtube != YouTubeStreamState::Failed ||
+	    snapshot_.youtubeLease.has_value() || !mayStartYouTube()) {
+		return result();
+	}
+
+	const auto start = startYouTubeIfEligible();
+	return result(start, start.has_value());
+}
+
 SessionTransition SessionCoordinator::youtubeReleased(OutputLease lease)
 {
 	if (retiringYouTubeLease_.has_value() && *retiringYouTubeLease_ == lease) {

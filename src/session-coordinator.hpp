@@ -117,6 +117,7 @@ public:
 	SessionTransition youtubeStarted(OutputLease lease);
 	SessionTransition youtubeReconnecting(OutputLease lease);
 	SessionTransition youtubeReconnectSucceeded(OutputLease lease);
+	SessionTransition retryYouTube();
 
 	// This is the single terminal event for every outcome, including a rejected
 	// start. The adapter may call it only after the OBS output signal callback has
