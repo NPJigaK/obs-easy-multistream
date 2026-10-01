@@ -1,6 +1,6 @@
 # OBS output integration contract
 
-This note records the ownership and event rules for the future YouTube RTMPS adapter. The session state library in the current stacked change deliberately contains no OBS calls or network behavior.
+This note records the ownership and event rules implemented by the YouTube RTMPS adapter. The session state library remains free of OBS calls and network behavior; OBS-specific ownership is confined to the runtime bridge and adapter.
 
 ## Pinned source basis
 
@@ -22,14 +22,20 @@ The adapter may prepare and start YouTube only after `OBS_FRONTEND_EVENT_STREAMI
 1. Obtain a strong reference from `obs_frontend_get_streaming_output()`.
 2. Read the native video and first audio encoder, then take explicit encoder references.
 3. Reject unsupported or missing encoders without changing the native stream.
-4. Read and validate the saved YouTube key immediately before use.
-5. Create one `rtmp_custom` service with the fixed YouTube RTMPS server and the temporary key.
+4. Read and validate the saved YouTube RTMPS Stream URL and saved YouTube key immediately before use. The URL is copied from YouTube Studio, remains user-editable, and is restricted to a single-label host under `*.rtmps.youtube.com`.
+5. Create one `rtmp_custom` service with the validated user-provided RTMPS Stream URL and the temporary key.
 6. Create one `rtmp_output`, attach the native encoders, attach the service, and connect signals.
 7. Call `obs_output_start()` and treat its `true` return only as an accepted asynchronous start, not as a successful connection. The session remains Connecting until the output's `start` signal is observed.
 
 The adapter must not update, rescale, or replace media on the shared native encoders. It must never call `obs_frontend_streaming_start()` or `obs_frontend_streaming_stop()`.
 
-Before creating the YouTube output, the adapter validates that the shared video/audio configuration is supported by the first implementation, including H.264 video and AAC audio. AV1, HEVC, unsupported HDR combinations, missing tracks, and ambiguous multitrack layouts fail only the YouTube attempt. The YouTube output does not set a scaled size or modify a native encoder setting.
+Before creating the YouTube output, the adapter validates that the shared video/audio configuration is supported, including exactly one H.264 video encoder and an AAC main audio encoder at index 0. A Twitch VOD audio encoder at index 1 is allowed but is not attached to YouTube. AV1, HEVC, unsupported HDR combinations, missing tracks, and multiple native video encoders fail only the YouTube attempt. The YouTube output does not set a scaled size or modify a native encoder setting.
+
+## YouTube Dual stream boundary
+
+The first output adapter sends one horizontal 16:9 stream to YouTube. Users may enable YouTube's automatic Dual stream in the Live Control Room before going live; YouTube then creates the vertical 9:16 feed, normally from a centre crop of the horizontal input. Both views use YouTube's shared live-stream experience, while Easy Multistream owns only one local YouTube output and one shared video encoder.
+
+The adapter does not select YouTube's `Encoder` mode for the vertical preview and does not create a second local stream key, scene, view, or video encoder. Sending a separately composed 9:16 feed through a second key is a future feature with different ownership, GPU/CPU, bandwidth, credential, and state-machine requirements. The vertical format must be configured before the stream starts; it cannot be added after the stream is already live. See the [YouTube setup note](youtube-setup.md) and [YouTube's official dual-stream instructions](https://support.google.com/youtube/answer/2474026?hl=en).
 
 The Frontend bridge assigns a `NativeLease` when `STREAMING_STARTING` is accepted and passes that same value to the corresponding Started, Stopping, and Stopped state events. If a new native attempt begins before an older stop notification is delivered, the bridge retains the stopping lease separately. A late stop for the older lease must never be labeled as belonging to the new attempt. Profile changes invalidate the native generation before new service values are loaded.
 
@@ -67,13 +73,13 @@ invalidate the lease and reject new work
 
 ## Stop is not teardown completion
 
-`STREAMING_STOPPING` is the point at which the adapter requests `obs_output_stop()` for YouTube. Waiting until `STREAMING_STOPPED` risks allowing the native encoder lifecycle to advance first.
+`STREAMING_STOPPING` is the point at which the adapter requests a forced stop of the YouTube output through `obs_output_force_stop()`. Waiting until `STREAMING_STOPPED` risks allowing the native encoder lifecycle to advance first.
 
 The OBS output `stop` signal is not a safe destruction boundary. In OBS 32.2.2 it can be emitted while the internal end-data-capture thread is still removing encoder callbacks and deactivating the service. A signal callback therefore copies only non-secret status values and posts work to the owning controller. It must not release the final output reference, service, or callback context inside the callback.
 
-`SessionCoordinator::youtubeReleased()` is the single adapter-level terminal event, including when `obs_output_start()` rejects synchronously. It may be sent only after the raw signal callback has returned and all resources for that `OutputLease` have been released. A rapid OBS restart therefore cannot create a new YouTube output while the previous attempt is still tearing down, and there is no separate ambiguous "start failed" event that could bypass this boundary.
+`SessionCoordinator::youtubeReleased()` is the single adapter-level terminal event, including when `obs_output_start()` rejects synchronously. It may be sent only after the raw signal callback has returned and all resources for that `OutputLease` have been released. A rapid OBS restart or explicit retry therefore cannot create a new YouTube output while the previous attempt is still tearing down, and there is no separate ambiguous "start failed" event that could bypass this boundary.
 
-The reaper owns the strong references and callback context until teardown completes. `obs_output_release()` may wait for OBS stopping events and join internal RTMP/data-capture threads, so it is not performed unconditionally on the UI thread. Completion is delivered exactly once. If complete release cannot be proven, the bridge keeps the teardown barrier closed and reports that OBS must be restarted; it never uses a timeout to permit overlapping outputs. Plugin shutdown must keep the reaper and its code loaded until completion; the exact bounded shutdown/join policy is an implementation gate for the adapter slice.
+The reaper owns the strong references and callback context until teardown completes. `obs_output_force_stop()` and final output release may wait for OBS RTMP/data-capture threads, so normal teardown runs on the reaper rather than the UI thread. Completion is delivered exactly once. Plugin shutdown synchronously joins the reaper before the module can unload; this favors code-lifetime safety, with the known tradeoff that a stalled network connect can delay OBS shutdown until the underlying OBS timeout completes.
 
 ## Signal and thread mapping
 

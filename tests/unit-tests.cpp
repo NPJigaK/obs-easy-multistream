@@ -20,6 +20,7 @@
 namespace {
 
 int failures = 0;
+constexpr std::string_view kValidYouTubeServerUrl = "rtmps://a.rtmps.youtube.com/live2";
 
 #define CHECK(expression)                                                                                              \
 	do {                                                                                                           \
@@ -150,6 +151,7 @@ void testSettingsDefaults()
 	const auto loaded = easy_multistream::loadProfileSettings(config.get());
 	CHECK(loaded.status == easy_multistream::SettingsLoadStatus::Defaults);
 	CHECK(!loaded.settings.youtubeEnabled);
+	CHECK(loaded.settings.youtubeServerUrl.empty());
 	CHECK(loaded.sourceSchemaVersion == easy_multistream::kSettingsSchemaVersion);
 }
 
@@ -158,11 +160,13 @@ void testSettingsRoundTripAndPlaintextRemoval()
 	Config config("[EasyMultistream]\nStreamKey=must-not-survive\n");
 	easy_multistream::Settings settings;
 	settings.youtubeEnabled = true;
+	settings.youtubeServerUrl = kValidYouTubeServerUrl;
 	easy_multistream::writeProfileSettings(config.get(), settings);
 
 	const auto loaded = easy_multistream::loadProfileSettings(config.get());
 	CHECK(loaded.status == easy_multistream::SettingsLoadStatus::Loaded);
 	CHECK(loaded.settings.youtubeEnabled);
+	CHECK(loaded.settings.youtubeServerUrl == kValidYouTubeServerUrl);
 	CHECK(!config_has_user_value(config.get(), "EasyMultistream", "StreamKey"));
 }
 
@@ -182,6 +186,7 @@ void testSettingsSafeSaveAndReload()
 		config_set_string(config, "EasyMultistream", "YouTubeStreamKey", "plaintext-must-not-survive");
 		easy_multistream::Settings settings;
 		settings.youtubeEnabled = true;
+		settings.youtubeServerUrl = kValidYouTubeServerUrl;
 		CHECK(easy_multistream::saveProfileSettings(config, settings) == CONFIG_SUCCESS);
 		config_close(config);
 	}
@@ -193,6 +198,7 @@ void testSettingsSafeSaveAndReload()
 		const auto loaded = easy_multistream::loadProfileSettings(config);
 		CHECK(loaded.status == easy_multistream::SettingsLoadStatus::Loaded);
 		CHECK(loaded.settings.youtubeEnabled);
+		CHECK(loaded.settings.youtubeServerUrl == kValidYouTubeServerUrl);
 		CHECK(std::string(config_get_string(config, "OtherPlugin", "Preserved")) == "yes");
 		CHECK(!config_has_user_value(config, "EasyMultistream", "YouTubeStreamKey"));
 		config_close(config);
@@ -227,16 +233,19 @@ void testSettingsSaveFailureRollsBackInMemoryValues()
 
 	config_set_uint(config, "EasyMultistream", "SchemaVersion", easy_multistream::kSettingsSchemaVersion);
 	config_set_bool(config, "EasyMultistream", "YouTubeEnabled", false);
+	config_set_string(config, "EasyMultistream", "YouTubeServerUrl", kValidYouTubeServerUrl.data());
 	CHECK(config_save_safe(config, "tmp", nullptr) == CONFIG_SUCCESS);
 	CHECK(std::filesystem::remove(path, filesystemError));
 	CHECK(std::filesystem::remove(directory, filesystemError));
 
 	easy_multistream::Settings desired;
 	desired.youtubeEnabled = true;
+	desired.youtubeServerUrl = "rtmps://b.rtmps.youtube.com/live2";
 	CHECK(easy_multistream::saveProfileSettings(config, desired) != CONFIG_SUCCESS);
 	const auto afterFailure = easy_multistream::loadProfileSettings(config);
 	CHECK(afterFailure.status == easy_multistream::SettingsLoadStatus::Loaded);
 	CHECK(!afterFailure.settings.youtubeEnabled);
+	CHECK(afterFailure.settings.youtubeServerUrl == kValidYouTubeServerUrl);
 	config_close(config);
 
 	CHECK(!std::filesystem::exists(path));
@@ -254,39 +263,56 @@ void testFutureSchemaIsDisabled()
 
 void testInvalidSchemaAndUnavailableConfig()
 {
-	Config config("[EasyMultistream]\nSchemaVersion=0\nYouTubeEnabled=true\n");
+	Config config("[EasyMultistream]\nSchemaVersion=0\nYouTubeEnabled=true\nYouTubeServerUrl=rtmps://a.example/live2\n");
 	const auto invalid = easy_multistream::loadProfileSettings(config.get());
 	CHECK(invalid.status == easy_multistream::SettingsLoadStatus::InvalidSchema);
 	CHECK(!invalid.settings.youtubeEnabled);
 	CHECK(invalid.sourceSchemaVersion == 0);
 
-	Config trailing("[EasyMultistream]\nSchemaVersion=1garbage\nYouTubeEnabled=true\n");
+	Config trailing("[EasyMultistream]\nSchemaVersion=1garbage\nYouTubeEnabled=true\nYouTubeServerUrl=rtmps://a.example/live2\n");
 	const auto trailingResult = easy_multistream::loadProfileSettings(trailing.get());
 	CHECK(trailingResult.status == easy_multistream::SettingsLoadStatus::InvalidSchema);
 	CHECK(!trailingResult.settings.youtubeEnabled);
 
-	Config overflow("[EasyMultistream]\nSchemaVersion=18446744073709551616\nYouTubeEnabled=true\n");
+	Config overflow(
+		"[EasyMultistream]\nSchemaVersion=18446744073709551616\nYouTubeEnabled=true\nYouTubeServerUrl=rtmps://a.example/live2\n");
 	const auto overflowResult = easy_multistream::loadProfileSettings(overflow.get());
 	CHECK(overflowResult.status == easy_multistream::SettingsLoadStatus::InvalidSchema);
 	CHECK(!overflowResult.settings.youtubeEnabled);
 
-	Config trailingBool("[EasyMultistream]\nSchemaVersion=1\nYouTubeEnabled=1garbage\n");
+	Config trailingBool(
+		"[EasyMultistream]\nSchemaVersion=1\nYouTubeEnabled=1garbage\nYouTubeServerUrl=rtmps://a.example/live2\n");
 	const auto trailingBoolResult = easy_multistream::loadProfileSettings(trailingBool.get());
 	CHECK(trailingBoolResult.status == easy_multistream::SettingsLoadStatus::InvalidSchema);
 	CHECK(!trailingBoolResult.settings.youtubeEnabled);
 
-	Config textBool("[EasyMultistream]\nSchemaVersion=1\nYouTubeEnabled=garbage\n");
+	Config textBool(
+		"[EasyMultistream]\nSchemaVersion=1\nYouTubeEnabled=garbage\nYouTubeServerUrl=rtmps://a.example/live2\n");
 	const auto textBoolResult = easy_multistream::loadProfileSettings(textBool.get());
 	CHECK(textBoolResult.status == easy_multistream::SettingsLoadStatus::InvalidSchema);
 	CHECK(!textBoolResult.settings.youtubeEnabled);
 
-	Config missingEnabled("[EasyMultistream]\nSchemaVersion=1\n");
+	Config missingEnabled("[EasyMultistream]\nSchemaVersion=1\nYouTubeServerUrl=rtmps://a.example/live2\n");
 	const auto missingEnabledResult = easy_multistream::loadProfileSettings(missingEnabled.get());
 	CHECK(missingEnabledResult.status == easy_multistream::SettingsLoadStatus::InvalidSchema);
 
-	Config missingSchema("[EasyMultistream]\nYouTubeEnabled=true\n");
+	Config missingSchema("[EasyMultistream]\nYouTubeEnabled=true\nYouTubeServerUrl=rtmps://a.example/live2\n");
 	const auto missingSchemaResult = easy_multistream::loadProfileSettings(missingSchema.get());
 	CHECK(missingSchemaResult.status == easy_multistream::SettingsLoadStatus::InvalidSchema);
+
+	Config orphanServerUrl("[EasyMultistream]\nYouTubeServerUrl=rtmps://a.example/live2\n");
+	const auto orphanServerUrlResult = easy_multistream::loadProfileSettings(orphanServerUrl.get());
+	CHECK(orphanServerUrlResult.status == easy_multistream::SettingsLoadStatus::InvalidSchema);
+
+	Config missingServerUrl("[EasyMultistream]\nSchemaVersion=1\nYouTubeEnabled=true\n");
+	const auto missingServerUrlResult = easy_multistream::loadProfileSettings(missingServerUrl.get());
+	CHECK(missingServerUrlResult.status == easy_multistream::SettingsLoadStatus::SetupRequired);
+	CHECK(missingServerUrlResult.settings.youtubeEnabled);
+	CHECK(missingServerUrlResult.sourceSchemaVersion == 1);
+
+	Config invalidServerUrl("[EasyMultistream]\nSchemaVersion=2\nYouTubeEnabled=true\nYouTubeServerUrl=https://a.example/live2\n");
+	const auto invalidServerUrlResult = easy_multistream::loadProfileSettings(invalidServerUrl.get());
+	CHECK(invalidServerUrlResult.status == easy_multistream::SettingsLoadStatus::InvalidSchema);
 
 	const auto unavailable = easy_multistream::loadProfileSettings(nullptr);
 	CHECK(unavailable.status == easy_multistream::SettingsLoadStatus::Unavailable);
@@ -312,6 +338,67 @@ void testStreamKeyValidation()
 	const char invalidUtf8[] = {static_cast<char>(0xc3), static_cast<char>(0x28)};
 	CHECK(easy_multistream::validateYouTubeStreamKey({invalidUtf8, sizeof(invalidUtf8)}) ==
 	      ValidationError::InvalidUtf8);
+}
+
+void testYouTubeServerUrlValidation()
+{
+	using ValidationError = easy_multistream::YouTubeServerUrlValidationError;
+	CHECK(easy_multistream::validateYouTubeServerUrl(kValidYouTubeServerUrl) == ValidationError::None);
+	CHECK(easy_multistream::validateYouTubeServerUrl("rtmps://a.rtmps.youtube.com:443/live2") ==
+	      ValidationError::None);
+	CHECK(easy_multistream::validateYouTubeServerUrl("rtmps://B.RTMPS.YOUTUBE.COM/live2") ==
+	      ValidationError::None);
+	CHECK(easy_multistream::validateYouTubeServerUrl("RTMPS://a.rtmps.youtube.com/live2") ==
+	      ValidationError::InvalidScheme);
+
+	CHECK(easy_multistream::validateYouTubeServerUrl("") == ValidationError::Empty);
+	CHECK(easy_multistream::validateYouTubeServerUrl("https://a.rtmps.youtube.com/live2") ==
+	      ValidationError::InvalidScheme);
+	CHECK(easy_multistream::validateYouTubeServerUrl("rtmp://a.rtmps.youtube.com/live2") ==
+	      ValidationError::InvalidScheme);
+	CHECK(easy_multistream::validateYouTubeServerUrl("rtmps:///live2") == ValidationError::MissingHostname);
+	CHECK(easy_multistream::validateYouTubeServerUrl("rtmps://:443/live2") == ValidationError::MissingHostname);
+	CHECK(easy_multistream::validateYouTubeServerUrl("rtmps://user@a.rtmps.youtube.com/live2") ==
+	      ValidationError::UserInfoNotAllowed);
+	CHECK(easy_multistream::validateYouTubeServerUrl("rtmps://a.rtmps.youtube.com:8443/live2") ==
+	      ValidationError::InvalidPort);
+	CHECK(easy_multistream::validateYouTubeServerUrl("rtmps://a.rtmps.youtube.com:abc/live2") ==
+	      ValidationError::InvalidPort);
+	CHECK(easy_multistream::validateYouTubeServerUrl("rtmps://a.rtmps.youtube.com/live2?key=secret") ==
+	      ValidationError::QueryNotAllowed);
+	CHECK(easy_multistream::validateYouTubeServerUrl("rtmps://a.rtmps.youtube.com/live2#fragment") ==
+	      ValidationError::FragmentNotAllowed);
+	CHECK(easy_multistream::validateYouTubeServerUrl("rtmps://a.rtmps.youtube.com/live2/secret-key") ==
+	      ValidationError::InvalidPath);
+	CHECK(easy_multistream::validateYouTubeServerUrl("rtmps://a.rtmps.youtube.com") == ValidationError::InvalidPath);
+	CHECK(easy_multistream::validateYouTubeServerUrl("rtmps://a.rtmps.youtube.com/live%32") ==
+	      ValidationError::InvalidPath);
+	CHECK(easy_multistream::validateYouTubeServerUrl("rtmps://evil.example/live2") ==
+	      ValidationError::UnsupportedHostname);
+	CHECK(easy_multistream::validateYouTubeServerUrl("rtmps://rtmps.youtube.com/live2") ==
+	      ValidationError::UnsupportedHostname);
+	CHECK(easy_multistream::validateYouTubeServerUrl(" rtmps://a.rtmps.youtube.com/live2") ==
+	      ValidationError::WhitespaceOrControlCharacter);
+	CHECK(easy_multistream::validateYouTubeServerUrl(
+		std::string(easy_multistream::kMaxYouTubeServerUrlBytes + 1, 'a')) == ValidationError::TooLong);
+	const std::string embeddedNull("rtmps://a.rtmps.youtube.com/live\0", 34);
+	CHECK(easy_multistream::validateYouTubeServerUrl(embeddedNull) == ValidationError::EmbeddedNull);
+	const char invalidUtf8[] = {'r', 't', 'm', 'p', 's', ':', '/', '/', 'a', '.', static_cast<char>(0xc3),
+					    static_cast<char>(0x28), '/', 'l', 'i', 'v', 'e', '2'};
+	CHECK(easy_multistream::validateYouTubeServerUrl({invalidUtf8, sizeof(invalidUtf8)}) ==
+	      ValidationError::InvalidUtf8);
+}
+
+void testSettingsInvalidServerUrlIsRejectedBeforeSave()
+{
+	Config config("[EasyMultistream]\nSchemaVersion=2\nYouTubeEnabled=false\n"
+		      "YouTubeServerUrl=rtmps://a.rtmps.youtube.com/live2\n");
+	easy_multistream::Settings invalid;
+	invalid.youtubeServerUrl = "rtmp://a.example/live2?key=secret";
+	CHECK(easy_multistream::saveProfileSettings(config.get(), invalid) == CONFIG_ERROR);
+	const auto loaded = easy_multistream::loadProfileSettings(config.get());
+	CHECK(loaded.status == easy_multistream::SettingsLoadStatus::Loaded);
+	CHECK(loaded.settings.youtubeServerUrl == "rtmps://a.rtmps.youtube.com/live2");
 }
 
 void testCredentialWriteContract()
@@ -482,6 +569,8 @@ int main()
 	testFutureSchemaIsDisabled();
 	testInvalidSchemaAndUnavailableConfig();
 	testStreamKeyValidation();
+	testYouTubeServerUrlValidation();
+	testSettingsInvalidServerUrlIsRejectedBeforeSave();
 	testCredentialWriteContract();
 	testCredentialInputValidation();
 	testCredentialWriteFailureMapping();

@@ -2,20 +2,28 @@
 // Copyright (C) 2026 NPJigaK
 
 #include "dock-view.hpp"
+#include "runtime-controller.hpp"
 #include "settings-controller.hpp"
 #include "version.hpp"
+#include "windows-credential-vault.hpp"
+#include "youtube-output-adapter.hpp"
 
+#include <obs.hpp>
 #include <obs-frontend-api.h>
 #include <obs-module.h>
 
 #include <QByteArray>
 #include <QCoreApplication>
 #include <QPointer>
+#include <QMetaObject>
 #include <QString>
 #include <QThread>
 
 #include <exception>
+#include <functional>
 #include <memory>
+#include <optional>
+#include <string>
 #include <utility>
 
 OBS_DECLARE_MODULE()
@@ -26,8 +34,19 @@ namespace {
 constexpr char kDockId[] = "easy_multistream.dock";
 
 struct PluginState {
+	PluginState() : credentialVault(credentialApi) {}
+
 	QPointer<easy_multistream::DockView> dock;
 	std::unique_ptr<easy_multistream::SettingsController> settingsController;
+	QObject runtimeContext;
+	easy_multistream::NativeWinCredentialApi credentialApi;
+	easy_multistream::WindowsCredentialVault credentialVault;
+	std::unique_ptr<easy_multistream::YouTubeOutputAdapter> youtubeAdapter;
+	OBSOutputAutoRelease nativeOutput;
+	OBSSignal nativeStartingSignal;
+	std::optional<easy_multistream::NativeLease> nativeProbeLease;
+	easy_multistream::NativeDestination nativeDestination = easy_multistream::NativeDestination::Unknown;
+	std::unique_ptr<easy_multistream::RuntimeController> runtime;
 	bool dockRegistered = false;
 	bool callbackRegistered = false;
 	bool exitSeen = false;
@@ -48,10 +67,20 @@ easy_multistream::DockText loadDockText()
 	text.destinations = moduleText("Dock.Destinations");
 	text.primaryName = moduleText("Dock.Primary");
 	text.primaryStatus = moduleText("Dock.PrimaryStatus");
+	text.nativeTwitch = moduleText("Dock.Native.Twitch");
+	text.nativeYouTube = moduleText("Dock.Native.YouTube");
+	text.nativeNotStreaming = moduleText("Dock.Native.NotStreaming");
+	text.nativeStarting = moduleText("Dock.Native.Starting");
+	text.nativeStreaming = moduleText("Dock.Native.Streaming");
+	text.nativeStopping = moduleText("Dock.Native.Stopping");
+	text.nativeUnavailable = moduleText("Dock.Native.Unavailable");
 	text.youtubeName = moduleText("Dock.YouTube");
 	text.setup = moduleText("Dock.Setup");
 	text.profileLabel = moduleText("Dock.Profile");
 	text.enableYouTube = moduleText("Dock.EnableYouTube");
+	text.serverUrlLabel = moduleText("Dock.ServerUrl.Label");
+	text.serverUrlPlaceholder = moduleText("Dock.ServerUrl.Placeholder");
+	text.saveServerUrl = moduleText("Dock.SaveServerUrl");
 	text.credentialLabel = moduleText("Dock.Credential.Label");
 	text.streamKeyLabel = moduleText("Dock.StreamKey.Label");
 	text.saveKey = moduleText("Dock.SaveKey");
@@ -64,10 +93,24 @@ easy_multistream::DockText loadDockText()
 	text.credentialUnavailable = moduleText("Dock.Credential.Unavailable");
 	text.youtubeDisabled = moduleText("Dock.YouTube.Disabled");
 	text.youtubeReady = moduleText("Dock.YouTube.Ready");
+	text.youtubeMissingServerUrl = moduleText("Dock.YouTube.MissingServerUrl");
 	text.youtubeMissingKey = moduleText("Dock.YouTube.MissingKey");
 	text.youtubeUnavailable = moduleText("Dock.YouTube.Unavailable");
+	text.youtubeRequiresTwitch = moduleText("Dock.YouTube.RequiresTwitch");
+	text.youtubeNotStreaming = moduleText("Dock.YouTube.NotStreaming");
+	text.youtubeConnecting = moduleText("Dock.YouTube.Connecting");
+	text.youtubeStreaming = moduleText("Dock.YouTube.Streaming");
+	text.youtubeReconnecting = moduleText("Dock.YouTube.Reconnecting");
+	text.youtubeStopping = moduleText("Dock.YouTube.Stopping");
+	text.youtubeFailed = moduleText("Dock.YouTube.Failed");
+	text.youtubeSetupRequired = moduleText("Dock.YouTube.SetupRequired");
+	text.retryYouTube = moduleText("Dock.RetryYouTube");
 	text.noticePreview = moduleText("Dock.Notice.Preview");
 	text.noticeProfileSaved = moduleText("Dock.Notice.ProfileSaved");
+	text.noticeServerUrlSaved = moduleText("Dock.Notice.ServerUrlSaved");
+	text.noticeMissingServerUrl = moduleText("Dock.Notice.MissingServerUrl");
+	text.noticeInvalidServerUrl = moduleText("Dock.Notice.InvalidServerUrl");
+	text.noticeServerUrlTooLong = moduleText("Dock.Notice.ServerUrlTooLong");
 	text.noticeKeySaved = moduleText("Dock.Notice.KeySaved");
 	text.noticeKeyRemoved = moduleText("Dock.Notice.KeyRemoved");
 	text.noticeMissingKey = moduleText("Dock.Notice.MissingKey");
@@ -83,9 +126,107 @@ easy_multistream::DockText loadDockText()
 	text.noticeFutureSettings = moduleText("Dock.Notice.FutureSettings");
 	text.noticeSettingsSaveFailed = moduleText("Dock.Notice.SettingsSaveFailed");
 	text.noticeInternalError = moduleText("Dock.Notice.InternalError");
+	text.noticeYouTubeFailed = moduleText("Dock.Notice.YouTubeFailed");
 	text.removeKeyTitle = moduleText("Dock.RemoveKey.Title");
 	text.removeKeyMessage = moduleText("Dock.RemoveKey.Message");
 	return text;
+}
+
+easy_multistream::NativeDestination currentNativeDestination() noexcept
+{
+	obs_service_t *service = obs_frontend_get_streaming_service();
+	if (service == nullptr) {
+		return easy_multistream::NativeDestination::Unknown;
+	}
+
+	const char *serviceId = obs_service_get_type(service);
+	OBSDataAutoRelease settings(obs_service_get_settings(service));
+	const char *provider = settings != nullptr ? obs_data_get_string(settings.Get(), "service") : nullptr;
+	return easy_multistream::classifyNativeDestination(serviceId != nullptr ? serviceId : "",
+											provider != nullptr ? provider : "");
+}
+
+void clearNativeStartingProbe(PluginState &state) noexcept
+{
+	state.nativeStartingSignal.Disconnect();
+	state.nativeOutput = nullptr;
+	state.nativeProbeLease.reset();
+}
+
+void onNativeOutputStarting(void *privateData, calldata_t *) noexcept
+{
+	auto *state = static_cast<PluginState *>(privateData);
+	if (state == nullptr || state->runtime == nullptr || !state->nativeProbeLease.has_value()) {
+		return;
+	}
+	// OBS emits the output's `starting` signal synchronously from the native
+	// start path.  This marker must reach the controller before its queued
+	// reconciliation runs, otherwise a synchronous native rejection could be
+	// mistaken for a slow network start.
+	state->runtime->onNativeOutputStarting(*state->nativeProbeLease);
+}
+
+void attachNativeStartingProbe(PluginState &state) noexcept
+{
+	clearNativeStartingProbe(state);
+	if (state.runtime == nullptr) {
+		return;
+	}
+	const auto snapshot = state.runtime->snapshot();
+	if (!snapshot.nativeLease.has_value()) {
+		return;
+	}
+
+	state.nativeOutput = obs_frontend_get_streaming_output();
+	if (state.nativeOutput == nullptr) {
+		return;
+	}
+	signal_handler_t *signalHandler = obs_output_get_signal_handler(state.nativeOutput.Get());
+	if (signalHandler == nullptr) {
+		state.nativeOutput = nullptr;
+		return;
+	}
+	state.nativeProbeLease = snapshot.nativeLease;
+	state.nativeStartingSignal.Connect(signalHandler, "starting", &onNativeOutputStarting, &state);
+}
+
+void postToRuntime(QObject *context, std::function<void()> callback) noexcept
+{
+	if (context == nullptr || !callback) {
+		return;
+	}
+	try {
+		QMetaObject::invokeMethod(context,
+					  [callback = std::move(callback)]() mutable {
+						  try {
+							  callback();
+						  } catch (...) {
+							  blog(LOG_ERROR,
+							       "[obs-easy-multistream] Runtime callback failed");
+						  }
+					  },
+					  Qt::QueuedConnection);
+	} catch (...) {
+		blog(LOG_ERROR, "[obs-easy-multistream] Failed to queue a runtime callback");
+	}
+}
+
+void applyRuntimeSettings(PluginState &state, easy_multistream::Settings settings,
+					  easy_multistream::CredentialDisplayState credentialState, bool profileChanged) noexcept
+{
+	if (state.runtime == nullptr) {
+		return;
+	}
+	easy_multistream::RuntimeSettings runtimeSettings;
+	runtimeSettings.nativeDestination = state.nativeDestination;
+	runtimeSettings.youtubeEnabled = settings.youtubeEnabled;
+	runtimeSettings.youtubeKeyAvailable = credentialState == easy_multistream::CredentialDisplayState::Present;
+	runtimeSettings.youtubeServerUrl = std::move(settings.youtubeServerUrl);
+	if (profileChanged) {
+		state.runtime->onProfileChanged(std::move(runtimeSettings));
+	} else {
+		state.runtime->setSettings(std::move(runtimeSettings));
+	}
 }
 
 void removeFrontendObjects(PluginState &state) noexcept;
@@ -103,21 +244,54 @@ void onFrontendEvent(enum obs_frontend_event event, void *privateData) noexcept
 		return;
 	}
 
-	if (state->settingsController == nullptr) {
-		return;
-	}
-
 	try {
 		switch (event) {
 		case OBS_FRONTEND_EVENT_FINISHED_LOADING:
 		case OBS_FRONTEND_EVENT_PROFILE_CHANGED:
-			state->settingsController->loadCurrentProfile();
+			state->nativeDestination = currentNativeDestination();
+			if (state->settingsController != nullptr) {
+				state->settingsController->loadCurrentProfile(easy_multistream::DockNotice::Preview, true);
+			}
 			break;
 		case OBS_FRONTEND_EVENT_PROFILE_CHANGING:
-			state->settingsController->beginProfileChange();
+			clearNativeStartingProbe(*state);
+			if (state->runtime != nullptr) {
+				state->runtime->onProfileChanging();
+			}
+			if (state->settingsController != nullptr) {
+				state->settingsController->beginProfileChange();
+			}
+			break;
+		case OBS_FRONTEND_EVENT_STREAMING_STARTING:
+			state->nativeDestination = currentNativeDestination();
+			if (state->runtime != nullptr) {
+				state->runtime->onStreamingStarting(state->nativeDestination);
+				// This must happen before OBS calls StartStreaming below the
+				// frontend event callback.
+				attachNativeStartingProbe(*state);
+			}
+			break;
+		case OBS_FRONTEND_EVENT_STREAMING_STARTED:
+			if (state->runtime != nullptr) {
+				state->runtime->onStreamingStarted();
+			}
+			break;
+		case OBS_FRONTEND_EVENT_STREAMING_STOPPING:
+			if (state->runtime != nullptr) {
+				state->runtime->onStreamingStopping();
+			}
+			clearNativeStartingProbe(*state);
+			break;
+		case OBS_FRONTEND_EVENT_STREAMING_STOPPED:
+			if (state->runtime != nullptr) {
+				state->runtime->onStreamingStopped();
+			}
+			clearNativeStartingProbe(*state);
 			break;
 		case OBS_FRONTEND_EVENT_THEME_CHANGED:
-			state->settingsController->refreshTheme();
+			if (state->settingsController != nullptr) {
+				state->settingsController->refreshTheme();
+			}
 			break;
 		default:
 			break;
@@ -134,6 +308,19 @@ void removeFrontendObjects(PluginState &state) noexcept
 	if (state.callbackRegistered) {
 		obs_frontend_remove_event_callback(onFrontendEvent, &state);
 		state.callbackRegistered = false;
+	}
+
+	clearNativeStartingProbe(state);
+	if (state.runtime != nullptr) {
+		state.runtime->onExit();
+		// RuntimeController's destructor is the final callback barrier.  It
+		// disables its weak sink and joins the adapter before the dock can be
+		// removed or the plugin state can be destroyed.
+		state.runtime.reset();
+	}
+	if (state.youtubeAdapter != nullptr) {
+		state.youtubeAdapter->shutdown();
+		state.youtubeAdapter.reset();
 	}
 
 	if (state.settingsController != nullptr) {
@@ -179,6 +366,37 @@ bool obs_module_load(void)
 		auto dock = std::make_unique<easy_multistream::DockView>(loadDockText());
 		state->dock = dock.get();
 		state->settingsController = std::make_unique<easy_multistream::SettingsController>(dock.get());
+		PluginState *statePointer = state.get();
+		state->youtubeAdapter = std::make_unique<easy_multistream::YouTubeOutputAdapter>();
+		state->runtime = std::make_unique<easy_multistream::RuntimeController>(
+			*state->youtubeAdapter,
+			[statePointer]() noexcept -> easy_multistream::SecureBuffer {
+				easy_multistream::CredentialReadResult result = statePointer->credentialVault.read();
+				if (!result.result.succeeded()) {
+					return {};
+				}
+				return std::move(result.secret);
+			},
+			[context = &state->runtimeContext](std::function<void()> callback) noexcept {
+				postToRuntime(context, std::move(callback));
+			});
+		const QPointer<easy_multistream::SettingsController> settingsGuard(state->settingsController.get());
+		state->runtime->setSnapshotSink([settingsGuard](easy_multistream::SessionSnapshot snapshot) mutable {
+			if (settingsGuard != nullptr) {
+				settingsGuard->applyRuntimeSnapshot(std::move(snapshot));
+			}
+		});
+		state->settingsController->setSettingsChangedHandler(
+			[statePointer](easy_multistream::Settings settings,
+					      easy_multistream::CredentialDisplayState credentialState,
+					      bool profileChanged) noexcept {
+				applyRuntimeSettings(*statePointer, std::move(settings), credentialState, profileChanged);
+			});
+		state->settingsController->setRetryYouTubeHandler([statePointer]() noexcept {
+			if (statePointer->runtime != nullptr) {
+				statePointer->runtime->retryYouTube();
+			}
+		});
 
 		const QByteArray dockTitle = moduleText("Dock.Title").toUtf8();
 		if (!obs_frontend_add_dock_by_id(kDockId, dockTitle.constData(), dock.get())) {
@@ -198,7 +416,10 @@ bool obs_module_load(void)
 			pluginState.reset();
 			throw;
 		}
-		pluginState->settingsController->loadCurrentProfile();
+		// OBS is still loading modules here, so rtmp_common may not be
+		// registered yet.  FINISHED_LOADING performs the first destination
+		// classification and replaces this brief Unknown snapshot.
+		pluginState->settingsController->loadCurrentProfile(easy_multistream::DockNotice::Preview, true);
 
 		blog(LOG_INFO, "[obs-easy-multistream] Loaded version %s", easy_multistream::kVersion);
 		return true;

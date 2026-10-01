@@ -1,6 +1,6 @@
 # 実出力ランタイムテスト計画
 
-この文書は、OBS Studio 32.2.2向けのYouTube RTMPS出力アダプターを実装した後に、出荷可否を判断するためのテスト計画です。現在のリポジトリには出力アダプターとネットワーク処理がまだ含まれていないため、下記のランタイム項目は「実装後に実行する出荷ゲート」です。現在実行できる自動テストは、末尾の既存テスト対応表に分けて記載します。
+この文書は、OBS Studio 32.2.2向けYouTube RTMPS出力アダプターの出荷可否を判断するためのテスト計画です。現在のリポジトリには実出力アダプター、ランタイム状態機械、Frontend bridgeが含まれています。値レベルのランタイムテストは自動化済みですが、実OBS outputのfault injection、メモリ検査、実サービスへの限定公開配信は引き続き出荷ゲートです。
 
 対象はWindows x64、OBS Studio 32.2.2、OBSのnative Twitch出力を維持したまま、追加のYouTube RTMPS出力を1つ開始・停止する構成です。YouTube側の失敗はTwitch側へ波及してはいけません。
 
@@ -101,7 +101,7 @@ P0は安全性・所有権・秘密情報・native出力保護に関わる項目
 | ID | 優先度 | 前提と操作 | 合格条件 | 区分 |
 |---|---|---|---|---|
 | RT-INPUT-01 | P1 | native service id/providerがTwitch以外、またはcustom RTMP・不明provider | YouTube outputを開始しない。URLやkeyの形からTwitchと推測しない | 自動＋手動 |
-| RT-INPUT-02 | P0 | 映像encoderが未設定、音声encoderが未設定、音声trackが複数、映像trackが複数 | YouTube試行だけを安全に拒否し、native Twitchは継続。output/serviceを作成する前に失敗する | 自動＋手動 |
+| RT-INPUT-02 | P0 | 映像encoderが未設定、音声encoderが未設定、映像trackが複数、またはTwitch VOD用の第2音声trackがある | 欠落・複数映像はYouTube試行だけを安全に拒否する。VOD音声trackは許可し、main audio index 0だけをYouTubeへ送る。native Twitchは継続する | 自動＋手動 |
 | RT-INPUT-03 | P0 | H.264/AAC以外の第一実装対象外codec（AV1、HEVC、未対応HDR）を設定 | YouTubeへ接続せず、nativeのencoder設定を変更・再スケールしない。ユーザー向けエラーはcodec名など非秘密情報だけ | 自動＋手動 |
 | RT-INPUT-04 | P0 | URLが空、schemeがRTMPS/RTMP以外、hostなし、上限超過、keyをquery/pathに連結した不正URL | output/serviceを作らず、YouTubeをSetupRequired/Failedにする。native Twitchは継続 | 自動 |
 | RT-INPUT-05 | P0 | Credential Managerが未登録、read access denied、OSエラー、型不正、サイズ不正を返す | YouTube outputを作らず、資格情報の状態を表示する。Twitchを停止しない。秘密値を返り値・ログへ出さない | 自動＋手動 |
@@ -155,13 +155,14 @@ P0は安全性・所有権・秘密情報・native出力保護に関わる項目
 
 ## 7. 既存自動テストとの対応
 
-現在のCTestはランタイムOBS出力を生成しないため、次の項目を保証するものではありません。実出力アダプターを追加したら、5章のfake runtimeテストを新しい自動ゲートとして追加します。
+現在のCTestは状態機械・bridge境界・UIを検証しますが、実際のOBS RTMPS出力は生成しません。そのため次の項目を保証するものではありません。
 
 | 既存テスト | 現在確認できる範囲 | ランタイムで追加が必要な範囲 |
 |---|---|---|
 | unit | profile設定、safe-save、秘密値検証、Credential Manager fake、SecureBuffer | 実OBS output/service、RTMPS、callback thread、URL・ログscan |
 | session | native分類、開始受理、native同期失敗、YouTube開始/停止、失敗隔離、rapid restart、stale lease、profile generation、EXIT terminal | Frontend callback、OBS 32.2.2のsignal順序、実outputのteardown、スレッド・reaper寿命 |
-| UI | dock状態、password editor、copy/cut/drag/drop抑止、key削除確認 | 実出力状態の表示、切断・profile change・終了中のUI寿命 |
+| runtime | native開始確認、YouTube開始受理とstart通知の分離、失敗隔離、明示retry、rapid restart、stale callback、profile generation、EXIT fallback | 実OBS signal thread、service/output生成失敗、RTMP接続、reaper join |
+| UI | dock状態、実ランタイムsnapshot表示、配信中の設定保護、YouTube失敗表示とretry、password editor、key削除確認 | 実切断・profile change・終了中のOBS widget寿命 |
 | locales | en-US/ja-JPキーの整合性 | 実エラー状態の翻訳と秘密情報を含まない表示 |
 
 最低限のローカル自動確認は次のコマンドです。
@@ -202,9 +203,10 @@ generation invalidation / new work拒否
 
 ## 9. 実装後の出荷チェックリスト
 
-- [ ] OBS 32.2.2固定環境でビルドできる。
-- [ ] 既存CTestがすべて通る。
-- [ ] start acceptedとstart signalを分けた自動テストが通る。
+- [x] OBS 32.2.2固定環境でwarnings-as-errorsビルドできる。
+- [x] 現在のCTestがすべて通る。
+- [x] start acceptedとstart signalを分けた状態機械テストが通る。
+- [x] リポジトリ内の隔離portable OBS 32.2.2で、0.1.0のload、Startup complete、clean unload、memory leaks 0を確認した。
 - [ ] `obs_output_start()`同期拒否とnative StartStreaming同期拒否を別々にテストした。
 - [ ] output error、YouTube-only disconnect、credential failure、missing URL/key、unsupported codecをテストした。
 - [ ] stop、duplicate stop、rapid stop-start、profile change、EXITをテストした。

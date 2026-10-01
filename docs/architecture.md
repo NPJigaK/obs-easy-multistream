@@ -1,6 +1,6 @@
 # Architecture
 
-Easy Multistream is being built in small, reviewable slices. The settings foundation adds profile-aware configuration and secure local credential storage to the verified OBS dock. The next stacked slice defines the session state contract independently from OBS and Qt. Neither slice contains streaming output code.
+Easy Multistream is built in small, reviewable slices. The current development tree integrates profile-aware settings, secure local credential storage, a value-only session state machine, an OBS Frontend bridge, and one fail-isolated YouTube RTMPS output.
 
 ## v1 product boundary
 
@@ -8,16 +8,19 @@ The planned first useful release is intentionally narrow:
 
 - Windows x64 and OBS Studio 32
 - the native OBS Twitch output remains the primary output
-- one additional YouTube RTMPS output
+- one additional YouTube RTMPS output using the RTMPS Stream URL copied from YouTube Studio
 - reuse of the primary H.264 and AAC encoders, with no second video encode
 - one OBS Start/Stop workflow
 - YouTube failure isolation: a secondary failure must not stop Twitch
-- one manually configured YouTube custom stream key, with YouTube Auto-start and Auto-stop
+- one manually configured YouTube custom stream key and editable RTMPS Stream URL, with YouTube Auto-start and Auto-stop
+- optional YouTube automatic Dual stream, where YouTube creates a vertical feed from the single horizontal input
 - a standard OBS dock using public Frontend and Qt APIs
 
-OAuth, scheduled YouTube events, three or more destinations, custom output scenes, per-destination transcoding, and Twitch-as-secondary are outside the v1 boundary.
+OAuth, scheduled YouTube events, three or more destinations, custom output scenes, encoder-controlled YouTube dual streaming, per-destination transcoding, and Twitch-as-secondary are outside the v1 boundary.
 
-## Current slice
+The recommended Dual stream mode is a YouTube-side feature. Easy Multistream sends one 16:9 H.264/AAC stream to the user-provided RTMPS URL; YouTube creates the 9:16 feed, normally as a centre crop. This keeps the local OBS pipeline to one YouTube output and one shared video encode. The vertical mode must be enabled in YouTube Studio before the stream starts. A separately composed 9:16 stream sent by the encoder would require a second video pipeline and is intentionally deferred.
+
+## Current runtime
 
 ```text
 OBS module entry point
@@ -25,6 +28,11 @@ OBS module entry point
       ├─ SettingsController (plugin-owned, UI-thread only)
       │   ├─ active profile config (borrowed only during each call)
       │   └─ WindowsCredentialVault
+      ├─ RuntimeController + SessionCoordinator (UI-thread serialized)
+      ├─ YouTubeOutputAdapter
+      │   └─ private reaper thread for OBS output teardown
+      ├─ private YouTube RTMP service/output
+      │   └─ retained references to native H.264 + main AAC encoders
       └─ QPointer<DockView> (non-owning after registration)
 
 OBS dock wrapper (OBS-owned)
@@ -34,10 +42,10 @@ Windows Credential Manager
   └─ one Easy Multistream YouTube key for the current Windows account
 
 Current OBS profile/basic.ini
-  └─ SchemaVersion + YouTubeEnabled only
+  └─ SchemaVersion + YouTubeEnabled + YouTubeServerUrl
 ```
 
-The dock can save the non-secret enable setting and a masked YouTube key. It states in ordinary user-facing language that streaming to YouTube is not yet available and does not claim that either platform is connected or streaming. The key is intentionally shared across OBS profiles in v1; only the enabled flag is profile-specific.
+The dock saves the non-secret enable setting and YouTube RTMPS Stream URL, and exposes a masked YouTube key editor. It renders immutable Twitch/YouTube status snapshots and a YouTube-only retry action after failure. The key is intentionally shared across OBS profiles; the enabled setting and Stream URL are profile-specific.
 
 User-visible text follows OBS and platform terminology. Internal milestone names, schema versions, implementation roles such as primary/secondary output, and release codenames stay in code and engineering documentation rather than appearing in the dock.
 
@@ -51,34 +59,34 @@ User-visible text follows OBS and platform terminology. Internal milestone names
 6. The plugin keeps only a `QPointer` to the OBS-owned widget.
 7. The controller never retains `config_t *` or a pointer returned by `config_get_string()` across a call.
 8. Profile-changing and shutdown events clear the secret input and disable further actions before teardown.
-9. No private OBS C++ headers, global style sheets, updater, telemetry, or background threads are used.
+9. No private OBS C++ headers, global style sheets, updater, or telemetry are used. The only plugin-created background thread is the output reaper that prevents potentially blocking RTMP teardown from running on the UI thread.
 
 ## Configuration and credential invariants
 
-1. `basic.ini` contains only `SchemaVersion` and `YouTubeEnabled` under `[EasyMultistream]`.
+1. `basic.ini` contains only `SchemaVersion`, `YouTubeEnabled`, and the non-secret `YouTubeServerUrl` under `[EasyMultistream]`.
 2. The stream key is written only to Windows Credential Manager and is never read back into the editor.
 3. Saving a key and changing a profile's enabled flag are independent operations; there is no cross-store transaction to partially commit.
 4. An explicit Save Key action requires a non-empty, valid key. Deleting the shared key requires confirmation and does not rewrite any profile setting.
 5. An enabled profile without a stored key is treated as incomplete and cannot stream until a new key is saved. A profile cannot be newly enabled while the key is missing.
 6. Invalid and unknown future schemas are read-only and are never downgraded by this version.
 7. A failed safe-save restores the previous in-memory non-secret settings.
-8. Credential failure cannot alter the OBS primary output; this slice has no output APIs at all.
+8. Credential or YouTube output failure cannot alter the native OBS output.
 
-## Planned runtime boundary
+## Runtime boundary
 
-`obs-easy-multistream-session-core` is a pure C++ library with no OBS, Qt, Windows Credential Manager, or network dependency. It is not linked into the plugin module yet. Its `SessionCoordinator` accepts value events and returns an immutable snapshot plus at most one requested effect. The only output effects are `StartYouTube` and `StopYouTube`; there is intentionally no effect capable of stopping the native OBS stream.
+`obs-easy-multistream-session-core` is a pure C++ library with no OBS, Qt, Windows Credential Manager, or network dependency. It is linked into the plugin through `RuntimeController`. Its `SessionCoordinator` accepts value events and returns an immutable snapshot plus at most one requested effect. The only output effects are `StartYouTube` and `StopYouTube`; there is intentionally no effect capable of stopping the native OBS stream.
 
-`SessionCoordinator` is deliberately not thread-safe. A future runtime bridge will serialize every state event on one owner thread. Frontend callbacks and output callbacks will copy only lease/status values and post them to that owner; they will never call the state machine concurrently or capture a raw OBS pointer in queued work. Each returned effect must be handed to the adapter in transition order before the bridge processes its next state event.
+`SessionCoordinator` is deliberately not thread-safe. `RuntimeController` serializes every state event on the Qt/OBS owner thread. Frontend callbacks and output callbacks copy only lease/status values; worker-originated output callbacks are queued through a plugin-owned `QObject` that outlives the controller. Each returned effect is handed to the adapter in transition order before the bridge processes its next state event.
 
-Each native OBS start attempt receives a `NativeLease`, and each YouTube start attempt receives an `OutputLease`. Both contain a profile/session generation and an attempt number. Callbacks for an old generation or attempt cannot update the current snapshot. Snapshot revisions advance only for accepted state changes, so a future view bridge can reject queued updates that arrive out of order. Profile changes and exit invalidate the current generation before delayed callbacks can be observed by a new session.
+Each native OBS start attempt receives a `NativeLease`, and each YouTube start attempt receives an `OutputLease`. Both contain a profile/session generation and an attempt number. Callbacks for an old generation or attempt cannot update the current snapshot. Snapshot revisions advance only for accepted state changes. Profile changes and exit invalidate the current generation before delayed callbacks can be observed by a new session.
 
 The destination classifier accepts only exact known OBS service values. A Twitch session is eligible only when the service type is `rtmp_common` and the provider name is exactly `Twitch`. Known YouTube names are recognized for future role-neutral behavior, while custom RTMP, relays, substring matches, and unknown services remain unsupported rather than being guessed from a URL or stream key.
 
-The next integration slice will add an OBS Frontend bridge and an output adapter. The bridge will be owned by the plugin context, not by the dock or settings controller. The dock will render immutable status snapshots and may be closed without affecting outputs. Raw OBS pointers and secret values will never enter `SessionCoordinator` or its snapshots. The detailed ownership and callback rules are recorded in [the output integration contract](runtime-output-design.md).
+The OBS Frontend bridge and output adapter are owned by the plugin context, not by the dock or settings controller. The dock may be closed without affecting outputs. Raw OBS pointers and secret values never enter `SessionCoordinator` or its snapshots. The detailed ownership and callback rules are recorded in [the output integration contract](runtime-output-design.md).
 
-The future secondary output will reference the native primary encoders but will own its own service and output. Release order and failure paths will be tested before adding automatic reconnect.
+The YouTube output references the native video encoder and main live audio encoder but owns its own service and output. Its service uses the validated RTMPS Stream URL supplied by the user and the temporary key retrieved from Windows Credential Manager. Additional Twitch VOD audio is ignored rather than treated as an ambiguous layout; multiple video encoders remain unsupported.
 
-The first output adapter will not expose automatic or in-session manual retry. A YouTube start failure remains isolated while the native stream continues, and the next native Stop/Start begins a fresh attempt. A later retry action can be added as an explicit state event after teardown and backoff behavior have their own tests.
+The output adapter does not automatically loop after a YouTube failure. Once the failed output has passed the full teardown barrier, the dock exposes an explicit YouTube-only retry action while Twitch continues.
 
 ## Session state invariants
 
