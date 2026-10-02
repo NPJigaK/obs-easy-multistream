@@ -15,9 +15,13 @@ A lightweight OBS Studio plugin intended to add YouTube multistreaming without r
 - Show Twitch and YouTube independently in a standard OBS dock.
 - Collapse completed connection details into a compact status view, with settings available on demand.
 - Keep Twitch running if the YouTube connection fails.
-- Avoid OAuth, cloud relays, telemetry, separate background processes, and a second video encode unless they become necessary.
+- Make browser-based YouTube account connection the normal setup path once its Google review and release requirements are met.
+- Keep manual RTMPS URL and stream-key setup as an advanced fallback.
+- Avoid cloud relays, telemetry, separate background processes, and a second video encode.
 
-The supported streaming workflow uses a regular YouTube encoder stream (not a scheduled event): copy the RTMPS Stream URL and a reusable custom stream key from YouTube Studio, then enable Auto-start and Auto-stop. YouTube's automatic Dual stream can create a 9:16 feed from the single 16:9 stream, so Easy Multistream does not need a second local video encoder for the recommended setup. Scheduled YouTube events, API/OAuth automation, and custom encoder-controlled vertical layouts are outside the initial scope.
+The current development build uses a regular YouTube encoder stream (not a scheduled event): copy the RTMPS Stream URL and a reusable custom stream key from YouTube Studio, then enable Auto-start and Auto-stop. This manual path remains supported as a fallback. The planned normal setup is **Connect YouTube** in the dock, followed by Google authorization in the system browser and selection of an existing reusable encoder stream. Automatically creating and managing YouTube broadcasts, titles, privacy settings, and scheduled events is a separate later feature rather than part of the first account-connection implementation.
+
+YouTube's automatic Dual stream can create a 9:16 feed from the single 16:9 stream, so Easy Multistream does not need a second local video encoder for the recommended setup. Custom encoder-controlled vertical layouts remain outside the current scope.
 
 ## Current status
 
@@ -44,9 +48,22 @@ The current build provides:
 
 The implementation now creates a YouTube output after OBS confirms that its native Twitch output has started. Automated tests cover configuration, state transitions, stale callbacks, failure isolation, and UI behavior; the remaining release gate is a short real-service test with a private or unlisted YouTube stream. See [the YouTube setup note](docs/youtube-setup.md), [the architecture note](docs/architecture.md), [the output integration contract](docs/runtime-output-design.md), and [the security note](docs/security.md).
 
-## YouTube setup
+## Planned YouTube account connection
 
-Setup remains a normal OBS workflow:
+The accepted direction is to make account connection the normal setup experience without changing OBS's native Twitch workflow:
+
+1. Select **Connect YouTube** in the Easy Multistream dock.
+2. Complete Google authorization in the system browser.
+3. Select the YouTube channel and an existing reusable encoder stream when necessary.
+4. Return to OBS and continue using OBS's normal **Start Streaming** and **Stop Streaming** controls.
+
+The RTMPS URL and stream key are then obtained through the official YouTube API instead of being copied by the user. The manual fields remain available under advanced settings and are never silently selected after an account-connection failure.
+
+This is not enabled in the current build. It will only be shown after the complete browser callback, token storage and revocation, channel/stream selection, profile-change cancellation, and YouTube endpoint-resolution paths are implemented and tested. Public builds also require an appropriate Google Cloud project, consent screen, privacy policy, OAuth verification decision, and quota plan. See [the accepted account-connection design](docs/youtube-account-connection.md).
+
+## Current manual YouTube setup
+
+Until account connection is available, setup remains a normal OBS workflow. These fields will remain available later as the manual fallback:
 
 1. In YouTube Studio, use the regular **Stream** tab for an encoder stream rather than a scheduled event.
 2. Create or reuse a custom stream key and turn on YouTube Auto-start and Auto-stop.

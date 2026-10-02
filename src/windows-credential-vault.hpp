@@ -60,5 +60,6 @@ private:
 };
 
 const wchar_t *defaultYouTubeCredentialTarget() noexcept;
+const wchar_t *defaultYouTubeAccountRefreshTokenTarget() noexcept;
 
 } // namespace easy_multistream

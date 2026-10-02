@@ -2,7 +2,7 @@
 
 Easy Multistream is built in small, reviewable slices. The current development tree integrates profile-aware settings, secure local credential storage, a value-only session state machine, an OBS Frontend bridge, and one fail-isolated YouTube RTMPS output.
 
-## v1 product boundary
+## Current product boundary
 
 The planned first useful release is intentionally narrow:
 
@@ -12,13 +12,31 @@ The planned first useful release is intentionally narrow:
 - reuse of the primary H.264 and AAC encoders, with no second video encode
 - one OBS Start/Stop workflow
 - YouTube failure isolation: a secondary failure must not stop Twitch
-- one manually configured YouTube custom stream key and editable RTMPS Stream URL, with YouTube Auto-start and Auto-stop
+- one manually configured YouTube custom stream key and editable RTMPS Stream URL, with YouTube Auto-start and Auto-stop; this remains the current implementation and future advanced fallback
 - optional YouTube automatic Dual stream, where YouTube creates a vertical feed from the single horizontal input
 - a standard OBS dock using public Frontend and Qt APIs
 
-OAuth, scheduled YouTube events, three or more destinations, custom output scenes, encoder-controlled YouTube dual streaming, per-destination transcoding, and Twitch-as-secondary are outside the v1 boundary.
+Browser-based YouTube account connection is the accepted next setup path, but it is not exposed until its complete authorization, secure token storage, endpoint resolution, cancellation, and release requirements are implemented. Automatically creating and managing YouTube broadcasts or scheduled events, three or more destinations, custom output scenes, encoder-controlled YouTube dual streaming, per-destination transcoding, and Twitch-as-secondary remain outside the current boundary.
 
 The recommended Dual stream mode is a YouTube-side feature. Easy Multistream sends one 16:9 H.264/AAC stream to the user-provided RTMPS URL; YouTube creates the 9:16 feed, normally as a centre crop. This keeps the local OBS pipeline to one YouTube output and one shared video encode. The vertical mode must be enabled in YouTube Studio before the stream starts. A separately composed 9:16 stream sent by the encoder would require a second video pipeline and is intentionally deferred.
+
+## Accepted YouTube connection direction
+
+The normal future setup is **Connect YouTube** in the dock, system-browser Google authorization, and selection of an existing reusable YouTube encoder stream. The current manual RTMPS URL and key remain an explicitly selected advanced fallback. A failed or revoked account connection must never silently switch to a saved manual destination.
+
+The account connection is owned by a plugin-level provider, not by `DockView`, `SettingsController`, `SessionCoordinator`, or `YouTubeOutputAdapter`. It resolves an authenticated YouTube stream into the same validated RTMPS URL plus ephemeral stream-key boundary already consumed by the output adapter. OAuth tokens never enter session snapshots, OBS output settings snapshots, profile settings, UI state, or logs.
+
+OBS's internal YouTube account object is not a public plugin API and is tied to the active native OBS service. Easy Multistream therefore does not read OBS's private authentication settings or switch the native service away from Twitch. It owns a separate standards-based desktop OAuth flow using the system browser, a loopback callback, PKCE, and a distinct Windows Credential Manager entry.
+
+Implementation is deliberately gated in this order:
+
+1. separate credential targets and a headless, cancellable account-connection provider;
+2. browser authorization, refresh/revocation, and YouTube channel/stream discovery;
+3. authenticated endpoint resolution into the existing output boundary;
+4. profile-change, shutdown, stale-callback, and failure-isolation tests;
+5. only then, account controls and channel identity in the dock.
+
+Internal phases, schema versions, provider names, and milestone numbers are not user-facing text. The full decision and release gates are recorded in [youtube-account-connection.md](youtube-account-connection.md).
 
 ## Current runtime
 

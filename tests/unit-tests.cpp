@@ -478,6 +478,22 @@ void testCredentialWriteContract()
 	CHECK(std::string(api.writeBlob.begin(), api.writeBlob.end()) == "valid-key");
 }
 
+void testAccountCredentialTargetIsIsolated()
+{
+	const std::wstring streamKeyTarget = easy_multistream::defaultYouTubeCredentialTarget();
+	const std::wstring refreshTokenTarget = easy_multistream::defaultYouTubeAccountRefreshTokenTarget();
+	CHECK(!streamKeyTarget.empty());
+	CHECK(!refreshTokenTarget.empty());
+	CHECK(streamKeyTarget != refreshTokenTarget);
+
+	FakeWinCredentialApi api;
+	easy_multistream::WindowsCredentialVault refreshTokenVault(api, refreshTokenTarget);
+	CHECK(refreshTokenVault.write("test-refresh-token").succeeded());
+	CHECK(api.writeTarget == refreshTokenTarget);
+	CHECK(api.writeTarget != streamKeyTarget);
+	CHECK(std::string(api.writeBlob.begin(), api.writeBlob.end()) == "test-refresh-token");
+}
+
 void testCredentialInputValidation()
 {
 	FakeWinCredentialApi api;
@@ -636,6 +652,7 @@ int main()
 	testYouTubeServerUrlValidation();
 	testSettingsInvalidServerUrlIsRejectedBeforeSave();
 	testCredentialWriteContract();
+	testAccountCredentialTargetIsIsolated();
 	testCredentialInputValidation();
 	testCredentialWriteFailureMapping();
 	testCredentialReadAndFree();
