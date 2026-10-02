@@ -39,6 +39,8 @@ struct DockText {
 	QString nativeUnavailable;
 	QString youtubeName;
 	QString setup;
+	QString showSettings;
+	QString hideSettings;
 	QString profileLabel;
 	QString enableYouTube;
 	QString serverUrlLabel;
@@ -157,14 +159,18 @@ public:
 private:
 	bool event(QEvent *event) override;
 	QString noticeText(DockNotice notice) const;
+	void updateSetupVisibility(bool compactEligible);
+	void updateNoticeVisibility();
 
 	DockText text_;
 	QGroupBox *gettingStartedGroup_ = nullptr;
+	QGroupBox *setupGroup_ = nullptr;
 	QLabel *profileNameLabel_ = nullptr;
 	QLabel *primaryDestinationLabel_ = nullptr;
 	QLabel *primaryStatusLabel_ = nullptr;
 	QLabel *youtubeStatusLabel_ = nullptr;
 	QCheckBox *youtubeEnabledCheckBox_ = nullptr;
+	QPushButton *toggleSettingsButton_ = nullptr;
 	QLineEdit *serverUrlEdit_ = nullptr;
 	QPushButton *saveServerUrlButton_ = nullptr;
 	QLabel *credentialStatusLabel_ = nullptr;
@@ -174,6 +180,10 @@ private:
 	QPushButton *retryYouTubeButton_ = nullptr;
 	QLabel *noticeLabel_ = nullptr;
 	QPointer<QMessageBox> credentialRemovalDialog_;
+	bool setupExpanded_ = true;
+	bool compactEligible_ = false;
+	DockNotice currentNotice_ = DockNotice::Preview;
+	bool youtubeFailureNotice_ = false;
 };
 
 } // namespace easy_multistream

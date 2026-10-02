@@ -50,6 +50,8 @@ easy_multistream::DockText testText()
 	text.nativeUnavailable = QStringLiteral("Unavailable");
 	text.youtubeName = QStringLiteral("YouTube");
 	text.setup = QStringLiteral("Setup");
+	text.showSettings = QStringLiteral("Change settings");
+	text.hideSettings = QStringLiteral("Hide settings");
 	text.profileLabel = QStringLiteral("Profile");
 	text.enableYouTube = QStringLiteral("Enable YouTube");
 	text.serverUrlLabel = QStringLiteral("Server URL");
@@ -117,18 +119,24 @@ void testStateAndActions()
 {
 	easy_multistream::DockView view(testText());
 	auto *profile = requiredChild<QLabel>(view, "easyMultistreamProfileName");
+	auto *nativeDestination = requiredChild<QLabel>(view, "easyMultistreamNativeDestination");
+	auto *nativeStatus = requiredChild<QLabel>(view, "easyMultistreamNativeStatus");
 	auto *youtubeStatus = requiredChild<QLabel>(view, "easyMultistreamYouTubeStatus");
+	auto *notice = requiredChild<QLabel>(view, "easyMultistreamNotice");
 	auto *credentialStatus = requiredChild<QLabel>(view, "easyMultistreamCredentialStatus");
 	auto *gettingStarted = requiredChild<QGroupBox>(view, "easyMultistreamGettingStarted");
+	auto *setup = requiredChild<QGroupBox>(view, "easyMultistreamSetup");
+	auto *toggleSettings = requiredChild<QPushButton>(view, "easyMultistreamToggleSettings");
 	auto *enabled = requiredChild<QCheckBox>(view, "easyMultistreamYouTubeEnabled");
 	auto *serverUrl = requiredChild<QLineEdit>(view, "easyMultistreamServerUrl");
 	auto *saveServerUrl = requiredChild<QPushButton>(view, "easyMultistreamSaveServerUrl");
 	auto *key = requiredChild<QLineEdit>(view, "easyMultistreamStreamKey");
 	auto *save = requiredChild<QPushButton>(view, "easyMultistreamSaveKey");
 	auto *remove = requiredChild<QPushButton>(view, "easyMultistreamRemoveKey");
-	if (profile == nullptr || youtubeStatus == nullptr || credentialStatus == nullptr || gettingStarted == nullptr ||
-	    enabled == nullptr ||
-	    serverUrl == nullptr || saveServerUrl == nullptr || key == nullptr || save == nullptr || remove == nullptr) {
+	if (profile == nullptr || nativeDestination == nullptr || nativeStatus == nullptr || youtubeStatus == nullptr ||
+	    notice == nullptr || credentialStatus == nullptr || gettingStarted == nullptr || setup == nullptr ||
+	    toggleSettings == nullptr || enabled == nullptr || serverUrl == nullptr || saveServerUrl == nullptr ||
+	    key == nullptr || save == nullptr || remove == nullptr) {
 		return;
 	}
 
@@ -153,6 +161,9 @@ void testStateAndActions()
 	CHECK(save->isEnabled());
 	CHECK(!remove->isEnabled());
 	CHECK(!gettingStarted->isHidden());
+	CHECK(!setup->isHidden());
+	CHECK(toggleSettings->isHidden());
+	CHECK(!notice->isHidden());
 
 	QObject actionContext;
 	bool enabledCalled = false;
@@ -167,7 +178,7 @@ void testStateAndActions()
 		&actionContext,
 		[&](bool value) {
 			enabledCalled = true;
-			 enabledValue = value;
+			enabledValue = value;
 		},
 		[&](QByteArray value) {
 			saveServerUrlCalled = true;
@@ -177,8 +188,7 @@ void testStateAndActions()
 			saveKeyCalled = true;
 			receivedKey = std::move(streamKey);
 		},
-		[&]() { removeCalled = true; },
-		[&]() { retryCalled = true; });
+		[&]() { removeCalled = true; }, [&]() { retryCalled = true; });
 
 	enabled->setChecked(true);
 	CHECK(enabledCalled);
@@ -203,6 +213,27 @@ void testStateAndActions()
 	CHECK(youtubeStatus->text() == QStringLiteral("Ready"));
 	CHECK(remove->isEnabled());
 	CHECK(gettingStarted->isHidden());
+	CHECK(setup->isHidden());
+	CHECK(!toggleSettings->isHidden());
+	CHECK(toggleSettings->text() == QStringLiteral("Change settings"));
+	CHECK(notice->isHidden());
+	toggleSettings->click();
+	CHECK(!setup->isHidden());
+	CHECK(toggleSettings->text() == QStringLiteral("Hide settings"));
+	CHECK(!notice->isHidden());
+	view.applyState(state);
+	CHECK(!setup->isHidden());
+	toggleSettings->click();
+	CHECK(setup->isHidden());
+	CHECK(notice->isHidden());
+	state.notice = easy_multistream::DockNotice::KeySaved;
+	view.applyState(state);
+	CHECK(notice->isHidden());
+	toggleSettings->click();
+	CHECK(!notice->isHidden());
+	CHECK(notice->text() == QStringLiteral("Key saved"));
+	toggleSettings->click();
+	CHECK(notice->isHidden());
 	remove->click();
 	CHECK(removeCalled);
 
@@ -216,6 +247,9 @@ void testStateAndActions()
 	CHECK(!save->isEnabled());
 	CHECK(!remove->isEnabled());
 	CHECK(gettingStarted->isHidden());
+	CHECK(!setup->isHidden());
+	CHECK(toggleSettings->isHidden());
+	CHECK(!notice->isHidden());
 
 	state.settingsEditable = true;
 	state.runtimeAvailable = true;
@@ -224,6 +258,8 @@ void testStateAndActions()
 	state.session.native = easy_multistream::NativeStreamState::Streaming;
 	state.session.youtube = easy_multistream::YouTubeStreamState::Streaming;
 	view.applyState(state);
+	CHECK(nativeDestination->text() == QStringLiteral("Twitch (OBS)"));
+	CHECK(nativeStatus->text() == QStringLiteral("Streaming"));
 	CHECK(youtubeStatus->text() == QStringLiteral("Streaming"));
 	CHECK(!enabled->isEnabled());
 	CHECK(!serverUrl->isEnabled());
@@ -240,9 +276,11 @@ void testStateAndActions()
 
 	state.session.youtube = easy_multistream::YouTubeStreamState::Failed;
 	view.applyState(state);
+	CHECK(nativeDestination->text() == QStringLiteral("Twitch (OBS)"));
+	CHECK(nativeStatus->text() == QStringLiteral("Streaming"));
 	CHECK(youtubeStatus->text() == QStringLiteral("Stopped — Twitch is still streaming"));
-	CHECK(view.findChild<QLabel *>("easyMultistreamNotice")->text() ==
-	      QStringLiteral("YouTube stopped. Twitch is still streaming."));
+	CHECK(notice->text() == QStringLiteral("YouTube stopped. Twitch is still streaming."));
+	CHECK(!notice->isHidden());
 	auto *retry = requiredChild<QPushButton>(view, "easyMultistreamRetryYouTube");
 	CHECK(retry != nullptr && !retry->isHidden() && retry->isEnabled());
 	if (retry != nullptr) {
