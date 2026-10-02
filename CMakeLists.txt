@@ -16,8 +16,10 @@ include(helpers)
 include(CTest)
 
 add_library(${CMAKE_PROJECT_NAME} MODULE)
+add_library(${CMAKE_PROJECT_NAME}-secure-core STATIC)
 add_library(${CMAKE_PROJECT_NAME}-core STATIC)
 add_library(${CMAKE_PROJECT_NAME}-session-core STATIC)
+add_library(${CMAKE_PROJECT_NAME}-oauth-core STATIC)
 
 find_package(libobs REQUIRED)
 find_package(obs-frontend-api REQUIRED)
@@ -28,21 +30,47 @@ target_link_libraries(
   PRIVATE
     ${CMAKE_PROJECT_NAME}-core
     ${CMAKE_PROJECT_NAME}-session-core
+    ${CMAKE_PROJECT_NAME}-oauth-core
     OBS::libobs
     OBS::obs-frontend-api
     Qt6::Core
     Qt6::Widgets
 )
 
-target_link_libraries(${CMAKE_PROJECT_NAME}-core PUBLIC OBS::libobs PRIVATE Advapi32)
+target_sources(
+  ${CMAKE_PROJECT_NAME}-secure-core
+  PRIVATE src/secure-buffer.cpp src/secure-buffer.hpp
+)
+target_include_directories(${CMAKE_PROJECT_NAME}-secure-core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+target_link_libraries(
+  ${CMAKE_PROJECT_NAME}-core
+  PUBLIC OBS::libobs ${CMAKE_PROJECT_NAME}-secure-core
+  PRIVATE Advapi32
+)
 
 target_include_directories(${CMAKE_PROJECT_NAME}-core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
 target_sources(
   ${CMAKE_PROJECT_NAME}-session-core
-  PRIVATE src/session-coordinator.cpp src/session-coordinator.hpp
+  PRIVATE
+    src/session-coordinator.cpp
+    src/session-coordinator.hpp
+    src/youtube-account-coordinator.cpp
+    src/youtube-account-coordinator.hpp
 )
 target_include_directories(${CMAKE_PROJECT_NAME}-session-core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
+target_sources(
+  ${CMAKE_PROJECT_NAME}-oauth-core
+  PRIVATE src/google-oauth-protocol.cpp src/google-oauth-protocol.hpp
+)
+target_include_directories(${CMAKE_PROJECT_NAME}-oauth-core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(
+  ${CMAKE_PROJECT_NAME}-oauth-core
+  PUBLIC Qt6::Core
+  PRIVATE ${CMAKE_PROJECT_NAME}-secure-core
+)
 
 configure_file(src/version.hpp.in generated/version.hpp @ONLY)
 
@@ -71,8 +99,6 @@ target_sources(
     src/credential-vault.hpp
     src/onboarding-state.cpp
     src/onboarding-state.hpp
-    src/secure-buffer.cpp
-    src/secure-buffer.hpp
     src/settings.cpp
     src/settings.hpp
     src/windows-credential-vault.cpp
@@ -111,6 +137,32 @@ if(BUILD_TESTING)
   target_sources(${CMAKE_PROJECT_NAME}-session-tests PRIVATE tests/session-tests.cpp)
   target_link_libraries(${CMAKE_PROJECT_NAME}-session-tests PRIVATE ${CMAKE_PROJECT_NAME}-session-core)
   add_test(NAME ${CMAKE_PROJECT_NAME}-session COMMAND ${CMAKE_PROJECT_NAME}-session-tests)
+
+  add_executable(${CMAKE_PROJECT_NAME}-youtube-account-tests)
+  target_sources(${CMAKE_PROJECT_NAME}-youtube-account-tests PRIVATE tests/youtube-account-coordinator-tests.cpp)
+  target_link_libraries(${CMAKE_PROJECT_NAME}-youtube-account-tests PRIVATE ${CMAKE_PROJECT_NAME}-session-core)
+  add_test(NAME ${CMAKE_PROJECT_NAME}-youtube-account COMMAND ${CMAKE_PROJECT_NAME}-youtube-account-tests)
+
+  add_executable(${CMAKE_PROJECT_NAME}-google-oauth-protocol-tests)
+  target_sources(${CMAKE_PROJECT_NAME}-google-oauth-protocol-tests PRIVATE tests/google-oauth-protocol-tests.cpp)
+  target_link_libraries(${CMAKE_PROJECT_NAME}-google-oauth-protocol-tests PRIVATE ${CMAKE_PROJECT_NAME}-oauth-core)
+
+  add_custom_command(
+    TARGET ${CMAKE_PROJECT_NAME}-google-oauth-protocol-tests
+    POST_BUILD
+    COMMAND
+      "${CMAKE_COMMAND}" -E copy_if_different
+      $<TARGET_RUNTIME_DLLS:${CMAKE_PROJECT_NAME}-google-oauth-protocol-tests>
+      $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}-google-oauth-protocol-tests>
+    COMMAND_EXPAND_LISTS
+    COMMENT "Copy Google OAuth protocol test runtime dependencies"
+    VERBATIM
+  )
+
+  add_test(
+    NAME ${CMAKE_PROJECT_NAME}-google-oauth-protocol
+    COMMAND ${CMAKE_PROJECT_NAME}-google-oauth-protocol-tests
+  )
 
   add_executable(${CMAKE_PROJECT_NAME}-runtime-tests)
   target_sources(
@@ -198,6 +250,7 @@ if(BUILD_TESTING)
   set_tests_properties(
     ${CMAKE_PROJECT_NAME}-unit
     ${CMAKE_PROJECT_NAME}-ui
+    ${CMAKE_PROJECT_NAME}-google-oauth-protocol
     PROPERTIES ENVIRONMENT_MODIFICATION "${test_runtime_environment}"
   )
 endif()

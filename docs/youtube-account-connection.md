@@ -1,6 +1,7 @@
 # YouTube account connection
 
-Status: accepted product and architecture direction. Not implemented or exposed in the current build.
+Status: accepted product and architecture direction. The repository contains a headless state and protocol
+foundation, but account connection is not yet integrated or exposed in the current build.
 
 ## Decision
 
@@ -66,14 +67,21 @@ Account connection and output delivery are separate states. A channel may be con
 The supported authorization flow follows Google's installed-app guidance:
 
 - launch the system browser, never an embedded login webview;
-- bind a temporary listener to `127.0.0.1` on a random available port;
+- bind a temporary listener to `127.0.0.1` first, then use its OS-assigned port in the authorization URL and keep
+  the listener bound while the system browser is open;
 - accept only the expected callback path and one active attempt;
+- bound the HTTP request line, callback URL, header and query sizes before constructing a Qt URL, accept only the
+  expected HTTP method, and stop reading on a short timeout;
 - generate a random `state` and require an exact callback match;
 - use PKCE with `S256` and a fresh verifier for every attempt;
 - exchange the code over HTTPS without treating a desktop `client_secret` as a security boundary;
 - close the listener after success, rejection, cancellation, or timeout;
 - invalidate late callbacks with a generation and attempt lease;
 - cancel listener and network requests during profile change and OBS shutdown.
+
+Normal connection requests use offline access without forcing an extra consent prompt. An explicit reconnection can
+request `prompt=consent` when a fresh refresh token is required; this distinction is internal and is not shown as OAuth
+terminology in the dock.
 
 The browser completion page contains no token or code and only tells the user that they can return to OBS.
 
@@ -93,6 +101,11 @@ As with the existing stream key, this design does not claim resistance to malwar
 ## Lifetime and failure rules
 
 Every asynchronous browser, token, and API result carries the account generation and attempt that created it. Results are ignored after cancellation, a new attempt, profile transition, disconnect, or shutdown.
+
+Credential replacement is serialized with the account state. After discovery, the provider revalidates the active
+attempt, performs the synchronous Credential Manager write on the owner thread, and commits the account state before
+yielding to Qt's event loop. If credential storage ever becomes asynchronous, it must use an attempt-scoped staging
+target with explicit rollback so cancellation, profile change, or shutdown cannot leave an orphaned replacement token.
 
 The provider:
 
@@ -135,11 +148,16 @@ References:
 The internal implementation order is intentionally not shown in the user interface:
 
 1. add a separate refresh-token credential target and a testable, headless account state/provider boundary;
-2. implement system-browser authorization and fixed-origin HTTPS transport using Qt Network;
-3. implement token refresh/revoke and YouTube channel/stream discovery;
-4. resolve the selected stream into the current RTMPS output boundary;
-5. test cancellation, stale callbacks, profile transitions, shutdown, and Twitch failure isolation;
-6. add the account UI and keep manual configuration under advanced settings;
-7. complete Google policy, verification, privacy, quota, and signed-release gates before recommending it to general users.
+2. implement and test PKCE/state generation, the authorization URL, and exact loopback-callback validation;
+3. implement the loopback listener, system-browser launch, and fixed-origin HTTPS transport using Qt Network;
+4. implement token exchange, refresh/revoke, and YouTube channel/stream discovery;
+5. resolve the selected stream into the current RTMPS output boundary;
+6. test cancellation, stale callbacks, profile transitions, shutdown, and Twitch failure isolation;
+7. add the account UI and keep manual configuration under advanced settings;
+8. complete Google policy, verification, privacy, quota, and signed-release gates before recommending it to general users.
+
+The first two items are now present as non-instantiated libraries with standalone tests. They do not open a browser,
+listen on a port, make a network request, read a credential, or change the dock/runtime behavior. The remaining items
+stay gated, so a partial connection path cannot appear in the user interface.
 
 No account UI is added merely to advertise unfinished functionality. A build without a complete configured provider continues to show only the working manual setup.
