@@ -43,9 +43,12 @@ Windows Credential Manager
 
 Current OBS profile/basic.ini
   └─ SchemaVersion + YouTubeEnabled + YouTubeServerUrl
+
+OBS user config/user.ini
+  └─ one non-secret first-display marker for the dock
 ```
 
-The dock saves the non-secret enable setting and YouTube RTMPS Stream URL, and exposes a masked YouTube key editor. It renders immutable Twitch/YouTube status snapshots and a YouTube-only retry action after failure. The key is intentionally shared across OBS profiles; the enabled setting and Stream URL are profile-specific.
+The dock saves the non-secret enable setting and YouTube RTMPS Stream URL, and exposes a masked YouTube key editor. It renders immutable Twitch/YouTube status snapshots and a YouTube-only retry action after failure. The key is intentionally shared across OBS profiles; the enabled setting and Stream URL are profile-specific. On first use, the dock is revealed once after OBS finishes loading. Its non-secret display marker is user-scoped rather than profile-scoped, so later profile changes and plugin updates continue to respect OBS's saved dock layout.
 
 User-visible text follows OBS and platform terminology. Internal milestone names, schema versions, implementation roles such as primary/secondary output, and release codenames stay in code and engineering documentation rather than appearing in the dock.
 

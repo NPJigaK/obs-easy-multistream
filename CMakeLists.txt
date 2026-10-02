@@ -51,6 +51,8 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE "${CMAKE_CURRENT_BINARY
 target_sources(
   ${CMAKE_PROJECT_NAME}
   PRIVATE
+    src/dock-visibility.cpp
+    src/dock-visibility.hpp
     src/dock-view.cpp
     src/dock-view.hpp
     src/plugin-main.cpp
@@ -67,6 +69,8 @@ target_sources(
   ${CMAKE_PROJECT_NAME}-core
   PRIVATE
     src/credential-vault.hpp
+    src/onboarding-state.cpp
+    src/onboarding-state.hpp
     src/secure-buffer.cpp
     src/secure-buffer.hpp
     src/settings.cpp
@@ -135,7 +139,12 @@ if(BUILD_TESTING)
   add_executable(${CMAKE_PROJECT_NAME}-ui-tests)
   target_sources(
     ${CMAKE_PROJECT_NAME}-ui-tests
-    PRIVATE src/dock-view.cpp src/dock-view.hpp tests/ui-tests.cpp
+    PRIVATE
+      src/dock-visibility.cpp
+      src/dock-visibility.hpp
+      src/dock-view.cpp
+      src/dock-view.hpp
+      tests/ui-tests.cpp
   )
   target_include_directories(${CMAKE_PROJECT_NAME}-ui-tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
   target_link_libraries(${CMAKE_PROJECT_NAME}-ui-tests PRIVATE Qt6::Core Qt6::Widgets)

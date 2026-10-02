@@ -14,6 +14,7 @@
 
 class QCheckBox;
 class QEvent;
+class QGroupBox;
 class QLabel;
 class QLineEdit;
 class QMessageBox;
@@ -24,6 +25,8 @@ namespace easy_multistream {
 
 struct DockText {
 	QString heading;
+	QString gettingStarted;
+	QString gettingStartedBody;
 	QString destinations;
 	QString primaryName;
 	QString primaryStatus;
@@ -156,6 +159,7 @@ private:
 	QString noticeText(DockNotice notice) const;
 
 	DockText text_;
+	QGroupBox *gettingStartedGroup_ = nullptr;
 	QLabel *profileNameLabel_ = nullptr;
 	QLabel *primaryDestinationLabel_ = nullptr;
 	QLabel *primaryStatusLabel_ = nullptr;
