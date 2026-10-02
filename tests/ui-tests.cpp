@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2026 NPJigaK
 
+#include "dock-visibility.hpp"
 #include "dock-view.hpp"
 
 #include <QAbstractButton>
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
+#include <QDockWidget>
+#include <QGroupBox>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QMainWindow>
 #include <QPushButton>
 
 #include <iostream>
@@ -32,6 +36,8 @@ easy_multistream::DockText testText()
 {
 	easy_multistream::DockText text;
 	text.heading = QStringLiteral("Easy Multistream");
+	text.gettingStarted = QStringLiteral("Get started");
+	text.gettingStartedBody = QStringLiteral("Complete the YouTube setup, then use OBS as usual.");
 	text.destinations = QStringLiteral("Destinations");
 	text.primaryName = QStringLiteral("Primary");
 	text.primaryStatus = QStringLiteral("Managed by OBS");
@@ -113,13 +119,15 @@ void testStateAndActions()
 	auto *profile = requiredChild<QLabel>(view, "easyMultistreamProfileName");
 	auto *youtubeStatus = requiredChild<QLabel>(view, "easyMultistreamYouTubeStatus");
 	auto *credentialStatus = requiredChild<QLabel>(view, "easyMultistreamCredentialStatus");
+	auto *gettingStarted = requiredChild<QGroupBox>(view, "easyMultistreamGettingStarted");
 	auto *enabled = requiredChild<QCheckBox>(view, "easyMultistreamYouTubeEnabled");
 	auto *serverUrl = requiredChild<QLineEdit>(view, "easyMultistreamServerUrl");
 	auto *saveServerUrl = requiredChild<QPushButton>(view, "easyMultistreamSaveServerUrl");
 	auto *key = requiredChild<QLineEdit>(view, "easyMultistreamStreamKey");
 	auto *save = requiredChild<QPushButton>(view, "easyMultistreamSaveKey");
 	auto *remove = requiredChild<QPushButton>(view, "easyMultistreamRemoveKey");
-	if (profile == nullptr || youtubeStatus == nullptr || credentialStatus == nullptr || enabled == nullptr ||
+	if (profile == nullptr || youtubeStatus == nullptr || credentialStatus == nullptr || gettingStarted == nullptr ||
+	    enabled == nullptr ||
 	    serverUrl == nullptr || saveServerUrl == nullptr || key == nullptr || save == nullptr || remove == nullptr) {
 		return;
 	}
@@ -144,6 +152,7 @@ void testStateAndActions()
 	CHECK(key->isEnabled());
 	CHECK(save->isEnabled());
 	CHECK(!remove->isEnabled());
+	CHECK(!gettingStarted->isHidden());
 
 	QObject actionContext;
 	bool enabledCalled = false;
@@ -193,6 +202,7 @@ void testStateAndActions()
 	CHECK(!enabledCalled);
 	CHECK(youtubeStatus->text() == QStringLiteral("Ready"));
 	CHECK(remove->isEnabled());
+	CHECK(gettingStarted->isHidden());
 	remove->click();
 	CHECK(removeCalled);
 
@@ -205,6 +215,7 @@ void testStateAndActions()
 	CHECK(!key->isEnabled());
 	CHECK(!save->isEnabled());
 	CHECK(!remove->isEnabled());
+	CHECK(gettingStarted->isHidden());
 
 	state.settingsEditable = true;
 	state.runtimeAvailable = true;
@@ -238,6 +249,31 @@ void testStateAndActions()
 		retry->click();
 	}
 	CHECK(retryCalled);
+}
+
+void testDockAutoShowHelper()
+{
+	QMainWindow mainWindow;
+	QDockWidget dock(QStringLiteral("Easy Multistream"), &mainWindow);
+	dock.setObjectName(QStringLiteral("easy_multistream.dock"));
+	dock.setWidget(new QWidget(&dock));
+	mainWindow.addDockWidget(Qt::RightDockWidgetArea, &dock);
+	dock.hide();
+
+	CHECK(!easy_multistream::showDockById(nullptr, "easy_multistream.dock"));
+	CHECK(!easy_multistream::showDockById(&mainWindow, "easy_multistream.dock"));
+
+	mainWindow.show();
+	QApplication::processEvents();
+	CHECK(easy_multistream::showDockById(&mainWindow, "easy_multistream.dock"));
+	CHECK(dock.isVisible());
+	CHECK(!easy_multistream::showDockById(&mainWindow, "missing.dock"));
+
+	dock.hide();
+	mainWindow.showMinimized();
+	QApplication::processEvents();
+	CHECK(mainWindow.isMinimized());
+	CHECK(!easy_multistream::showDockById(&mainWindow, "easy_multistream.dock"));
 }
 
 void testSecretEditorBlocksExportAndClearsWhenHidden()
@@ -299,6 +335,7 @@ int main(int argc, char **argv)
 {
 	QApplication application(argc, argv);
 	testStateAndActions();
+	testDockAutoShowHelper();
 	testSecretEditorBlocksExportAndClearsWhenHidden();
 	testCredentialRemovalConfirmationIsAsynchronousAndCancellable();
 

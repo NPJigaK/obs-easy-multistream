@@ -134,6 +134,7 @@ P0は安全性・所有権・秘密情報・native出力保護に関わる項目
 
 | ID | 操作 | 確認すること |
 |---|---|---|
+| OBS-M-00 | cleanなOBSユーザー設定で初回起動し、案内を確認してdockを閉じ、OBSを再起動する | 初回だけEasy Multistream dockが自動表示され、未設定時の案内が読める。2回目は勝手に再表示せず、Docksメニューから再表示できる。profile切替・dock表示/非表示で配信状態は変わらない |
 | OBS-M-01 | テストprofileでTwitch nativeを設定し、Easy Multistreamを有効化。YouTube RTMPS server/keyを保存してOBSのStart Streamingを1回押す | TwitchとYouTubeがそれぞれ接続する。OBSのnative Start/Stopボタンを増やさない。YouTubeが接続中の間に送信中と表示しない |
 | OBS-M-02 | OBS-M-01の状態でYouTube outputだけをテストfaultまたは接続失敗にする | YouTubeだけが失敗し、Twitchは送信を続ける。再接続ループやnative Stopがない |
 | OBS-M-03 | OBS-M-01でStopを押し、Twitch停止・YouTube停止・YouTube完全releaseの順序をログで確認する | 停止後にOBSを閉じてもクラッシュせず、次回Startで旧outputが残っていない |
@@ -206,7 +207,8 @@ generation invalidation / new work拒否
 - [x] OBS 32.2.2固定環境でwarnings-as-errorsビルドできる。
 - [x] 現在のCTestがすべて通る。
 - [x] start acceptedとstart signalを分けた状態機械テストが通る。
-- [x] リポジトリ内の隔離portable OBS 32.2.2で、0.1.0のload、Startup complete、clean unload、memory leaks 0を確認した。
+- [x] リポジトリ内の隔離portable OBS 32.2.2で、0.1.0基礎buildのload、Startup complete、clean unload、memory leaks 0を確認した。
+- [ ] 0.2.0で初回dock表示、表示済みmarker保存、2回目の非表示、トレイ復帰後の表示を確認した。
 - [ ] `obs_output_start()`同期拒否とnative StartStreaming同期拒否を別々にテストした。
 - [ ] output error、YouTube-only disconnect、credential failure、missing URL/key、unsupported codecをテストした。
 - [ ] stop、duplicate stop、rapid stop-start、profile change、EXITをテストした。

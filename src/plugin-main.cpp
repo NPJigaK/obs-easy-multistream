@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2026 NPJigaK
 
+#include "dock-visibility.hpp"
 #include "dock-view.hpp"
+#include "onboarding-state.hpp"
 #include "runtime-controller.hpp"
 #include "settings-controller.hpp"
 #include "version.hpp"
@@ -14,10 +16,12 @@
 
 #include <QByteArray>
 #include <QCoreApplication>
+#include <QEvent>
 #include <QPointer>
 #include <QMetaObject>
 #include <QString>
 #include <QThread>
+#include <QWidget>
 
 #include <exception>
 #include <functional>
@@ -32,6 +36,27 @@ OBS_MODULE_USE_DEFAULT_LOCALE("obs-easy-multistream", "en-US")
 namespace {
 
 constexpr char kDockId[] = "easy_multistream.dock";
+
+class WindowVisibilityFilter final : public QObject {
+public:
+	explicit WindowVisibilityFilter(std::function<void()> callback) : callback_(std::move(callback)) {}
+
+protected:
+	bool eventFilter(QObject *, QEvent *event) override
+	{
+		if (event->type() == QEvent::Show || event->type() == QEvent::WindowStateChange) {
+			try {
+				callback_();
+			} catch (...) {
+				blog(LOG_ERROR, "[obs-easy-multistream] Dock visibility callback failed");
+			}
+		}
+		return false;
+	}
+
+private:
+	std::function<void()> callback_;
+};
 
 struct PluginState {
 	PluginState() : credentialVault(credentialApi) {}
@@ -48,6 +73,9 @@ struct PluginState {
 	easy_multistream::NativeDestination nativeDestination = easy_multistream::NativeDestination::Unknown;
 	std::unique_ptr<easy_multistream::RuntimeController> runtime;
 	bool dockRegistered = false;
+	bool dockAutoShowScheduled = false;
+	QPointer<QWidget> dockAutoShowWindow;
+	std::unique_ptr<WindowVisibilityFilter> dockAutoShowFilter;
 	bool callbackRegistered = false;
 	bool exitSeen = false;
 };
@@ -64,6 +92,8 @@ easy_multistream::DockText loadDockText()
 {
 	easy_multistream::DockText text;
 	text.heading = moduleText("Dock.Heading");
+	text.gettingStarted = moduleText("Dock.GettingStarted");
+	text.gettingStartedBody = moduleText("Dock.GettingStarted.Body");
 	text.destinations = moduleText("Dock.Destinations");
 	text.primaryName = moduleText("Dock.Primary");
 	text.primaryStatus = moduleText("Dock.PrimaryStatus");
@@ -190,24 +220,103 @@ void attachNativeStartingProbe(PluginState &state) noexcept
 	state.nativeStartingSignal.Connect(signalHandler, "starting", &onNativeOutputStarting, &state);
 }
 
-void postToRuntime(QObject *context, std::function<void()> callback) noexcept
+bool postToRuntime(QObject *context, std::function<void()> callback) noexcept
 {
 	if (context == nullptr || !callback) {
-		return;
+		return false;
 	}
 	try {
-		QMetaObject::invokeMethod(context,
-					  [callback = std::move(callback)]() mutable {
-						  try {
-							  callback();
-						  } catch (...) {
-							  blog(LOG_ERROR,
-							       "[obs-easy-multistream] Runtime callback failed");
-						  }
-					  },
-					  Qt::QueuedConnection);
+		return QMetaObject::invokeMethod(context,
+					 [callback = std::move(callback)]() mutable {
+						 try {
+							 callback();
+						 } catch (...) {
+							 blog(LOG_ERROR,
+							      "[obs-easy-multistream] Runtime callback failed");
+						 }
+					 },
+					 Qt::QueuedConnection);
 	} catch (...) {
 		blog(LOG_ERROR, "[obs-easy-multistream] Failed to queue a runtime callback");
+		return false;
+	}
+}
+
+void scheduleDockAutoShow(PluginState &state) noexcept;
+
+void stopDockAutoShowWatch(PluginState &state) noexcept
+{
+	if (state.dockAutoShowWindow != nullptr && state.dockAutoShowFilter != nullptr) {
+		state.dockAutoShowWindow->removeEventFilter(state.dockAutoShowFilter.get());
+	}
+	state.dockAutoShowWindow.clear();
+	state.dockAutoShowFilter.reset();
+}
+
+void watchForMainWindowVisibility(PluginState &state, QWidget *mainWindow) noexcept
+{
+	if (mainWindow == nullptr || state.exitSeen || state.dockAutoShowFilter != nullptr) {
+		return;
+	}
+
+	try {
+		PluginState *statePointer = &state;
+		state.dockAutoShowFilter = std::make_unique<WindowVisibilityFilter>([statePointer]() noexcept {
+			scheduleDockAutoShow(*statePointer);
+		});
+		state.dockAutoShowWindow = mainWindow;
+		mainWindow->installEventFilter(state.dockAutoShowFilter.get());
+	} catch (...) {
+		state.dockAutoShowWindow.clear();
+		state.dockAutoShowFilter.reset();
+		blog(LOG_ERROR, "[obs-easy-multistream] Could not watch for the OBS window to become visible");
+	}
+}
+
+void autoShowDockIfNeeded(PluginState &state) noexcept
+{
+	if (state.exitSeen || !state.dockRegistered) {
+		return;
+	}
+
+	config_t *userConfig = obs_frontend_get_user_config();
+	if (!easy_multistream::shouldAutoShowDock(userConfig)) {
+		stopDockAutoShowWatch(state);
+		return;
+	}
+
+	auto *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
+	if (mainWindow == nullptr || !mainWindow->isVisible() || mainWindow->isMinimized()) {
+		// Never pull OBS out of the tray or steal focus.  The event filter
+		// retries after the user makes the main window visible.
+		watchForMainWindowVisibility(state, mainWindow);
+		return;
+	}
+	if (!easy_multistream::showDockById(mainWindow, kDockId)) {
+		blog(LOG_WARNING, "[obs-easy-multistream] Could not auto-show the dock on first use");
+		return;
+	}
+
+	stopDockAutoShowWatch(state);
+	if (easy_multistream::markDockAutoShowHandled(userConfig) != CONFIG_SUCCESS) {
+		blog(LOG_WARNING, "[obs-easy-multistream] Could not save the first-use dock preference");
+	}
+}
+
+void scheduleDockAutoShow(PluginState &state) noexcept
+{
+	if (state.dockAutoShowScheduled || state.exitSeen) {
+		return;
+	}
+
+	state.dockAutoShowScheduled = true;
+	PluginState *statePointer = &state;
+	const bool queued = postToRuntime(&state.runtimeContext, [statePointer]() noexcept {
+		statePointer->dockAutoShowScheduled = false;
+		autoShowDockIfNeeded(*statePointer);
+	});
+	if (!queued) {
+		state.dockAutoShowScheduled = false;
 	}
 }
 
@@ -251,6 +360,9 @@ void onFrontendEvent(enum obs_frontend_event event, void *privateData) noexcept
 			state->nativeDestination = currentNativeDestination();
 			if (state->settingsController != nullptr) {
 				state->settingsController->loadCurrentProfile(easy_multistream::DockNotice::Preview, true);
+			}
+			if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
+				scheduleDockAutoShow(*state);
 			}
 			break;
 		case OBS_FRONTEND_EVENT_PROFILE_CHANGING:
@@ -305,6 +417,7 @@ void onFrontendEvent(enum obs_frontend_event event, void *privateData) noexcept
 
 void removeFrontendObjects(PluginState &state) noexcept
 {
+	stopDockAutoShowWatch(state);
 	if (state.callbackRegistered) {
 		obs_frontend_remove_event_callback(onFrontendEvent, &state);
 		state.callbackRegistered = false;
@@ -378,7 +491,7 @@ bool obs_module_load(void)
 				return std::move(result.secret);
 			},
 			[context = &state->runtimeContext](std::function<void()> callback) noexcept {
-				postToRuntime(context, std::move(callback));
+				(void)postToRuntime(context, std::move(callback));
 			});
 		const QPointer<easy_multistream::SettingsController> settingsGuard(state->settingsController.get());
 		state->runtime->setSnapshotSink([settingsGuard](easy_multistream::SessionSnapshot snapshot) mutable {

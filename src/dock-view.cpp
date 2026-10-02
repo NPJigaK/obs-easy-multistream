@@ -57,6 +57,15 @@ DockView::DockView(DockText text, QWidget *parent) : QWidget(parent), text_(std:
 	heading->setFont(headingFont);
 	layout->addWidget(heading);
 
+	gettingStartedGroup_ = new QGroupBox(text_.gettingStarted, this);
+	gettingStartedGroup_->setObjectName(QStringLiteral("easyMultistreamGettingStarted"));
+	auto *gettingStartedLayout = new QVBoxLayout(gettingStartedGroup_);
+	auto *gettingStartedBody = new QLabel(text_.gettingStartedBody, gettingStartedGroup_);
+	gettingStartedBody->setObjectName(QStringLiteral("easyMultistreamGettingStartedBody"));
+	gettingStartedBody->setWordWrap(true);
+	gettingStartedLayout->addWidget(gettingStartedBody);
+	layout->addWidget(gettingStartedGroup_);
+
 	auto *destinations = new QGroupBox(text_.destinations, this);
 	auto *destinationsLayout = new QFormLayout(destinations);
 	destinationsLayout->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
@@ -192,6 +201,10 @@ void DockView::applyState(const DockState &state)
 			 state.session.youtube == YouTubeStreamState::Stopping);
 	const bool streamActive = nativeActive || youtubeActive;
 	const bool youtubeFailed = state.runtimeAvailable && state.session.youtube == YouTubeStreamState::Failed;
+	const bool setupIncomplete = state.youtubeServerUrl.isEmpty() ||
+				     state.credential != CredentialDisplayState::Present;
+	gettingStartedGroup_->setVisible(state.settingsEditable &&
+					 state.credential != CredentialDisplayState::Unavailable && setupIncomplete);
 	youtubeEnabledCheckBox_->setChecked(state.youtubeEnabled);
 	youtubeEnabledCheckBox_->setEnabled(state.settingsEditable && !streamActive);
 	serverUrlEdit_->setEnabled(state.settingsEditable && !streamActive);

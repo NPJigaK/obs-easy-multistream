@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Copyright (C) 2026 NPJigaK
 
+#include "onboarding-state.hpp"
 #include "settings.hpp"
 #include "windows-credential-vault.hpp"
 
@@ -153,6 +154,68 @@ void testSettingsDefaults()
 	CHECK(!loaded.settings.youtubeEnabled);
 	CHECK(loaded.settings.youtubeServerUrl.empty());
 	CHECK(loaded.sourceSchemaVersion == easy_multistream::kSettingsSchemaVersion);
+}
+
+void testOnboardingPreference()
+{
+	CHECK(!easy_multistream::shouldAutoShowDock(nullptr));
+	CHECK(easy_multistream::markDockAutoShowHandled(nullptr) == CONFIG_ERROR);
+
+	Config fresh("");
+	CHECK(easy_multistream::shouldAutoShowDock(fresh.get()));
+
+	// The marker is intentionally presence-based.  A malformed or manually
+	// edited value must not make the plugin repeatedly take over the UI.
+	Config alreadyHandled("[EasyMultistream]\nDockAutoShowHandled=false\n");
+	CHECK(!easy_multistream::shouldAutoShowDock(alreadyHandled.get()));
+
+	const std::filesystem::path path = std::filesystem::current_path() / "easy-multistream-onboarding-test.ini";
+	std::error_code removeError;
+	std::filesystem::remove(path, removeError);
+	std::filesystem::remove(path.string() + ".tmp", removeError);
+
+	config_t *config = nullptr;
+	const std::string utf8Path = path.u8string();
+	CHECK(config_open(&config, utf8Path.c_str(), CONFIG_OPEN_ALWAYS) == CONFIG_SUCCESS);
+	CHECK(config != nullptr);
+	if (config != nullptr) {
+		config_set_string(config, "OtherPlugin", "Preserved", "yes");
+		CHECK(easy_multistream::shouldAutoShowDock(config));
+		CHECK(easy_multistream::markDockAutoShowHandled(config) == CONFIG_SUCCESS);
+		CHECK(!easy_multistream::shouldAutoShowDock(config));
+		config_close(config);
+	}
+
+	config = nullptr;
+	CHECK(config_open(&config, utf8Path.c_str(), CONFIG_OPEN_EXISTING) == CONFIG_SUCCESS);
+	CHECK(config != nullptr);
+	if (config != nullptr) {
+		CHECK(!easy_multistream::shouldAutoShowDock(config));
+		CHECK(std::string(config_get_string(config, "OtherPlugin", "Preserved")) == "yes");
+		config_close(config);
+	}
+	CHECK(std::filesystem::remove(path, removeError));
+
+	const std::filesystem::path failureDirectory =
+		std::filesystem::current_path() / "easy-multistream-onboarding-save-failure-test";
+	const std::filesystem::path failurePath = failureDirectory / "user.ini";
+	std::filesystem::remove_all(failureDirectory, removeError);
+	CHECK(std::filesystem::create_directory(failureDirectory, removeError));
+	config = nullptr;
+	const std::string failureUtf8Path = failurePath.u8string();
+	CHECK(config_open(&config, failureUtf8Path.c_str(), CONFIG_OPEN_ALWAYS) == CONFIG_SUCCESS);
+	CHECK(config != nullptr);
+	if (config != nullptr) {
+		config_set_string(config, "OtherPlugin", "Preserved", "yes");
+		CHECK(config_save_safe(config, "tmp", nullptr) == CONFIG_SUCCESS);
+		CHECK(std::filesystem::remove(failurePath, removeError));
+		CHECK(std::filesystem::remove(failureDirectory, removeError));
+		CHECK(easy_multistream::markDockAutoShowHandled(config) != CONFIG_SUCCESS);
+		CHECK(easy_multistream::shouldAutoShowDock(config));
+		config_close(config);
+	}
+	CHECK(!std::filesystem::exists(failurePath));
+	CHECK(!std::filesystem::exists(failurePath.string() + ".tmp"));
 }
 
 void testSettingsRoundTripAndPlaintextRemoval()
@@ -563,6 +626,7 @@ void testSecureBufferBasics()
 int main()
 {
 	testSettingsDefaults();
+	testOnboardingPreference();
 	testSettingsRoundTripAndPlaintextRemoval();
 	testSettingsSafeSaveAndReload();
 	testSettingsSaveFailureRollsBackInMemoryValues();
