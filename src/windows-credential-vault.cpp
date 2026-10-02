@@ -12,6 +12,8 @@ namespace easy_multistream {
 namespace {
 
 constexpr wchar_t kYouTubeCredentialTarget[] = L"NPJigaK/obs-easy-multistream/v1/youtube-stream-key";
+constexpr wchar_t kYouTubeAccountRefreshTokenTarget[] =
+	L"NPJigaK/obs-easy-multistream/v1/youtube-account-refresh-token";
 wchar_t kYouTubeUserName[] = L"YouTube";
 
 class ReadCredentialGuard final {
@@ -224,6 +226,11 @@ bool WindowsCredentialVault::targetIsValid() const noexcept
 const wchar_t *defaultYouTubeCredentialTarget() noexcept
 {
 	return kYouTubeCredentialTarget;
+}
+
+const wchar_t *defaultYouTubeAccountRefreshTokenTarget() noexcept
+{
+	return kYouTubeAccountRefreshTokenTarget;
 }
 
 } // namespace easy_multistream
