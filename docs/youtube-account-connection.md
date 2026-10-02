@@ -156,8 +156,11 @@ The internal implementation order is intentionally not shown in the user interfa
 7. add the account UI and keep manual configuration under advanced settings;
 8. complete Google policy, verification, privacy, quota, and signed-release gates before recommending it to general users.
 
-The first two items are now present as non-instantiated libraries with standalone tests. They do not open a browser,
-listen on a port, make a network request, read a credential, or change the dock/runtime behavior. The remaining items
-stay gated, so a partial connection path cannot appear in the user interface.
+The first two items and the isolated loopback-listener portion of item three are now present as non-instantiated
+libraries with standalone tests. The listener test uses real local sockets to verify exclusive `127.0.0.1` binding,
+bounded HTTP parsing, state rejection, one-shot completion, timeout, request limits, and cancellation. The listener
+library is not linked into the OBS plugin, so the product still does not open a browser, listen on a port, make an
+OAuth/API network request, read an account credential, or change the dock/runtime behavior. Browser launch, HTTPS
+transport, and all later items stay gated, so a partial connection path cannot appear in the user interface.
 
 No account UI is added merely to advertise unfinished functionality. A build without a complete configured provider continues to show only the working manual setup.

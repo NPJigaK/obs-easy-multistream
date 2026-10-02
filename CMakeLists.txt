@@ -20,10 +20,11 @@ add_library(${CMAKE_PROJECT_NAME}-secure-core STATIC)
 add_library(${CMAKE_PROJECT_NAME}-core STATIC)
 add_library(${CMAKE_PROJECT_NAME}-session-core STATIC)
 add_library(${CMAKE_PROJECT_NAME}-oauth-core STATIC)
+add_library(${CMAKE_PROJECT_NAME}-oauth-loopback STATIC)
 
 find_package(libobs REQUIRED)
 find_package(obs-frontend-api REQUIRED)
-find_package(Qt6 REQUIRED COMPONENTS Core Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Core Network Widgets)
 
 target_link_libraries(
   ${CMAKE_PROJECT_NAME}
@@ -70,6 +71,17 @@ target_link_libraries(
   ${CMAKE_PROJECT_NAME}-oauth-core
   PUBLIC Qt6::Core
   PRIVATE ${CMAKE_PROJECT_NAME}-secure-core
+)
+
+target_sources(
+  ${CMAKE_PROJECT_NAME}-oauth-loopback
+  PRIVATE src/google-oauth-loopback-listener.cpp src/google-oauth-loopback-listener.hpp
+)
+target_include_directories(${CMAKE_PROJECT_NAME}-oauth-loopback PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_link_libraries(
+  ${CMAKE_PROJECT_NAME}-oauth-loopback
+  PUBLIC ${CMAKE_PROJECT_NAME}-oauth-core Qt6::Core Qt6::Network
+  PRIVATE Ws2_32
 )
 
 configure_file(src/version.hpp.in generated/version.hpp @ONLY)
@@ -164,6 +176,33 @@ if(BUILD_TESTING)
     COMMAND ${CMAKE_PROJECT_NAME}-google-oauth-protocol-tests
   )
 
+  add_executable(${CMAKE_PROJECT_NAME}-google-oauth-loopback-tests)
+  target_sources(
+    ${CMAKE_PROJECT_NAME}-google-oauth-loopback-tests
+    PRIVATE tests/google-oauth-loopback-listener-tests.cpp
+  )
+  target_link_libraries(
+    ${CMAKE_PROJECT_NAME}-google-oauth-loopback-tests
+    PRIVATE ${CMAKE_PROJECT_NAME}-oauth-loopback Ws2_32
+  )
+
+  add_custom_command(
+    TARGET ${CMAKE_PROJECT_NAME}-google-oauth-loopback-tests
+    POST_BUILD
+    COMMAND
+      "${CMAKE_COMMAND}" -E copy_if_different
+      $<TARGET_RUNTIME_DLLS:${CMAKE_PROJECT_NAME}-google-oauth-loopback-tests>
+      $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}-google-oauth-loopback-tests>
+    COMMAND_EXPAND_LISTS
+    COMMENT "Copy Google OAuth loopback test runtime dependencies"
+    VERBATIM
+  )
+
+  add_test(
+    NAME ${CMAKE_PROJECT_NAME}-google-oauth-loopback
+    COMMAND ${CMAKE_PROJECT_NAME}-google-oauth-loopback-tests
+  )
+
   add_executable(${CMAKE_PROJECT_NAME}-runtime-tests)
   target_sources(
     ${CMAKE_PROJECT_NAME}-runtime-tests
@@ -251,6 +290,7 @@ if(BUILD_TESTING)
     ${CMAKE_PROJECT_NAME}-unit
     ${CMAKE_PROJECT_NAME}-ui
     ${CMAKE_PROJECT_NAME}-google-oauth-protocol
+    ${CMAKE_PROJECT_NAME}-google-oauth-loopback
     PROPERTIES ENVIRONMENT_MODIFICATION "${test_runtime_environment}"
   )
 endif()
