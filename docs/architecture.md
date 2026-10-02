@@ -48,7 +48,7 @@ OBS user config/user.ini
   └─ one non-secret first-display marker for the dock
 ```
 
-The dock saves the non-secret enable setting and YouTube RTMPS Stream URL, and exposes a masked YouTube key editor. It renders immutable Twitch/YouTube status snapshots and a YouTube-only retry action after failure. The key is intentionally shared across OBS profiles; the enabled setting and Stream URL are profile-specific. On first use, the dock is revealed once after OBS finishes loading. Its non-secret display marker is user-scoped rather than profile-scoped, so later profile changes and plugin updates continue to respect OBS's saved dock layout.
+The dock saves the non-secret enable setting and YouTube RTMPS Stream URL, and exposes a masked YouTube key editor. It renders immutable Twitch/YouTube status snapshots and a YouTube-only retry action after failure. Once the URL and key are present, connection details collapse while the two destination rows and enable control remain visible; the user can reopen the details without changing a streaming session. The key is intentionally shared across OBS profiles; the enabled setting and Stream URL are profile-specific. On first use, the dock is revealed once after OBS finishes loading. Its non-secret display marker is user-scoped rather than profile-scoped, so later profile changes and plugin updates continue to respect OBS's saved dock layout. A localized Tools-menu action only reveals this same dock; it does not own or control an output.
 
 User-visible text follows OBS and platform terminology. Internal milestone names, schema versions, implementation roles such as primary/secondary output, and release codenames stay in code and engineering documentation rather than appearing in the dock.
 
@@ -63,6 +63,7 @@ User-visible text follows OBS and platform terminology. Internal milestone names
 7. The controller never retains `config_t *` or a pointer returned by `config_get_string()` across a call.
 8. Profile-changing and shutdown events clear the secret input and disable further actions before teardown.
 9. No private OBS C++ headers, global style sheets, updater, or telemetry are used. The only plugin-created background thread is the output reaper that prevents potentially blocking RTMP teardown from running on the UI thread.
+10. The Tools-menu `QAction` is disconnected, removed, and synchronously destroyed before the dock or plugin context is released, so no menu callback can outlive the plugin DLL.
 
 ## Configuration and credential invariants
 

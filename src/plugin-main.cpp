@@ -14,6 +14,7 @@
 #include <obs-frontend-api.h>
 #include <obs-module.h>
 
+#include <QAction>
 #include <QByteArray>
 #include <QCoreApplication>
 #include <QEvent>
@@ -62,6 +63,7 @@ struct PluginState {
 	PluginState() : credentialVault(credentialApi) {}
 
 	QPointer<easy_multistream::DockView> dock;
+	QPointer<QAction> toolsMenuAction;
 	std::unique_ptr<easy_multistream::SettingsController> settingsController;
 	QObject runtimeContext;
 	easy_multistream::NativeWinCredentialApi credentialApi;
@@ -106,6 +108,8 @@ easy_multistream::DockText loadDockText()
 	text.nativeUnavailable = moduleText("Dock.Native.Unavailable");
 	text.youtubeName = moduleText("Dock.YouTube");
 	text.setup = moduleText("Dock.Setup");
+	text.showSettings = moduleText("Dock.Settings.Show");
+	text.hideSettings = moduleText("Dock.Settings.Hide");
 	text.profileLabel = moduleText("Dock.Profile");
 	text.enableYouTube = moduleText("Dock.EnableYouTube");
 	text.serverUrlLabel = moduleText("Dock.ServerUrl.Label");
@@ -173,7 +177,7 @@ easy_multistream::NativeDestination currentNativeDestination() noexcept
 	OBSDataAutoRelease settings(obs_service_get_settings(service));
 	const char *provider = settings != nullptr ? obs_data_get_string(settings.Get(), "service") : nullptr;
 	return easy_multistream::classifyNativeDestination(serviceId != nullptr ? serviceId : "",
-											provider != nullptr ? provider : "");
+							   provider != nullptr ? provider : "");
 }
 
 void clearNativeStartingProbe(PluginState &state) noexcept
@@ -226,16 +230,16 @@ bool postToRuntime(QObject *context, std::function<void()> callback) noexcept
 		return false;
 	}
 	try {
-		return QMetaObject::invokeMethod(context,
-					 [callback = std::move(callback)]() mutable {
-						 try {
-							 callback();
-						 } catch (...) {
-							 blog(LOG_ERROR,
-							      "[obs-easy-multistream] Runtime callback failed");
-						 }
-					 },
-					 Qt::QueuedConnection);
+		return QMetaObject::invokeMethod(
+			context,
+			[callback = std::move(callback)]() mutable {
+				try {
+					callback();
+				} catch (...) {
+					blog(LOG_ERROR, "[obs-easy-multistream] Runtime callback failed");
+				}
+			},
+			Qt::QueuedConnection);
 	} catch (...) {
 		blog(LOG_ERROR, "[obs-easy-multistream] Failed to queue a runtime callback");
 		return false;
@@ -243,6 +247,54 @@ bool postToRuntime(QObject *context, std::function<void()> callback) noexcept
 }
 
 void scheduleDockAutoShow(PluginState &state) noexcept;
+
+void removeToolsMenuAction(PluginState &state) noexcept
+{
+	QAction *action = state.toolsMenuAction.data();
+	state.toolsMenuAction.clear();
+	if (action == nullptr) {
+		return;
+	}
+
+	for (QObject *associatedObject : action->associatedObjects()) {
+		if (auto *widget = qobject_cast<QWidget *>(associatedObject); widget != nullptr) {
+			widget->removeAction(action);
+		}
+	}
+	// Synchronous destruction is intentional: a queued delete could outlive
+	// the plugin DLL while the QAction still owns a plugin-defined lambda.
+	delete action;
+}
+
+bool registerToolsMenuAction(PluginState &state) noexcept
+{
+	const QByteArray title = moduleText("Tools.OpenDock").toUtf8();
+	auto *action = static_cast<QAction *>(obs_frontend_add_tools_menu_qaction(title.constData()));
+	if (action == nullptr) {
+		blog(LOG_ERROR, "[obs-easy-multistream] Failed to register the Tools menu action");
+		return false;
+	}
+
+	action->setObjectName(QStringLiteral("easyMultistreamOpenDockAction"));
+	state.toolsMenuAction = action;
+	const QPointer<easy_multistream::DockView> dockGuard(state.dock);
+	const QMetaObject::Connection connection =
+		QObject::connect(action, &QAction::triggered, &state.runtimeContext, [dockGuard]() noexcept {
+			if (dockGuard == nullptr) {
+				return;
+			}
+			auto *mainWindow = static_cast<QWidget *>(obs_frontend_get_main_window());
+			if (!easy_multistream::showDockById(mainWindow, kDockId)) {
+				blog(LOG_WARNING, "[obs-easy-multistream] Could not show the dock from the Tools menu");
+			}
+		});
+	if (!connection) {
+		blog(LOG_ERROR, "[obs-easy-multistream] Failed to connect the Tools menu action");
+		removeToolsMenuAction(state);
+		return false;
+	}
+	return true;
+}
 
 void stopDockAutoShowWatch(PluginState &state) noexcept
 {
@@ -261,9 +313,8 @@ void watchForMainWindowVisibility(PluginState &state, QWidget *mainWindow) noexc
 
 	try {
 		PluginState *statePointer = &state;
-		state.dockAutoShowFilter = std::make_unique<WindowVisibilityFilter>([statePointer]() noexcept {
-			scheduleDockAutoShow(*statePointer);
-		});
+		state.dockAutoShowFilter = std::make_unique<WindowVisibilityFilter>(
+			[statePointer]() noexcept { scheduleDockAutoShow(*statePointer); });
 		state.dockAutoShowWindow = mainWindow;
 		mainWindow->installEventFilter(state.dockAutoShowFilter.get());
 	} catch (...) {
@@ -321,7 +372,7 @@ void scheduleDockAutoShow(PluginState &state) noexcept
 }
 
 void applyRuntimeSettings(PluginState &state, easy_multistream::Settings settings,
-					  easy_multistream::CredentialDisplayState credentialState, bool profileChanged) noexcept
+			  easy_multistream::CredentialDisplayState credentialState, bool profileChanged) noexcept
 {
 	if (state.runtime == nullptr) {
 		return;
@@ -359,7 +410,8 @@ void onFrontendEvent(enum obs_frontend_event event, void *privateData) noexcept
 		case OBS_FRONTEND_EVENT_PROFILE_CHANGED:
 			state->nativeDestination = currentNativeDestination();
 			if (state->settingsController != nullptr) {
-				state->settingsController->loadCurrentProfile(easy_multistream::DockNotice::Preview, true);
+				state->settingsController->loadCurrentProfile(easy_multistream::DockNotice::Preview,
+									      true);
 			}
 			if (event == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
 				scheduleDockAutoShow(*state);
@@ -418,6 +470,7 @@ void onFrontendEvent(enum obs_frontend_event event, void *privateData) noexcept
 void removeFrontendObjects(PluginState &state) noexcept
 {
 	stopDockAutoShowWatch(state);
+	removeToolsMenuAction(state);
 	if (state.callbackRegistered) {
 		obs_frontend_remove_event_callback(onFrontendEvent, &state);
 		state.callbackRegistered = false;
@@ -501,9 +554,10 @@ bool obs_module_load(void)
 		});
 		state->settingsController->setSettingsChangedHandler(
 			[statePointer](easy_multistream::Settings settings,
-					      easy_multistream::CredentialDisplayState credentialState,
-					      bool profileChanged) noexcept {
-				applyRuntimeSettings(*statePointer, std::move(settings), credentialState, profileChanged);
+				       easy_multistream::CredentialDisplayState credentialState,
+				       bool profileChanged) noexcept {
+				applyRuntimeSettings(*statePointer, std::move(settings), credentialState,
+						     profileChanged);
 			});
 		state->settingsController->setRetryYouTubeHandler([statePointer]() noexcept {
 			if (statePointer->runtime != nullptr) {
@@ -520,6 +574,11 @@ bool obs_module_load(void)
 		state->dockRegistered = true;
 		(void)dock.release();
 		pluginState = std::move(state);
+		if (!registerToolsMenuAction(*pluginState)) {
+			removeFrontendObjects(*pluginState);
+			pluginState.reset();
+			return false;
+		}
 
 		try {
 			obs_frontend_add_event_callback(onFrontendEvent, pluginState.get());

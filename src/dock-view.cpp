@@ -85,30 +85,39 @@ DockView::DockView(DockText text, QWidget *parent) : QWidget(parent), text_(std:
 	destinationsLayout->addRow(QString(), retryYouTubeButton_);
 	layout->addWidget(destinations);
 
-	auto *setup = new QGroupBox(text_.setup, this);
-	auto *setupLayout = new QVBoxLayout(setup);
+	auto *setupControls = new QWidget(this);
+	auto *setupControlsLayout = new QHBoxLayout(setupControls);
+	setupControlsLayout->setContentsMargins(0, 0, 0, 0);
+	youtubeEnabledCheckBox_ = new QCheckBox(text_.enableYouTube, setupControls);
+	youtubeEnabledCheckBox_->setObjectName(QStringLiteral("easyMultistreamYouTubeEnabled"));
+	setupControlsLayout->addWidget(youtubeEnabledCheckBox_);
+	setupControlsLayout->addStretch();
+	toggleSettingsButton_ = new QPushButton(text_.showSettings, setupControls);
+	toggleSettingsButton_->setObjectName(QStringLiteral("easyMultistreamToggleSettings"));
+	setupControlsLayout->addWidget(toggleSettingsButton_);
+	layout->addWidget(setupControls);
+
+	setupGroup_ = new QGroupBox(text_.setup, this);
+	setupGroup_->setObjectName(QStringLiteral("easyMultistreamSetup"));
+	auto *setupLayout = new QVBoxLayout(setupGroup_);
 	auto *setupForm = new QFormLayout();
 	setupForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-	profileNameLabel_ = new QLabel(setup);
+	profileNameLabel_ = new QLabel(setupGroup_);
 	profileNameLabel_->setObjectName(QStringLiteral("easyMultistreamProfileName"));
 	profileNameLabel_->setTextInteractionFlags(Qt::TextSelectableByKeyboard | Qt::TextSelectableByMouse);
 	setupForm->addRow(text_.profileLabel, profileNameLabel_);
 	setupLayout->addLayout(setupForm);
 
-	youtubeEnabledCheckBox_ = new QCheckBox(text_.enableYouTube, setup);
-	youtubeEnabledCheckBox_->setObjectName(QStringLiteral("easyMultistreamYouTubeEnabled"));
-	setupLayout->addWidget(youtubeEnabledCheckBox_);
-
 	setupForm = new QFormLayout();
 	setupForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-	serverUrlEdit_ = new QLineEdit(setup);
+	serverUrlEdit_ = new QLineEdit(setupGroup_);
 	serverUrlEdit_->setObjectName(QStringLiteral("easyMultistreamServerUrl"));
 	serverUrlEdit_->setAccessibleName(text_.serverUrlLabel);
 	serverUrlEdit_->setPlaceholderText(text_.serverUrlPlaceholder);
 	serverUrlEdit_->setMaxLength(2048);
-	auto *serverUrlLabel = new QLabel(text_.serverUrlLabel, setup);
+	auto *serverUrlLabel = new QLabel(text_.serverUrlLabel, setupGroup_);
 	serverUrlLabel->setBuddy(serverUrlEdit_);
-	auto *serverUrlRow = new QWidget(setup);
+	auto *serverUrlRow = new QWidget(setupGroup_);
 	auto *serverUrlRowLayout = new QHBoxLayout(serverUrlRow);
 	serverUrlRowLayout->setContentsMargins(0, 0, 0, 0);
 	serverUrlRowLayout->addWidget(serverUrlEdit_);
@@ -117,12 +126,12 @@ DockView::DockView(DockText text, QWidget *parent) : QWidget(parent), text_(std:
 	serverUrlRowLayout->addWidget(saveServerUrlButton_);
 	setupForm->addRow(serverUrlLabel, serverUrlRow);
 
-	credentialStatusLabel_ = new QLabel(setup);
+	credentialStatusLabel_ = new QLabel(setupGroup_);
 	credentialStatusLabel_->setObjectName(QStringLiteral("easyMultistreamCredentialStatus"));
 	credentialStatusLabel_->setWordWrap(true);
 	setupForm->addRow(text_.credentialLabel, credentialStatusLabel_);
 
-	streamKeyEdit_ = new SecretLineEdit(setup);
+	streamKeyEdit_ = new SecretLineEdit(setupGroup_);
 	streamKeyEdit_->setObjectName(QStringLiteral("easyMultistreamStreamKey"));
 	streamKeyEdit_->setAccessibleName(text_.streamKeyLabel);
 	streamKeyEdit_->setEchoMode(QLineEdit::Password);
@@ -131,24 +140,24 @@ DockView::DockView(DockText text, QWidget *parent) : QWidget(parent), text_(std:
 	streamKeyEdit_->setContextMenuPolicy(Qt::NoContextMenu);
 	streamKeyEdit_->setDragEnabled(false);
 	streamKeyEdit_->setInputMethodHints(Qt::ImhHiddenText | Qt::ImhNoAutoUppercase | Qt::ImhNoPredictiveText);
-	auto *streamKeyLabel = new QLabel(text_.streamKeyLabel, setup);
+	auto *streamKeyLabel = new QLabel(text_.streamKeyLabel, setupGroup_);
 	streamKeyLabel->setBuddy(streamKeyEdit_);
 	setupForm->addRow(streamKeyLabel, streamKeyEdit_);
 	setupLayout->addLayout(setupForm);
-	auto *keyScope = new QLabel(text_.keyScope, setup);
+	auto *keyScope = new QLabel(text_.keyScope, setupGroup_);
 	keyScope->setWordWrap(true);
 	setupLayout->addWidget(keyScope);
 
 	auto *buttonLayout = new QHBoxLayout();
 	buttonLayout->addStretch();
-	removeKeyButton_ = new QPushButton(text_.removeKey, setup);
-	saveKeyButton_ = new QPushButton(text_.saveKey, setup);
+	removeKeyButton_ = new QPushButton(text_.removeKey, setupGroup_);
+	saveKeyButton_ = new QPushButton(text_.saveKey, setupGroup_);
 	removeKeyButton_->setObjectName(QStringLiteral("easyMultistreamRemoveKey"));
 	saveKeyButton_->setObjectName(QStringLiteral("easyMultistreamSaveKey"));
 	buttonLayout->addWidget(removeKeyButton_);
 	buttonLayout->addWidget(saveKeyButton_);
 	setupLayout->addLayout(buttonLayout);
-	layout->addWidget(setup);
+	layout->addWidget(setupGroup_);
 
 	noticeLabel_ = new QLabel(this);
 	noticeLabel_->setObjectName(QStringLiteral("easyMultistreamNotice"));
@@ -156,12 +165,21 @@ DockView::DockView(DockText text, QWidget *parent) : QWidget(parent), text_(std:
 	layout->addWidget(noticeLabel_);
 	layout->addStretch();
 
+	QObject::connect(toggleSettingsButton_, &QPushButton::clicked, this, [this]() {
+		if (!compactEligible_) {
+			return;
+		}
+		setupExpanded_ = !setupExpanded_;
+		updateSetupVisibility(true);
+		updateNoticeVisibility();
+	});
+
 	applyState({});
 }
 
-void DockView::bindActions(QObject *context, EnabledHandler enabledHandler,
-			   SaveServerUrlHandler saveServerUrlHandler, SaveKeyHandler saveKeyHandler,
-			   RemoveKeyHandler removeKeyHandler, RetryYouTubeHandler retryYouTubeHandler)
+void DockView::bindActions(QObject *context, EnabledHandler enabledHandler, SaveServerUrlHandler saveServerUrlHandler,
+			   SaveKeyHandler saveKeyHandler, RemoveKeyHandler removeKeyHandler,
+			   RetryYouTubeHandler retryYouTubeHandler)
 {
 	Q_ASSERT(context != nullptr);
 
@@ -179,10 +197,10 @@ void DockView::bindActions(QObject *context, EnabledHandler enabledHandler,
 			 [handler = std::move(removeKeyHandler)]() mutable { handler(); });
 	QObject::connect(retryYouTubeButton_, &QPushButton::clicked, context,
 			 [handler = std::move(retryYouTubeHandler)]() mutable {
-				if (handler) {
-					handler();
-				}
-			});
+				 if (handler) {
+					 handler();
+				 }
+			 });
 }
 
 void DockView::applyState(const DockState &state)
@@ -195,14 +213,22 @@ void DockView::applyState(const DockState &state)
 	}
 	const bool nativeActive = state.runtimeAvailable && state.session.native != NativeStreamState::Stopped;
 	const bool youtubeActive = state.runtimeAvailable &&
-			(state.session.youtube == YouTubeStreamState::Connecting ||
-			 state.session.youtube == YouTubeStreamState::Streaming ||
-			 state.session.youtube == YouTubeStreamState::Reconnecting ||
-			 state.session.youtube == YouTubeStreamState::Stopping);
+				   (state.session.youtube == YouTubeStreamState::Connecting ||
+				    state.session.youtube == YouTubeStreamState::Streaming ||
+				    state.session.youtube == YouTubeStreamState::Reconnecting ||
+				    state.session.youtube == YouTubeStreamState::Stopping);
 	const bool streamActive = nativeActive || youtubeActive;
 	const bool youtubeFailed = state.runtimeAvailable && state.session.youtube == YouTubeStreamState::Failed;
 	const bool setupIncomplete = state.youtubeServerUrl.isEmpty() ||
 				     state.credential != CredentialDisplayState::Present;
+	const bool compactEligible = state.settingsEditable && !setupIncomplete;
+	if (!compactEligible) {
+		setupExpanded_ = true;
+	} else if (!compactEligible_ || profileChanged) {
+		setupExpanded_ = false;
+	}
+	compactEligible_ = compactEligible;
+	updateSetupVisibility(compactEligible);
 	gettingStartedGroup_->setVisible(state.settingsEditable &&
 					 state.credential != CredentialDisplayState::Unavailable && setupIncomplete);
 	youtubeEnabledCheckBox_->setChecked(state.youtubeEnabled);
@@ -210,12 +236,12 @@ void DockView::applyState(const DockState &state)
 	serverUrlEdit_->setEnabled(state.settingsEditable && !streamActive);
 	saveServerUrlButton_->setEnabled(state.settingsEditable && !streamActive);
 	streamKeyEdit_->setEnabled(state.settingsEditable && !streamActive &&
-					  state.credential != CredentialDisplayState::Unavailable);
+				   state.credential != CredentialDisplayState::Unavailable);
 
 	const bool credentialAvailable = state.credential != CredentialDisplayState::Unavailable;
 	saveKeyButton_->setEnabled(state.settingsEditable && !streamActive && credentialAvailable);
 	removeKeyButton_->setEnabled(state.settingsEditable && !streamActive &&
-					 state.credential == CredentialDisplayState::Present);
+				     state.credential == CredentialDisplayState::Present);
 	retryYouTubeButton_->setVisible(youtubeFailed);
 	retryYouTubeButton_->setEnabled(youtubeFailed && nativeActive);
 
@@ -316,11 +342,30 @@ void DockView::applyState(const DockState &state)
 		youtubeStatusLabel_->setText(text_.youtubeMissingKey);
 	}
 
-	if (state.runtimeAvailable && state.session.youtube == YouTubeStreamState::Failed) {
+	currentNotice_ = state.notice;
+	youtubeFailureNotice_ = state.runtimeAvailable && state.session.youtube == YouTubeStreamState::Failed;
+	if (youtubeFailureNotice_) {
 		noticeLabel_->setText(text_.noticeYouTubeFailed);
 	} else {
 		noticeLabel_->setText(noticeText(state.notice));
 	}
+	updateNoticeVisibility();
+}
+
+void DockView::updateSetupVisibility(bool compactEligible)
+{
+	setupGroup_->setVisible(!compactEligible || setupExpanded_);
+	toggleSettingsButton_->setVisible(compactEligible);
+	toggleSettingsButton_->setText(setupExpanded_ ? text_.hideSettings : text_.showSettings);
+}
+
+void DockView::updateNoticeVisibility()
+{
+	const bool routineNotice =
+		currentNotice_ == DockNotice::Preview || currentNotice_ == DockNotice::ProfileSaved ||
+		currentNotice_ == DockNotice::ServerUrlSaved || currentNotice_ == DockNotice::KeySaved;
+	const bool compactIdle = compactEligible_ && !setupExpanded_;
+	noticeLabel_->setVisible(youtubeFailureNotice_ || !compactIdle || !routineNotice);
 }
 
 void DockView::clearStreamKey()

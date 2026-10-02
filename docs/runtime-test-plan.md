@@ -134,7 +134,7 @@ P0は安全性・所有権・秘密情報・native出力保護に関わる項目
 
 | ID | 操作 | 確認すること |
 |---|---|---|
-| OBS-M-00 | cleanなOBSユーザー設定で初回起動し、案内を確認してdockを閉じ、OBSを再起動する | 初回だけEasy Multistream dockが自動表示され、未設定時の案内が読める。2回目は勝手に再表示せず、Docksメニューから再表示できる。profile切替・dock表示/非表示で配信状態は変わらない |
+| OBS-M-00 | cleanなOBSユーザー設定で初回起動し、案内を確認してdockを閉じ、OBSを再起動する | 初回だけEasy Multistream dockが自動表示され、未設定時の案内が読める。2回目は勝手に再表示せず、DocksメニューとToolsメニューのどちらからでも同じdockを再表示できる。profile切替・dock表示/非表示で配信状態は変わらない |
 | OBS-M-01 | テストprofileでTwitch nativeを設定し、Easy Multistreamを有効化。YouTube RTMPS server/keyを保存してOBSのStart Streamingを1回押す | TwitchとYouTubeがそれぞれ接続する。OBSのnative Start/Stopボタンを増やさない。YouTubeが接続中の間に送信中と表示しない |
 | OBS-M-02 | OBS-M-01の状態でYouTube outputだけをテストfaultまたは接続失敗にする | YouTubeだけが失敗し、Twitchは送信を続ける。再接続ループやnative Stopがない |
 | OBS-M-03 | OBS-M-01でStopを押し、Twitch停止・YouTube停止・YouTube完全releaseの順序をログで確認する | 停止後にOBSを閉じてもクラッシュせず、次回Startで旧outputが残っていない |
@@ -144,7 +144,7 @@ P0は安全性・所有権・秘密情報・native出力保護に関わる項目
 | OBS-M-07 | 事前にnativeのcodec/audio trackを対象外設定へ変更してStartする | YouTubeだけが設定不足として拒否され、native Twitchは変更されない。復元後は正常に開始できる |
 | OBS-M-08 | keyをRemoveしてからStart、またはCredential Managerを一時的に利用不可にしてStart | SetupRequired/Unavailable相当の表示になり、keyがログや設定ファイルへ現れず、Twitchは停止しない |
 | OBS-M-09 | Start中またはStreaming中にYouTube接続だけを切断する | YouTubeの状態が明確に失敗・再接続中・停止のいずれかになり、Twitchが継続する。停止後に次回Startできる |
-| OBS-M-10 | OBSのDocksメニューからdockを閉じ、再表示する | dockの表示・非表示だけが変わり、配信状態とoutput寿命は変わらない |
+| OBS-M-10 | 設定完了後のcompact表示で「設定を変更」→「設定を閉じる」を操作し、OBSのDocksメニューとToolsメニューからdockを閉じて再表示する | Twitch/YouTubeの2行とYouTube有効設定は常に確認でき、詳細設定だけが開閉する。どの表示操作でも配信状態とoutput寿命は変わらない |
 | OBS-M-11 | OBS-M-01を専用のportable OBS 32.2.2でも繰り返す | 通常版とは別のprofile・credential境界で動作し、普段のOBS環境に設定を残さない |
 
 ### 実配信後の確認
@@ -163,7 +163,7 @@ P0は安全性・所有権・秘密情報・native出力保護に関わる項目
 | unit | profile設定、safe-save、秘密値検証、Credential Manager fake、SecureBuffer | 実OBS output/service、RTMPS、callback thread、URL・ログscan |
 | session | native分類、開始受理、native同期失敗、YouTube開始/停止、失敗隔離、rapid restart、stale lease、profile generation、EXIT terminal | Frontend callback、OBS 32.2.2のsignal順序、実outputのteardown、スレッド・reaper寿命 |
 | runtime | native開始確認、YouTube開始受理とstart通知の分離、失敗隔離、明示retry、rapid restart、stale callback、profile generation、EXIT fallback | 実OBS signal thread、service/output生成失敗、RTMP接続、reaper join |
-| UI | dock状態、実ランタイムsnapshot表示、配信中の設定保護、YouTube失敗表示とretry、password editor、key削除確認 | 実切断・profile change・終了中のOBS widget寿命 |
+| UI | dock状態、設定完了時のcompact表示と詳細設定の開閉、実ランタイムsnapshot表示、配信中の設定保護、YouTube失敗表示とretry、password editor、key削除確認 | OBS Toolsメニュー統合、実切断・profile change・終了中のOBS widget寿命 |
 | locales | en-US/ja-JPキーの整合性 | 実エラー状態の翻訳と秘密情報を含まない表示 |
 
 最低限のローカル自動確認は次のコマンドです。
@@ -208,7 +208,7 @@ generation invalidation / new work拒否
 - [x] 現在のCTestがすべて通る。
 - [x] start acceptedとstart signalを分けた状態機械テストが通る。
 - [x] リポジトリ内の隔離portable OBS 32.2.2で、0.1.0基礎buildのload、Startup complete、clean unload、memory leaks 0を確認した。
-- [ ] 0.2.0で初回dock表示、表示済みmarker保存、2回目の非表示、トレイ復帰後の表示を確認した。
+- [ ] 0.3.0で初回dock表示、表示済みmarker保存、2回目の非表示、トレイ復帰後の表示、compact表示、Toolsメニューからの再表示を確認した。
 - [ ] `obs_output_start()`同期拒否とnative StartStreaming同期拒否を別々にテストした。
 - [ ] output error、YouTube-only disconnect、credential failure、missing URL/key、unsupported codecをテストした。
 - [ ] stop、duplicate stop、rapid stop-start、profile change、EXITをテストした。
