@@ -18,6 +18,12 @@ The planned first useful release is intentionally narrow:
 
 Browser-based YouTube account connection is the accepted next setup path, but it is not exposed until its complete authorization, secure token storage, endpoint resolution, cancellation, and release requirements are implemented. Automatically creating and managing YouTube broadcasts or scheduled events, three or more destinations, custom output scenes, encoder-controlled YouTube dual streaming, per-destination transcoding, and Twitch-as-secondary remain outside the current boundary.
 
+The current source tree includes a non-instantiated account state machine and Google desktop-authorization protocol core.
+They generate PKCE/state values, build the fixed authorization request, validate the exact loopback callback, and reject
+old account-operation leases without opening a browser, starting a listener, accessing the network, or changing the
+current dock and manual RTMPS workflow. The browser/listener, token transport, YouTube API client, and user-facing
+account controls remain release-gated work.
+
 The recommended Dual stream mode is a YouTube-side feature. Easy Multistream sends one 16:9 H.264/AAC stream to the user-provided RTMPS URL; YouTube creates the 9:16 feed, normally as a centre crop. This keeps the local OBS pipeline to one YouTube output and one shared video encode. The vertical mode must be enabled in YouTube Studio before the stream starts. A separately composed 9:16 stream sent by the encoder would require a second video pipeline and is intentionally deferred.
 
 ## Accepted YouTube connection direction
@@ -99,6 +105,10 @@ User-visible text follows OBS and platform terminology. Internal milestone names
 `obs-easy-multistream-session-core` is a pure C++ library with no OBS, Qt, Windows Credential Manager, or network dependency. It is linked into the plugin through `RuntimeController`. Its `SessionCoordinator` accepts value events and returns an immutable snapshot plus at most one requested effect. The only output effects are `StartYouTube` and `StopYouTube`; there is intentionally no effect capable of stopping the native OBS stream.
 
 `SessionCoordinator` is deliberately not thread-safe. `RuntimeController` serializes every state event on the Qt/OBS owner thread. Frontend callbacks and output callbacks copy only lease/status values; worker-originated output callbacks are queued through a plugin-owned `QObject` that outlives the controller. Each returned effect is handed to the adapter in transition order before the bridge processes its next state event.
+
+The headless YouTube account coordinator follows the same value-copy rule. Its public snapshots are returned by value,
+and a committed account retains a non-secret connection lease. Refresh and API results must carry that lease, so a
+delayed failure from a replaced account cannot clear or relabel the current account.
 
 Each native OBS start attempt receives a `NativeLease`, and each YouTube start attempt receives an `OutputLease`. Both contain a profile/session generation and an attempt number. Callbacks for an old generation or attempt cannot update the current snapshot. Snapshot revisions advance only for accepted state changes. Profile changes and exit invalidate the current generation before delayed callbacks can be observed by a new session.
 

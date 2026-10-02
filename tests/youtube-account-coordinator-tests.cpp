@@ -1,0 +1,404 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 NPJigaK
+
+#include "youtube-account-coordinator.hpp"
+
+#include <cstdint>
+#include <iostream>
+
+namespace {
+
+int failures = 0;
+
+#define CHECK(expression)                                                                                              \
+	do {                                                                                                             \
+		if (!(expression)) {                                                                                       \
+			std::cerr << __FILE__ << ':' << __LINE__ << ": check failed: " #expression << '\n';                 \
+			++failures;                                                                                             \
+		}                                                                                                          \
+	} while (false)
+
+using easy_multistream::YouTubeAccountCoordinator;
+using easy_multistream::YouTubeAccountDiscovery;
+using easy_multistream::YouTubeAccountFailure;
+using easy_multistream::YouTubeAccountLease;
+using easy_multistream::YouTubeAccountState;
+
+YouTubeAccountLease leaseFrom(const easy_multistream::YouTubeAccountTransition &transition)
+{
+	CHECK(transition.snapshot.lease.has_value());
+	return transition.snapshot.lease.value_or(YouTubeAccountLease{});
+}
+
+YouTubeAccountDiscovery selection(const char *suffix)
+{
+	return {std::string("channel-") + suffix, std::string("Channel ") + suffix,
+		std::string("stream-") + suffix, std::string("Stream ") + suffix};
+}
+
+void connect(YouTubeAccountCoordinator &coordinator, const YouTubeAccountDiscovery &discovery)
+{
+	const YouTubeAccountLease lease = leaseFrom(coordinator.beginAuthorization());
+	CHECK(coordinator.authorizationCallbackAccepted(lease).snapshot.state == YouTubeAccountState::ExchangingCode);
+	CHECK(coordinator.tokenExchangeSucceeded(lease).snapshot.state == YouTubeAccountState::Discovering);
+	CHECK(coordinator.discoverySucceeded(lease, discovery).snapshot.state ==
+	      YouTubeAccountState::PersistingCredential);
+	CHECK(coordinator.credentialStored(lease).snapshot.state == YouTubeAccountState::Connected);
+}
+
+void testLifecycleAndSecretFreeSnapshot()
+{
+	YouTubeAccountCoordinator coordinator;
+	CHECK(coordinator.snapshot().state == YouTubeAccountState::Disconnected);
+	const auto began = coordinator.beginAuthorization();
+	const YouTubeAccountLease lease = leaseFrom(began);
+	CHECK(began.changed);
+	CHECK(lease.generation == began.snapshot.generation);
+	CHECK(lease.attempt != 0);
+	CHECK(coordinator.authorizationCallbackAccepted(lease).snapshot.state == YouTubeAccountState::ExchangingCode);
+	CHECK(coordinator.tokenExchangeSucceeded(lease).snapshot.state == YouTubeAccountState::Discovering);
+
+	const auto discovered = coordinator.discoverySucceeded(lease, selection("one"));
+	CHECK(discovered.snapshot.state == YouTubeAccountState::PersistingCredential);
+	CHECK(discovered.snapshot.channelId.empty());
+	const auto connected = coordinator.credentialStored(lease);
+	CHECK(connected.snapshot.state == YouTubeAccountState::Connected);
+	CHECK(!connected.snapshot.lease.has_value());
+	CHECK(connected.snapshot.connectionLease == lease);
+	CHECK(connected.snapshot.channelId == "channel-one");
+	CHECK(connected.snapshot.streamId == "stream-one");
+	CHECK(connected.snapshot.failure == YouTubeAccountFailure::None);
+}
+
+void testStaleAndDuplicateEventsAreNoOps()
+{
+	YouTubeAccountCoordinator coordinator;
+	const auto began = coordinator.beginAuthorization();
+	const YouTubeAccountLease lease = leaseFrom(began);
+	CHECK(!coordinator.beginAuthorization().changed);
+	CHECK(!coordinator.authorizationCallbackAccepted({lease.generation, lease.attempt + 1}).changed);
+	CHECK(!coordinator.tokenExchangeSucceeded(lease).changed);
+
+	CHECK(coordinator.authorizationCallbackAccepted(lease).changed);
+	const std::uint64_t revision = coordinator.snapshot().revision;
+	CHECK(!coordinator.authorizationCallbackAccepted(lease).changed);
+	CHECK(coordinator.snapshot().revision == revision);
+	CHECK(coordinator.tokenExchangeSucceeded(lease).changed);
+	CHECK(coordinator.discoverySucceeded(lease, selection("one")).changed);
+	CHECK(coordinator.credentialStored(lease).changed);
+	CHECK(!coordinator.credentialStored(lease).changed);
+
+	const auto after = coordinator.snapshot();
+	CHECK(!coordinator.attemptFailed(lease, YouTubeAccountFailure::NetworkFailure).changed);
+	CHECK(!coordinator.cancel(lease).changed);
+	CHECK(!coordinator.attemptFailed(lease, YouTubeAccountFailure::Cancelled).changed);
+	CHECK(coordinator.snapshot().revision == after.revision);
+}
+
+void testInvalidDiscoveryCannotConnect()
+{
+	YouTubeAccountCoordinator coordinator;
+	const YouTubeAccountLease lease = leaseFrom(coordinator.beginAuthorization());
+	coordinator.authorizationCallbackAccepted(lease);
+	coordinator.tokenExchangeSucceeded(lease);
+	const auto failed = coordinator.discoverySucceeded(lease, {});
+	CHECK(failed.snapshot.state == YouTubeAccountState::Failed);
+	CHECK(failed.snapshot.failure == YouTubeAccountFailure::InvalidResponse);
+	CHECK(failed.snapshot.channelId.empty());
+	CHECK(failed.snapshot.streamId.empty());
+}
+
+void testDiscoveryValuesAreBoundedAndSafeForSnapshots()
+{
+	const auto rejected = [](const YouTubeAccountDiscovery &discovery) {
+		YouTubeAccountCoordinator coordinator;
+		const YouTubeAccountLease lease = leaseFrom(coordinator.beginAuthorization());
+		coordinator.authorizationCallbackAccepted(lease);
+		coordinator.tokenExchangeSucceeded(lease);
+		return coordinator.discoverySucceeded(lease, discovery).snapshot;
+	};
+
+	YouTubeAccountDiscovery oversizedId = selection("valid");
+	oversizedId.channelId.assign(easy_multistream::kYouTubeAccountMaxIdentifierBytes + 1, 'a');
+	CHECK(rejected(oversizedId).state == YouTubeAccountState::Failed);
+
+	YouTubeAccountDiscovery controlLabel = selection("valid");
+	controlLabel.channelLabel = "unsafe\nlabel";
+	CHECK(rejected(controlLabel).state == YouTubeAccountState::Failed);
+
+	YouTubeAccountDiscovery invalidUtf8 = selection("valid");
+	invalidUtf8.streamLabel.assign("\xC0\xAF", 2);
+	CHECK(rejected(invalidUtf8).state == YouTubeAccountState::Failed);
+
+	YouTubeAccountCoordinator coordinator;
+	YouTubeAccountDiscovery unicodeLabels = selection("valid");
+	unicodeLabels.channelLabel = u8"配信チャンネル";
+	unicodeLabels.streamLabel = u8"いつもの配信";
+	connect(coordinator, unicodeLabels);
+	CHECK(coordinator.snapshot().channelLabel == unicodeLabels.channelLabel);
+	CHECK(coordinator.snapshot().streamLabel == unicodeLabels.streamLabel);
+}
+
+void testReplacementIsTransactional()
+{
+	YouTubeAccountCoordinator coordinator;
+	connect(coordinator, selection("old"));
+	const YouTubeAccountLease retry = leaseFrom(coordinator.beginAuthorization());
+	CHECK(coordinator.snapshot().channelId == "channel-old");
+	coordinator.authorizationCallbackAccepted(retry);
+	coordinator.tokenExchangeSucceeded(retry);
+	coordinator.discoverySucceeded(retry, selection("new"));
+	const auto failed = coordinator.attemptFailed(retry, YouTubeAccountFailure::NetworkFailure);
+	CHECK(failed.snapshot.state == YouTubeAccountState::Connected);
+	CHECK(failed.snapshot.channelId == "channel-old");
+	CHECK(failed.snapshot.failure == YouTubeAccountFailure::NetworkFailure);
+
+	const YouTubeAccountLease cancelledRetry = leaseFrom(coordinator.beginAuthorization());
+	const auto cancelled = coordinator.cancel(cancelledRetry);
+	CHECK(cancelled.snapshot.state == YouTubeAccountState::Connected);
+	CHECK(cancelled.snapshot.channelId == "channel-old");
+}
+
+void testReplacementCommitsOnlyAfterCredentialStorage()
+{
+	YouTubeAccountCoordinator coordinator;
+	connect(coordinator, selection("old"));
+
+	const YouTubeAccountLease replacement = leaseFrom(coordinator.beginAuthorization());
+	coordinator.authorizationCallbackAccepted(replacement);
+	coordinator.tokenExchangeSucceeded(replacement);
+	const auto staged = coordinator.discoverySucceeded(replacement, selection("new"));
+	CHECK(staged.snapshot.state == YouTubeAccountState::PersistingCredential);
+	CHECK(staged.snapshot.channelId == "channel-old");
+	CHECK(staged.snapshot.streamId == "stream-old");
+
+	const auto committed = coordinator.credentialStored(replacement);
+	CHECK(committed.snapshot.state == YouTubeAccountState::Connected);
+	CHECK(committed.snapshot.channelId == "channel-new");
+	CHECK(committed.snapshot.streamId == "stream-new");
+	CHECK(committed.snapshot.failure == YouTubeAccountFailure::None);
+}
+
+void testInvalidReplacementPreservesCommittedConnection()
+{
+	YouTubeAccountCoordinator coordinator;
+	connect(coordinator, selection("old"));
+
+	const YouTubeAccountLease replacement = leaseFrom(coordinator.beginAuthorization());
+	coordinator.authorizationCallbackAccepted(replacement);
+	coordinator.tokenExchangeSucceeded(replacement);
+	const auto rejected = coordinator.discoverySucceeded(replacement, {});
+	CHECK(rejected.snapshot.state == YouTubeAccountState::Connected);
+	CHECK(rejected.snapshot.channelId == "channel-old");
+	CHECK(rejected.snapshot.streamId == "stream-old");
+	CHECK(rejected.snapshot.failure == YouTubeAccountFailure::InvalidResponse);
+}
+
+void testFailureClassificationAndExplicitReauthorization()
+{
+	YouTubeAccountCoordinator coordinator;
+	const YouTubeAccountLease lease = leaseFrom(coordinator.beginAuthorization());
+	const auto unavailable = coordinator.attemptFailed(lease, YouTubeAccountFailure::CredentialUnavailable);
+	CHECK(unavailable.snapshot.state == YouTubeAccountState::Unavailable);
+	CHECK(unavailable.snapshot.failure == YouTubeAccountFailure::CredentialUnavailable);
+
+	connect(coordinator, selection("connected"));
+	const YouTubeAccountLease connectionLease = coordinator.snapshot().connectionLease.value();
+	CHECK(coordinator.markUnavailable(connectionLease, YouTubeAccountFailure::CredentialUnavailable).changed);
+	CHECK(!coordinator.markUnavailable(connectionLease, YouTubeAccountFailure::CredentialUnavailable).changed);
+	const auto connectedReauth = coordinator.markNeedsReauthorization(connectionLease);
+	CHECK(connectedReauth.snapshot.state == YouTubeAccountState::NeedsReauthorization);
+	CHECK(connectedReauth.snapshot.channelId.empty());
+	CHECK(connectedReauth.snapshot.streamId.empty());
+}
+
+void testOldConnectionResultsCannotReplaceNewConnection()
+{
+	YouTubeAccountCoordinator coordinator;
+	connect(coordinator, selection("old"));
+	const YouTubeAccountLease oldConnection = coordinator.snapshot().connectionLease.value();
+
+	const YouTubeAccountLease replacement = leaseFrom(coordinator.beginAuthorization());
+	coordinator.authorizationCallbackAccepted(replacement);
+	coordinator.tokenExchangeSucceeded(replacement);
+	coordinator.discoverySucceeded(replacement, selection("new"));
+	coordinator.credentialStored(replacement);
+	CHECK(coordinator.snapshot().channelId == "channel-new");
+	CHECK(coordinator.snapshot().connectionLease == replacement);
+
+	CHECK(!coordinator.markUnavailable(oldConnection, YouTubeAccountFailure::ServiceUnavailable).changed);
+	CHECK(!coordinator.markNeedsReauthorization(oldConnection).changed);
+	CHECK(coordinator.snapshot().state == YouTubeAccountState::Connected);
+	CHECK(coordinator.snapshot().channelId == "channel-new");
+	CHECK(coordinator.snapshot().failure == YouTubeAccountFailure::None);
+}
+
+void testInvalidatedOldConnectionIsNotRestoredAfterReplacementCancellation()
+{
+	YouTubeAccountCoordinator coordinator;
+	connect(coordinator, selection("old"));
+	const YouTubeAccountLease oldConnection = coordinator.snapshot().connectionLease.value();
+	const YouTubeAccountLease replacement = leaseFrom(coordinator.beginAuthorization());
+
+	CHECK(coordinator.markNeedsReauthorization(oldConnection).changed);
+	const auto cancelled = coordinator.cancel(replacement);
+	CHECK(cancelled.snapshot.state == YouTubeAccountState::NeedsReauthorization);
+	CHECK(cancelled.snapshot.failure == YouTubeAccountFailure::ReauthorizationRequired);
+	CHECK(cancelled.snapshot.channelId.empty());
+	CHECK(!cancelled.snapshot.connectionLease.has_value());
+}
+
+void testInvalidatedOldConnectionIsNotRestoredAfterReplacementFailure()
+{
+	YouTubeAccountCoordinator coordinator;
+	connect(coordinator, selection("old"));
+	const YouTubeAccountLease oldConnection = coordinator.snapshot().connectionLease.value();
+	const YouTubeAccountLease replacement = leaseFrom(coordinator.beginAuthorization());
+
+	CHECK(coordinator.markNeedsReauthorization(oldConnection).changed);
+	const auto failed = coordinator.attemptFailed(replacement, YouTubeAccountFailure::NetworkFailure);
+	CHECK(failed.snapshot.state == YouTubeAccountState::NeedsReauthorization);
+	CHECK(failed.snapshot.failure == YouTubeAccountFailure::ReauthorizationRequired);
+	CHECK(failed.snapshot.channelId.empty());
+	CHECK(!failed.snapshot.connectionLease.has_value());
+}
+
+void testInvalidatedOldConnectionDoesNotBlockSuccessfulReplacement()
+{
+	YouTubeAccountCoordinator coordinator;
+	connect(coordinator, selection("old"));
+	const YouTubeAccountLease oldConnection = coordinator.snapshot().connectionLease.value();
+	const YouTubeAccountLease replacement = leaseFrom(coordinator.beginAuthorization());
+	CHECK(coordinator.markNeedsReauthorization(oldConnection).changed);
+
+	coordinator.authorizationCallbackAccepted(replacement);
+	coordinator.tokenExchangeSucceeded(replacement);
+	coordinator.discoverySucceeded(replacement, selection("new"));
+	const auto connected = coordinator.credentialStored(replacement);
+	CHECK(connected.snapshot.state == YouTubeAccountState::Connected);
+	CHECK(connected.snapshot.channelId == "channel-new");
+	CHECK(connected.snapshot.connectionLease == replacement);
+	CHECK(connected.snapshot.failure == YouTubeAccountFailure::None);
+}
+
+void testUnavailableOldConnectionIsRestoredWithItsFailure()
+{
+	YouTubeAccountCoordinator coordinator;
+	connect(coordinator, selection("old"));
+	const YouTubeAccountLease oldConnection = coordinator.snapshot().connectionLease.value();
+	const YouTubeAccountLease replacement = leaseFrom(coordinator.beginAuthorization());
+	CHECK(coordinator.markUnavailable(oldConnection, YouTubeAccountFailure::CredentialUnavailable).changed);
+
+	const auto cancelled = coordinator.cancel(replacement);
+	CHECK(cancelled.snapshot.state == YouTubeAccountState::Connected);
+	CHECK(cancelled.snapshot.channelId == "channel-old");
+	CHECK(cancelled.snapshot.failure == YouTubeAccountFailure::CredentialUnavailable);
+}
+
+void testExistingConnectionFailureSurvivesReplacementCancellation()
+{
+	YouTubeAccountCoordinator coordinator;
+	connect(coordinator, selection("old"));
+	const YouTubeAccountLease oldConnection = coordinator.snapshot().connectionLease.value();
+	coordinator.markUnavailable(oldConnection, YouTubeAccountFailure::ServiceUnavailable);
+
+	const YouTubeAccountLease replacement = leaseFrom(coordinator.beginAuthorization());
+	const auto cancelled = coordinator.cancel(replacement);
+	CHECK(cancelled.snapshot.state == YouTubeAccountState::Connected);
+	CHECK(cancelled.snapshot.channelId == "channel-old");
+	CHECK(cancelled.snapshot.failure == YouTubeAccountFailure::ServiceUnavailable);
+}
+
+void testPersistingCredentialIsInvalidatedBeforeLateCommit()
+{
+	YouTubeAccountCoordinator coordinator;
+	const YouTubeAccountLease lease = leaseFrom(coordinator.beginAuthorization());
+	coordinator.authorizationCallbackAccepted(lease);
+	coordinator.tokenExchangeSucceeded(lease);
+	coordinator.discoverySucceeded(lease, selection("new"));
+	CHECK(coordinator.snapshot().state == YouTubeAccountState::PersistingCredential);
+
+	coordinator.invalidateContext();
+	CHECK(!coordinator.credentialStored(lease).changed);
+	CHECK(coordinator.snapshot().state == YouTubeAccountState::Disconnected);
+	CHECK(!coordinator.snapshot().connectionLease.has_value());
+}
+
+void testCancelledFailureMustUseExplicitCancelTransition()
+{
+	YouTubeAccountCoordinator coordinator;
+	const YouTubeAccountLease lease = leaseFrom(coordinator.beginAuthorization());
+	CHECK(!coordinator.attemptFailed(lease, YouTubeAccountFailure::Cancelled).changed);
+	CHECK(coordinator.snapshot().state == YouTubeAccountState::Authorizing);
+
+	const auto cancelled = coordinator.cancel(lease);
+	CHECK(cancelled.changed);
+	CHECK(cancelled.snapshot.state == YouTubeAccountState::Disconnected);
+	CHECK(cancelled.snapshot.failure == YouTubeAccountFailure::Cancelled);
+}
+
+void testContextInvalidationAndShutdown()
+{
+	YouTubeAccountCoordinator coordinator;
+	const YouTubeAccountLease oldLease = leaseFrom(coordinator.beginAuthorization());
+	const auto invalidated = coordinator.invalidateContext();
+	CHECK(invalidated.snapshot.state == YouTubeAccountState::Disconnected);
+	CHECK(invalidated.snapshot.generation != oldLease.generation);
+	CHECK(!coordinator.authorizationCallbackAccepted(oldLease).changed);
+
+	const YouTubeAccountLease currentLease = leaseFrom(coordinator.beginAuthorization());
+	const auto closed = coordinator.shutdown();
+	CHECK(closed.snapshot.state == YouTubeAccountState::Closed);
+	const std::uint64_t revision = closed.snapshot.revision;
+	CHECK(!coordinator.shutdown().changed);
+	CHECK(!coordinator.beginAuthorization().changed);
+	CHECK(!coordinator.authorizationCallbackAccepted(currentLease).changed);
+	CHECK(!coordinator.invalidateContext().changed);
+	CHECK(coordinator.snapshot().revision == revision);
+}
+
+void testConnectedContextInvalidationClearsIdentity()
+{
+	YouTubeAccountCoordinator coordinator;
+	connect(coordinator, selection("old"));
+	const std::uint64_t oldGeneration = coordinator.snapshot().generation;
+
+	const auto invalidated = coordinator.invalidateContext();
+	CHECK(invalidated.snapshot.state == YouTubeAccountState::Disconnected);
+	CHECK(invalidated.snapshot.generation != oldGeneration);
+	CHECK(invalidated.snapshot.channelId.empty());
+	CHECK(invalidated.snapshot.channelLabel.empty());
+	CHECK(invalidated.snapshot.streamId.empty());
+	CHECK(invalidated.snapshot.streamLabel.empty());
+}
+
+} // namespace
+
+int main()
+{
+	testLifecycleAndSecretFreeSnapshot();
+	testStaleAndDuplicateEventsAreNoOps();
+	testInvalidDiscoveryCannotConnect();
+	testDiscoveryValuesAreBoundedAndSafeForSnapshots();
+	testReplacementIsTransactional();
+	testReplacementCommitsOnlyAfterCredentialStorage();
+	testInvalidReplacementPreservesCommittedConnection();
+	testFailureClassificationAndExplicitReauthorization();
+	testOldConnectionResultsCannotReplaceNewConnection();
+	testInvalidatedOldConnectionIsNotRestoredAfterReplacementCancellation();
+	testInvalidatedOldConnectionIsNotRestoredAfterReplacementFailure();
+	testInvalidatedOldConnectionDoesNotBlockSuccessfulReplacement();
+	testUnavailableOldConnectionIsRestoredWithItsFailure();
+	testExistingConnectionFailureSurvivesReplacementCancellation();
+	testPersistingCredentialIsInvalidatedBeforeLateCommit();
+	testCancelledFailureMustUseExplicitCancelTransition();
+	testContextInvalidationAndShutdown();
+	testConnectedContextInvalidationClearsIdentity();
+
+	if (failures != 0) {
+		std::cerr << failures << " youtube-account-coordinator test(s) failed\n";
+		return 1;
+	}
+	std::cout << "All youtube-account-coordinator tests passed\n";
+	return 0;
+}
