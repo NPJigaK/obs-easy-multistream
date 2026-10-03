@@ -664,6 +664,13 @@ void testOperationLockReleaseForCancellationInvalidationAndShutdownFailure()
 		CHECK(fixture.preparer->state() == YouTubeDestinationPreparerState::Closed);
 		CHECK(fixture.lockApi.releaseCount == 1);
 		CHECK(fixture.lockApi.closeCount == 1);
+		CHECK(fixture.refreshState->shutdownCount == 1);
+		CHECK(fixture.resolverState->shutdownCount == 1);
+		fixture.refreshState->shutdownResult = true;
+		fixture.resolverState->shutdownResult = true;
+		CHECK(fixture.preparer->shutdown());
+		CHECK(fixture.refreshState->shutdownCount == 2);
+		CHECK(fixture.resolverState->shutdownCount == 2);
 	}
 
 	{

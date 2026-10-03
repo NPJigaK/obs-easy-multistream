@@ -349,26 +349,28 @@ public:
 		if (!onOwnerThread()) {
 			return false;
 		}
-		if (state_ == YouTubeDestinationPreparerState::Closed) {
-			releaseOperationLock();
-			return !operationLock_.acquired();
-		}
 		if (lifecycleMutationInProgress_) {
 			return false;
 		}
 
 		lifecycleMutationInProgress_ = true;
-		state_ = YouTubeDestinationPreparerState::Closed;
-		advanceEpoch();
-		if (activeAttempt_.has_value()) {
-			cancelPorts(*activeAttempt_);
+		if (state_ != YouTubeDestinationPreparerState::Closed) {
+			state_ = YouTubeDestinationPreparerState::Closed;
+			advanceEpoch();
+			if (activeAttempt_.has_value()) {
+				cancelPorts(*activeAttempt_);
+			}
+			clearOperation();
 		}
-		clearOperation();
-		const bool refreshClosed = refreshPort_->shutdown();
-		const bool resolverClosed = resolverPort_->shutdown();
+		if (!refreshPortClosed_) {
+			refreshPortClosed_ = refreshPort_->shutdown();
+		}
+		if (!resolverPortClosed_) {
+			resolverPortClosed_ = resolverPort_->shutdown();
+		}
 		const bool lockReleased = releaseOperationLock();
 		lifecycleMutationInProgress_ = false;
-		return refreshClosed && resolverClosed && lockReleased;
+		return refreshPortClosed_ && resolverPortClosed_ && lockReleased;
 	}
 
 	YouTubeDestinationPreparerState state() const noexcept { return state_; }
@@ -607,6 +609,8 @@ private:
 	std::uint64_t operationEpoch_ = 0;
 	bool completionDeliveryQueued_ = false;
 	bool lifecycleMutationInProgress_ = false;
+	bool refreshPortClosed_ = false;
+	bool resolverPortClosed_ = false;
 };
 
 YouTubeAccountDestinationPreparer::YouTubeAccountDestinationPreparer(
