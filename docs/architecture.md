@@ -21,7 +21,7 @@ Browser-based YouTube account connection is the accepted next setup path, but it
 The current source tree includes a non-instantiated account state machine, Google desktop-authorization protocol core,
 a separate loopback-listener library, a browser-opener authorization-session layer, a fixed-origin HTTPS token
 transport, a read-only YouTube discovery transport with bounded pagination, a headless interactive account provider,
-and a separate secret-bearing selected-stream resolver. They
+a separate secret-bearing selected-stream resolver, and a detached headless destination preparer. They
 generate PKCE/state values, build and validate the authorization exchange, reject old account-operation leases, test a
 short-lived `127.0.0.1` callback listener on real local sockets, guarantee bind-and-arm-before-browser ordering, and
 test authorization-code exchange, refresh, and revocation against injected local doubles. The discovery transport obtains exactly one bounded page of owned channels or
@@ -37,7 +37,12 @@ automatically; multiple candidates wait for an explicit ID. Credential replaceme
 selection cannot be committed, and a failed rollback clears the visible connection instead of restoring uncertain
 state. The resolver fetches only the explicitly selected stream ID immediately before a future
 start, revalidates its channel, state, RTMPS host, and stream key, and returns the key in a move-only buffer rather than
-any discovery or settings type. None of these account/network libraries is linked into or instantiated by the OBS plugin yet,
+any discovery or settings type. The destination preparer reads the saved refresh credential just before preparation,
+refreshes the access token, durably stores a rotated refresh token before starting the selected-stream resolver, and
+returns only a validated RTMPS URL plus a move-only key. A refresh-token write failure stops preparation before any
+resolver request; a rotation that has been written is not rolled back when a later resolver request fails or is cancelled.
+Its completions are guarded by an owner-thread epoch and attempt, and cancellation, context invalidation, shutdown, and
+late callbacks fail closed. None of these account/network libraries is linked into or instantiated by the OBS plugin yet,
 so the product opens no listener or browser, makes no OAuth request, and leaves the current dock and manual RTMPS
 workflow unchanged. The profile codec now distinguishes manual and account modes and can preserve a bounded,
 non-secret channel/stream selection. Until the complete account provider is integrated, account mode fails closed and
@@ -86,6 +91,7 @@ OBS dock wrapper (OBS-owned)
 Windows Credential Manager
   ├─ one Easy Multistream YouTube key for the current Windows account
   └─ a separate plugin-owned target for the future Google refresh token
+     (used only by detached account libraries until integration)
 
 Current OBS profile/basic.ini
   ├─ SchemaVersion + YouTubeEnabled + explicit connection mode

@@ -59,6 +59,23 @@ private:
 	std::wstring targetName_;
 };
 
+// The target is intentionally fixed. Production account components accept
+// this semantic vault type rather than the generic manual stream-key vault.
+class WindowsYouTubeAccountRefreshTokenVault final : public YouTubeAccountRefreshTokenVault {
+public:
+	explicit WindowsYouTubeAccountRefreshTokenVault(WinCredentialApi &api);
+
+	CredentialResult write(std::string_view secret) noexcept override;
+	CredentialReadResult read() noexcept override;
+	CredentialResult erase() noexcept override;
+	CredentialStatus status() noexcept override;
+
+	const std::wstring &targetName() const noexcept;
+
+private:
+	WindowsCredentialVault vault_;
+};
+
 const wchar_t *defaultYouTubeCredentialTarget() noexcept;
 const wchar_t *defaultYouTubeAccountRefreshTokenTarget() noexcept;
 

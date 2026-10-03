@@ -24,7 +24,8 @@ class YouTubeAccountProviderTestAccess final {
 public:
 	YouTubeAccountProviderTestAccess(std::unique_ptr<YouTubeAccountAuthorizationPort> authorization,
 					 std::unique_ptr<YouTubeAccountTokenPort> token,
-					 std::unique_ptr<YouTubeAccountDiscoveryPort> discovery, CredentialVault &vault,
+					 std::unique_ptr<YouTubeAccountDiscoveryPort> discovery,
+					 YouTubeAccountRefreshTokenVault &vault,
 					 YouTubeAccountSelectionCommitter committer,
 					 QString clientId = QStringLiteral("test-client-id"))
 		: provider_(new YouTubeAccountProvider(std::move(clientId), std::move(authorization), std::move(token),
@@ -94,6 +95,7 @@ using easy_multistream::YouTubeAccountProviderSelectionStatus;
 using easy_multistream::YouTubeAccountProviderSnapshot;
 using easy_multistream::YouTubeAccountProviderStage;
 using easy_multistream::YouTubeAccountProviderStartStatus;
+using easy_multistream::YouTubeAccountRefreshTokenVault;
 using easy_multistream::YouTubeApiPagedCompletion;
 using easy_multistream::YouTubeApiPagerStartStatus;
 using easy_multistream::YouTubeApiPagingFailure;
@@ -403,7 +405,7 @@ public:
 	CompletionHandler streamHandler;
 };
 
-class FakeCredentialVault final : public CredentialVault {
+class FakeCredentialVault final : public YouTubeAccountRefreshTokenVault {
 public:
 	CredentialResult write(std::string_view value) noexcept override
 	{

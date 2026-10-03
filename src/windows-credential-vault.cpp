@@ -192,6 +192,36 @@ const std::wstring &WindowsCredentialVault::targetName() const noexcept
 	return targetName_;
 }
 
+WindowsYouTubeAccountRefreshTokenVault::WindowsYouTubeAccountRefreshTokenVault(WinCredentialApi &api)
+	: vault_(api, defaultYouTubeAccountRefreshTokenTarget())
+{
+}
+
+CredentialResult WindowsYouTubeAccountRefreshTokenVault::write(std::string_view secret) noexcept
+{
+	return vault_.write(secret);
+}
+
+CredentialReadResult WindowsYouTubeAccountRefreshTokenVault::read() noexcept
+{
+	return vault_.read();
+}
+
+CredentialResult WindowsYouTubeAccountRefreshTokenVault::erase() noexcept
+{
+	return vault_.erase();
+}
+
+CredentialStatus WindowsYouTubeAccountRefreshTokenVault::status() noexcept
+{
+	return vault_.status();
+}
+
+const std::wstring &WindowsYouTubeAccountRefreshTokenVault::targetName() const noexcept
+{
+	return vault_.targetName();
+}
+
 CredentialResult WindowsCredentialVault::mapError(DWORD error) const noexcept
 {
 	switch (error) {

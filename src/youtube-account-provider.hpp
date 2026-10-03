@@ -116,8 +116,8 @@ using YouTubeAccountSelectionCommitter = std::function<bool(const YouTubeAccount
 class YouTubeAccountProvider final : public QObject {
 public:
 	YouTubeAccountProvider(QString clientId, GoogleOAuthAuthorizationSession::BrowserOpener browserOpener,
-			       CredentialVault &refreshTokenVault, YouTubeAccountSelectionCommitter selectionCommitter,
-			       QObject *parent = nullptr);
+			       YouTubeAccountRefreshTokenVault &refreshTokenVault,
+			       YouTubeAccountSelectionCommitter selectionCommitter, QObject *parent = nullptr);
 	~YouTubeAccountProvider() override;
 
 	YouTubeAccountProvider(const YouTubeAccountProvider &) = delete;
@@ -145,8 +145,8 @@ private:
 	YouTubeAccountProvider(QString clientId, std::unique_ptr<YouTubeAccountAuthorizationPort> authorizationPort,
 			       std::unique_ptr<YouTubeAccountTokenPort> tokenPort,
 			       std::unique_ptr<YouTubeAccountDiscoveryPort> discoveryPort,
-			       CredentialVault &refreshTokenVault, YouTubeAccountSelectionCommitter selectionCommitter,
-			       QObject *parent);
+			       YouTubeAccountRefreshTokenVault &refreshTokenVault,
+			       YouTubeAccountSelectionCommitter selectionCommitter, QObject *parent);
 
 	class Impl;
 	std::unique_ptr<Impl> impl_;

@@ -56,4 +56,12 @@ public:
 	virtual CredentialStatus status() noexcept = 0;
 };
 
+// Semantic capability for the Google account credential. Keeping this as a
+// distinct type prevents the manual YouTube stream-key vault from being wired
+// into OAuth code and accidentally sent to Google's token endpoint.
+class YouTubeAccountRefreshTokenVault : public CredentialVault {
+public:
+	~YouTubeAccountRefreshTokenVault() override = default;
+};
+
 } // namespace easy_multistream
