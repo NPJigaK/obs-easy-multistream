@@ -42,6 +42,11 @@ YouTubeAccountSnapshot YouTubeAccountCoordinator::snapshot() const
 	return snapshot_;
 }
 
+std::optional<YouTubeAccountLease> YouTubeAccountCoordinator::activeLease() const noexcept
+{
+	return snapshot_.lease;
+}
+
 YouTubeAccountTransition YouTubeAccountCoordinator::beginAuthorization()
 {
 	if (snapshot_.state == YouTubeAccountState::Closed || attemptActive()) {
@@ -94,39 +99,52 @@ YouTubeAccountTransition YouTubeAccountCoordinator::discoverySucceeded(YouTubeAc
 		return finishAttempt(YouTubeAccountFailure::InvalidResponse);
 	}
 
-	// Keep the discovered selection private until the provider has durably
-	// stored the refresh credential. This prevents a failed replacement from
-	// overwriting a known-good connection or presenting an unusable new one.
-	pendingDiscovery_ = discovery;
+	// Build every allocation-bearing value before any external credential or
+	// profile side effect. The provider can then finish with the noexcept commit
+	// below after both stores succeed.
+	CommittedConnection nextConnection{discovery, lease};
+	YouTubeAccountSnapshot nextSnapshot = snapshot_;
+	nextSnapshot.channelId = discovery.channelId;
+	nextSnapshot.channelLabel = discovery.channelLabel;
+	nextSnapshot.streamId = discovery.streamId;
+	nextSnapshot.streamLabel = discovery.streamLabel;
+	nextSnapshot.lease.reset();
+	nextSnapshot.connectionLease = lease;
+	nextSnapshot.state = YouTubeAccountState::Connected;
+	nextSnapshot.failure = YouTubeAccountFailure::None;
+	nextSnapshot.revision = nextNonZero(nextNonZero(snapshot_.revision));
+	PendingConnectionCommit nextCommit{std::move(nextConnection), std::move(nextSnapshot)};
+
 	snapshot_.state = YouTubeAccountState::PersistingCredential;
 	snapshot_.failure = YouTubeAccountFailure::None;
+	pendingCommit_ = std::move(nextCommit);
 	return result(true);
 }
 
 YouTubeAccountTransition YouTubeAccountCoordinator::credentialStored(YouTubeAccountLease lease)
 {
-	if (!accepts(lease) || snapshot_.state != YouTubeAccountState::PersistingCredential ||
-	    !pendingDiscovery_.has_value()) {
+	if (!commitCredentialStored(lease)) {
 		return result();
 	}
+	return {snapshot_, true};
+}
 
-	CommittedConnection nextConnection{*pendingDiscovery_, lease};
-	YouTubeAccountSnapshot nextSnapshot = snapshot_;
-	nextSnapshot.channelId = pendingDiscovery_->channelId;
-	nextSnapshot.channelLabel = pendingDiscovery_->channelLabel;
-	nextSnapshot.streamId = pendingDiscovery_->streamId;
-	nextSnapshot.streamLabel = pendingDiscovery_->streamLabel;
-	nextSnapshot.lease.reset();
-	nextSnapshot.connectionLease = lease;
-	nextSnapshot.state = YouTubeAccountState::Connected;
-	nextSnapshot.failure = YouTubeAccountFailure::None;
+bool YouTubeAccountCoordinator::commitCredentialStored(YouTubeAccountLease lease) noexcept
+{
+	static_assert(std::is_nothrow_move_constructible<CommittedConnection>::value);
+	static_assert(std::is_nothrow_move_assignable<CommittedConnection>::value);
+	static_assert(std::is_nothrow_move_assignable<YouTubeAccountSnapshot>::value);
+	if (!accepts(lease) || snapshot_.state != YouTubeAccountState::PersistingCredential ||
+	    !pendingCommit_.has_value()) {
+		return false;
+	}
 
-	snapshot_ = std::move(nextSnapshot);
-	committedConnection_ = std::move(nextConnection);
-	pendingDiscovery_.reset();
+	snapshot_ = std::move(pendingCommit_->snapshot);
+	committedConnection_ = std::move(pendingCommit_->connection);
+	pendingCommit_.reset();
 	replacingConnected_ = false;
 	committedConnectionFailure_.reset();
-	return result(true);
+	return true;
 }
 
 YouTubeAccountTransition YouTubeAccountCoordinator::attemptFailed(YouTubeAccountLease lease,
@@ -143,7 +161,7 @@ YouTubeAccountTransition YouTubeAccountCoordinator::finishAttempt(YouTubeAccount
 {
 	if (replacingConnected_ && committedConnection_.has_value()) {
 		snapshot_.lease.reset();
-		pendingDiscovery_.reset();
+		pendingCommit_.reset();
 		if (committedConnectionFailure_ == YouTubeAccountFailure::ReauthorizationRequired) {
 			clearAllConnections();
 			snapshot_.state = YouTubeAccountState::NeedsReauthorization;
@@ -160,7 +178,7 @@ YouTubeAccountTransition YouTubeAccountCoordinator::finishAttempt(YouTubeAccount
 	}
 
 	snapshot_.lease.reset();
-	pendingDiscovery_.reset();
+	pendingCommit_.reset();
 	clearAllConnections();
 	if (failure == YouTubeAccountFailure::ReauthorizationRequired) {
 		snapshot_.state = YouTubeAccountState::NeedsReauthorization;
@@ -182,7 +200,7 @@ YouTubeAccountTransition YouTubeAccountCoordinator::cancel(YouTubeAccountLease l
 	}
 
 	snapshot_.lease.reset();
-	pendingDiscovery_.reset();
+	pendingCommit_.reset();
 	if (replacingConnected_ && committedConnection_.has_value()) {
 		if (committedConnectionFailure_ == YouTubeAccountFailure::ReauthorizationRequired) {
 			clearAllConnections();
@@ -200,6 +218,22 @@ YouTubeAccountTransition YouTubeAccountCoordinator::cancel(YouTubeAccountLease l
 	}
 	replacingConnected_ = false;
 	committedConnectionFailure_.reset();
+	return result(true);
+}
+
+YouTubeAccountTransition YouTubeAccountCoordinator::credentialStateUncertain(YouTubeAccountLease lease)
+{
+	if (!accepts(lease) || !attemptActive()) {
+		return result();
+	}
+
+	invalidateGeneration();
+	snapshot_.lease.reset();
+	clearAllConnections();
+	replacingConnected_ = false;
+	committedConnectionFailure_.reset();
+	snapshot_.state = YouTubeAccountState::Unavailable;
+	snapshot_.failure = YouTubeAccountFailure::CredentialUnavailable;
 	return result(true);
 }
 
@@ -318,7 +352,7 @@ void YouTubeAccountCoordinator::clearAllConnections() noexcept
 {
 	clearVisibleConnection();
 	committedConnection_.reset();
-	pendingDiscovery_.reset();
+	pendingCommit_.reset();
 	committedConnectionFailure_.reset();
 }
 
