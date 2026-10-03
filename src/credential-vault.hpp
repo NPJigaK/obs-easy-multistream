@@ -4,14 +4,13 @@
 #pragma once
 
 #include "secure-buffer.hpp"
+#include "youtube-destination.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
 
 namespace easy_multistream {
-
-inline constexpr std::size_t kMaxCredentialSecretBytes = 5U * 512U;
 
 enum class CredentialError {
 	None,

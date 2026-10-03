@@ -19,8 +19,8 @@ The planned first useful release is intentionally narrow:
 Browser-based YouTube account connection is the accepted next setup path, but it is not exposed until its complete authorization, secure token storage, endpoint resolution, cancellation, and release requirements are implemented. Automatically creating and managing YouTube broadcasts or scheduled events, three or more destinations, custom output scenes, encoder-controlled YouTube dual streaming, per-destination transcoding, and Twitch-as-secondary remain outside the current boundary.
 
 The current source tree includes a non-instantiated account state machine, Google desktop-authorization protocol core,
-a separate loopback-listener library, a fixed-origin HTTPS token transport, and a read-only YouTube discovery
-transport. They generate PKCE/state
+a separate loopback-listener library, a fixed-origin HTTPS token transport, a read-only YouTube discovery transport,
+and a separate secret-bearing selected-stream resolver. They generate PKCE/state
 values, build and validate the authorization exchange, reject old account-operation leases, test a short-lived
 `127.0.0.1` callback listener on real local sockets, and test authorization-code exchange, refresh, and revocation
 against injected local network doubles. The discovery transport obtains exactly one bounded page of owned channels or
@@ -28,9 +28,11 @@ reusable encoder streams from fixed YouTube API endpoints. Its partial-response 
 details and stream keys, and it returns every valid candidate rather than choosing one implicitly. The listener uses an OS-assigned port, Windows exclusive-address binding,
 bounded HTTP parsing, one-shot completion, cancellation, and timeouts. The HTTPS layer accepts only Google's fixed
 token and revocation endpoints, requires verified TLS, rejects redirects, bounds and strictly parses replies, and does
-not send a client secret. None of these network libraries is linked into or instantiated by the OBS plugin yet, so the product opens no
-listener or browser, makes no OAuth request, and leaves the current dock and manual RTMPS workflow unchanged.
-System-browser launch, multi-page discovery orchestration, selected-stream ingestion resolution,
+not send a client secret. The resolver fetches only the explicitly selected stream ID immediately before a future
+start, revalidates its channel, state, RTMPS host, and stream key, and returns the key in a move-only buffer rather than
+any discovery or settings type. None of these network libraries is linked into or instantiated by the OBS plugin yet,
+so the product opens no listener or browser, makes no OAuth request, and leaves the current dock and manual RTMPS
+workflow unchanged. System-browser launch, multi-page discovery orchestration,
 account-provider/vault integration, runtime integration, and user-facing
 account controls remain release-gated.
 
