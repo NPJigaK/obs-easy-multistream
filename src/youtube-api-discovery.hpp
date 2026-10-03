@@ -194,6 +194,7 @@ public:
 private:
 	using QObject::moveToThread;
 	friend class YouTubeApiDiscoveryTestAccess;
+	friend class YouTubeApiDiscoveryPagerTestAccess;
 
 	YouTubeApiDiscovery(std::unique_ptr<QNetworkAccessManager> networkManager, YouTubeApiDiscoveryOptions options,
 			    QObject *parent);

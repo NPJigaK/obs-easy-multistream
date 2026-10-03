@@ -163,7 +163,7 @@ The internal implementation order is intentionally not shown in the user interfa
 8. complete Google policy, verification, privacy, quota, and signed-release gates before recommending it to general users.
 
 The first two items, the loopback listener and injected browser-opener authorization-session portions of item three, the token exchange/refresh/revocation plus
-one-page channel/reusable-stream discovery portions of item four, and the selected-stream resolver in item five are now
+bounded channel/reusable-stream discovery portions of item four, and the selected-stream resolver in item five are now
 present as non-instantiated libraries with standalone tests. The listener and authorization-session tests use real
 local sockets to verify exclusive `127.0.0.1` binding, bounded HTTP parsing, state rejection, one-shot completion,
 timeout, request limits, cancellation, bind-and-arm-before-open ordering, browser-open failure, re-entrant completion,
@@ -173,13 +173,15 @@ endpoints, form encoding, no client secret, verified TLS requirements, redirect 
 provider-error classification, cancellation, stale-reply rejection, shutdown, and secret-size boundaries. The
 discovery test verifies fixed read-only endpoints and query fields, Bearer-header isolation, strict bounded page
 parsing, explicit multi-candidate results, channel filtering, stable YouTube error classification, cancellation, and
-stale-completion rejection. It deliberately requests no CDN ingestion fields or stream keys. The resolver separately
+stale-completion rejection. A separate pager follows opaque continuation values serially, returns only a complete
+candidate set, and fails closed on page/item limits, token cycles, cross-page duplicate IDs, timeout, cancellation, or
+any page failure. It deliberately requests no CDN ingestion fields or stream keys. The resolver separately
 fetches one selected stream and returns its validated RTMPS destination and current key through a move-only result,
 without adding the key to discovery data or persistent settings. None of these libraries is
 linked into the OBS plugin, so the product still does not open a browser, listen on a port, make an OAuth/API network
 request, or read an account credential. The profile format and runtime fail-closed boundary are present, but the dock
-continues to expose only the working manual setup. Production browser-opener/provider integration, bounded multi-page
-orchestration, refresh-token vault integration, runtime handoff, and all later items stay gated, so a partial
+continues to expose only the working manual setup. Production browser-opener/provider integration, candidate-selection
+flow, refresh-token vault integration, runtime handoff, and all later items stay gated, so a partial
 connection path cannot appear in the user interface.
 
 No account UI is added merely to advertise unfinished functionality. A build without a complete configured provider continues to show only the working manual setup.
