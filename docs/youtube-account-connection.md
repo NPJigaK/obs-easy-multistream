@@ -224,11 +224,15 @@ lease, and persists the non-secret selection before the scoped refresh token, re
 token write fails. It can also restore a persisted selection from credential status alone: present is
 only locally configured and remains unverified against Google, while missing and unavailable remain distinct. Every
 restore creates a new generation, and a profile without a selection remains setup-required without touching any
-credential. None of these libraries is linked into the OBS plugin, so the product still does not open a browser, listen
-on a port, make an OAuth/API network request, or read an account credential. The profile format and runtime fail-closed
-boundary are present, but the dock continues to expose only the working manual setup. Production browser-opener and
-active-profile adapters, refresh/revoke, runtime handoff, and all later items stay gated, so a partial connection path
-cannot appear in the user interface.
+credential. None of the network-capable account libraries is linked into the OBS plugin, so the product still does not
+open a browser, listen on a port, make an OAuth/API network request, or read an account credential. The production
+plugin now keeps a value-only active-profile context: it copies the current profile path only long enough to derive the
+existing SHA-256 binding, copies the non-secret account selection, invalidates the context before a profile switch, and
+reloads it after the switch. A future selection commit must match both its generation and the freshly derived current
+binding, and it cannot silently change a manual profile into account mode. This context does not instantiate the account
+provider or destination preparer and cannot change the dock. Production browser opening, provider/preparer lifecycle,
+refresh/revoke, runtime handoff, and all later items stay gated, so a partial connection path cannot appear in the user
+interface.
 
 The manual stream-key credential remains shared across OBS profiles. The refresh-token credential is scoped to the SHA-256
 binding of the exact active profile path and to the selected channel's SHA-256 `UserName` binding. Restoration therefore

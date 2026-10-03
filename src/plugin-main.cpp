@@ -8,11 +8,13 @@
 #include "settings-controller.hpp"
 #include "version.hpp"
 #include "windows-credential-vault.hpp"
+#include "youtube-account-profile-context.hpp"
 #include "youtube-output-adapter.hpp"
 
 #include <obs.hpp>
 #include <obs-frontend-api.h>
 #include <obs-module.h>
+#include <util/bmem.h>
 
 #include <QAction>
 #include <QByteArray>
@@ -65,6 +67,7 @@ struct PluginState {
 	QPointer<easy_multistream::DockView> dock;
 	QPointer<QAction> toolsMenuAction;
 	std::unique_ptr<easy_multistream::SettingsController> settingsController;
+	std::unique_ptr<easy_multistream::YouTubeAccountProfileContext> youtubeAccountProfileContext;
 	QObject runtimeContext;
 	easy_multistream::NativeWinCredentialApi credentialApi;
 	easy_multistream::WindowsCredentialVault credentialVault;
@@ -178,6 +181,37 @@ easy_multistream::NativeDestination currentNativeDestination() noexcept
 	const char *provider = settings != nullptr ? obs_data_get_string(settings.Get(), "service") : nullptr;
 	return easy_multistream::classifyNativeDestination(serviceId != nullptr ? serviceId : "",
 							   provider != nullptr ? provider : "");
+}
+
+std::string currentProfilePath()
+{
+	char *rawPath = obs_frontend_get_current_profile_path();
+	if (rawPath == nullptr) {
+		return {};
+	}
+
+	try {
+		std::string path(rawPath);
+		bfree(rawPath);
+		return path;
+	} catch (...) {
+		bfree(rawPath);
+		throw;
+	}
+}
+
+void loadYouTubeAccountProfileContext(PluginState &state) noexcept
+{
+	if (state.youtubeAccountProfileContext != nullptr) {
+		(void)state.youtubeAccountProfileContext->load();
+	}
+}
+
+void invalidateYouTubeAccountProfileContext(PluginState &state) noexcept
+{
+	if (state.youtubeAccountProfileContext != nullptr) {
+		state.youtubeAccountProfileContext->invalidate();
+	}
 }
 
 void clearNativeStartingProbe(PluginState &state) noexcept
@@ -409,6 +443,7 @@ void onFrontendEvent(enum obs_frontend_event event, void *privateData) noexcept
 		switch (event) {
 		case OBS_FRONTEND_EVENT_FINISHED_LOADING:
 		case OBS_FRONTEND_EVENT_PROFILE_CHANGED:
+			loadYouTubeAccountProfileContext(*state);
 			state->nativeDestination = currentNativeDestination();
 			if (state->settingsController != nullptr) {
 				state->settingsController->loadCurrentProfile(easy_multistream::DockNotice::Preview,
@@ -419,6 +454,7 @@ void onFrontendEvent(enum obs_frontend_event event, void *privateData) noexcept
 			}
 			break;
 		case OBS_FRONTEND_EVENT_PROFILE_CHANGING:
+			invalidateYouTubeAccountProfileContext(*state);
 			clearNativeStartingProbe(*state);
 			if (state->runtime != nullptr) {
 				state->runtime->onProfileChanging();
@@ -478,6 +514,7 @@ void removeFrontendObjects(PluginState &state) noexcept
 	}
 
 	clearNativeStartingProbe(state);
+	invalidateYouTubeAccountProfileContext(state);
 	if (state.runtime != nullptr) {
 		state.runtime->onExit();
 		// RuntimeController's destructor is the final callback barrier.  It
@@ -532,6 +569,8 @@ bool obs_module_load(void)
 		auto state = std::make_unique<PluginState>();
 		auto dock = std::make_unique<easy_multistream::DockView>(loadDockText());
 		state->dock = dock.get();
+		state->youtubeAccountProfileContext = std::make_unique<easy_multistream::YouTubeAccountProfileContext>(
+			[]() { return currentProfilePath(); }, []() { return obs_frontend_get_profile_config(); });
 		state->settingsController = std::make_unique<easy_multistream::SettingsController>(dock.get());
 		PluginState *statePointer = state.get();
 		state->youtubeAdapter = std::make_unique<easy_multistream::YouTubeOutputAdapter>();
@@ -592,6 +631,7 @@ bool obs_module_load(void)
 		// OBS is still loading modules here, so rtmp_common may not be
 		// registered yet.  FINISHED_LOADING performs the first destination
 		// classification and replaces this brief Unknown snapshot.
+		loadYouTubeAccountProfileContext(*pluginState);
 		pluginState->settingsController->loadCurrentProfile(easy_multistream::DockNotice::Preview, true);
 
 		blog(LOG_INFO, "[obs-easy-multistream] Loaded version %s", easy_multistream::kVersion);
