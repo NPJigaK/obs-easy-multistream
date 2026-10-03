@@ -23,6 +23,7 @@ add_library(${CMAKE_PROJECT_NAME}-core STATIC)
 add_library(${CMAKE_PROJECT_NAME}-session-core STATIC)
 add_library(${CMAKE_PROJECT_NAME}-oauth-core STATIC)
 add_library(${CMAKE_PROJECT_NAME}-oauth-loopback STATIC)
+add_library(${CMAKE_PROJECT_NAME}-oauth-authorization-session STATIC)
 add_library(${CMAKE_PROJECT_NAME}-oauth-token-transport STATIC)
 add_library(${CMAKE_PROJECT_NAME}-youtube-discovery STATIC)
 add_library(${CMAKE_PROJECT_NAME}-youtube-stream-resolver STATIC)
@@ -107,6 +108,21 @@ target_link_libraries(
   ${CMAKE_PROJECT_NAME}-oauth-loopback
   PUBLIC ${CMAKE_PROJECT_NAME}-oauth-core Qt6::Core Qt6::Network
   PRIVATE Ws2_32
+)
+
+target_sources(
+  ${CMAKE_PROJECT_NAME}-oauth-authorization-session
+  PRIVATE
+    src/google-oauth-authorization-session.cpp
+    src/google-oauth-authorization-session.hpp
+)
+target_include_directories(
+  ${CMAKE_PROJECT_NAME}-oauth-authorization-session
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+target_link_libraries(
+  ${CMAKE_PROJECT_NAME}-oauth-authorization-session
+  PUBLIC ${CMAKE_PROJECT_NAME}-oauth-loopback Qt6::Core
 )
 
 target_sources(
@@ -265,6 +281,33 @@ if(BUILD_TESTING)
   add_test(
     NAME ${CMAKE_PROJECT_NAME}-google-oauth-loopback
     COMMAND ${CMAKE_PROJECT_NAME}-google-oauth-loopback-tests
+  )
+
+  add_executable(${CMAKE_PROJECT_NAME}-google-oauth-authorization-session-tests)
+  target_sources(
+    ${CMAKE_PROJECT_NAME}-google-oauth-authorization-session-tests
+    PRIVATE tests/google-oauth-authorization-session-tests.cpp
+  )
+  target_link_libraries(
+    ${CMAKE_PROJECT_NAME}-google-oauth-authorization-session-tests
+    PRIVATE ${CMAKE_PROJECT_NAME}-oauth-authorization-session Ws2_32
+  )
+
+  add_custom_command(
+    TARGET ${CMAKE_PROJECT_NAME}-google-oauth-authorization-session-tests
+    POST_BUILD
+    COMMAND
+      "${CMAKE_COMMAND}" -E copy_if_different
+      $<TARGET_RUNTIME_DLLS:${CMAKE_PROJECT_NAME}-google-oauth-authorization-session-tests>
+      $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}-google-oauth-authorization-session-tests>
+    COMMAND_EXPAND_LISTS
+    COMMENT "Copy Google OAuth authorization session test runtime dependencies"
+    VERBATIM
+  )
+
+  add_test(
+    NAME ${CMAKE_PROJECT_NAME}-google-oauth-authorization-session
+    COMMAND ${CMAKE_PROJECT_NAME}-google-oauth-authorization-session-tests
   )
 
   add_executable(${CMAKE_PROJECT_NAME}-google-oauth-token-tests)
@@ -436,6 +479,7 @@ if(BUILD_TESTING)
     ${CMAKE_PROJECT_NAME}-ui
     ${CMAKE_PROJECT_NAME}-google-oauth-protocol
     ${CMAKE_PROJECT_NAME}-google-oauth-loopback
+    ${CMAKE_PROJECT_NAME}-google-oauth-authorization-session
     ${CMAKE_PROJECT_NAME}-google-oauth-token
     ${CMAKE_PROJECT_NAME}-youtube-discovery
     ${CMAKE_PROJECT_NAME}-youtube-stream-resolver
