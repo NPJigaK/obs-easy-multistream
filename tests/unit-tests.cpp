@@ -790,7 +790,8 @@ void testAccountCredentialTargetIsIsolated()
 	CHECK(streamKeyTarget != refreshTokenTarget);
 
 	FakeWinCredentialApi api;
-	easy_multistream::WindowsCredentialVault refreshTokenVault(api, refreshTokenTarget);
+	easy_multistream::WindowsYouTubeAccountRefreshTokenVault refreshTokenVault(api);
+	CHECK(refreshTokenVault.targetName() == refreshTokenTarget);
 	CHECK(refreshTokenVault.write("test-refresh-token").succeeded());
 	CHECK(api.writeTarget == refreshTokenTarget);
 	CHECK(api.writeTarget != streamKeyTarget);

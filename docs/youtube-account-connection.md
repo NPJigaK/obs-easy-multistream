@@ -1,7 +1,7 @@
 # YouTube account connection
 
-Status: accepted product and architecture direction. The repository contains a headless state and protocol
-foundation, but account connection is not yet integrated or exposed in the current build.
+Status: accepted product and architecture direction. The repository contains a headless state, protocol, and
+destination-preparation foundation, but account connection is not yet integrated or exposed in the current build.
 
 ## Decision
 
@@ -62,6 +62,16 @@ The output adapter never receives an OAuth access or refresh token. The account 
 
 Account connection and output delivery are separate states. A channel may be connected while YouTube is not streaming, and a YouTube output may fail without disconnecting the account.
 
+The detached `YouTubeAccountDestinationPreparer` is the boundary immediately before future output integration. For one
+selected channel/stream it reads the saved refresh credential, refreshes an access token, persists a provider-rotated
+refresh token before resolving the selected stream, and completes with only a validated RTMPS URL plus a move-only
+stream-key buffer. A failed rotation write returns a credential-unavailable result and does not start resolution. A
+rotation that was written successfully is retained even if resolution later fails or the preparation is cancelled; it is
+not rolled back to an older token. The preparer is owner-thread-only, uses an independent epoch and attempt, and
+supports cancellation, context invalidation, shutdown, stale-callback rejection, and queued value-only completion.
+It is currently a detached/testable library and is not instantiated by `PluginState`, `RuntimeController`, the dock, or
+the output adapter.
+
 ## Desktop authorization
 
 The supported authorization flow follows Google's installed-app guidance:
@@ -100,7 +110,7 @@ Windows Credential Manager uses separate targets for:
 - the existing manual YouTube stream key;
 - the Google refresh token.
 
-Access tokens, authorization codes, PKCE values, token endpoint responses, and resolved stream keys remain in wipeable process buffers for the shortest practical lifetime. None is displayed or logged. Disconnect revokes the Google grant when possible and removes the local refresh token and account selection. A revoked or `invalid_grant` token becomes **Reconnect YouTube**, not an automatic fallback.
+Access tokens, authorization codes, PKCE values, token endpoint responses, and resolved stream keys remain in wipeable process buffers for the shortest practical lifetime. None is displayed or logged. The detached destination preparer reads the refresh token only for a current preparation, and writes a provider-rotated refresh token to Credential Manager before resolving the selected stream. The current OBS plugin does not instantiate that preparer. Disconnect revokes the Google grant when possible and removes the local refresh token and account selection. A revoked or `invalid_grant` token becomes **Reconnect YouTube**, not an automatic fallback.
 
 As with the existing stream key, this design does not claim resistance to malware running as the same Windows user, live process inspection, or copies made internally by Qt, Windows, or libobs.
 
@@ -112,6 +122,12 @@ Credential replacement is serialized with the account state. After discovery, th
 attempt, performs the synchronous Credential Manager write on the owner thread, and commits the account state before
 yielding to Qt's event loop. If credential storage ever becomes asynchronous, it must use an attempt-scoped staging
 target with explicit rollback so cancellation, profile change, or shutdown cannot leave an orphaned replacement token.
+
+Destination preparation has a separate ordering rule: a rotated refresh token is written synchronously before the
+selected-stream resolver is started. A write failure returns a credential-unavailable result and does not resolve or
+start an output. A successful write is durable and is not rolled back if the subsequent resolver fails or the attempt
+is cancelled. The preparer's epoch and attempt must match at every stage; cancellation, context invalidation, shutdown,
+and destruction suppress stale completions and clear active secret-bearing state.
 
 The provider:
 
@@ -165,8 +181,9 @@ The internal implementation order is intentionally not shown in the user interfa
 
 The first two items, the loopback listener and injected browser-opener authorization-session portions of item three,
 the token transport plus bounded channel/reusable-stream discovery portions of item four, the selected-stream resolver
-in item five, and the interactive authorization/exchange/discovery/selection/storage orchestration are now present as
-non-instantiated libraries with standalone tests. The listener and authorization-session tests use real
+and detached destination-preparation orchestration in item five, and the interactive
+authorization/exchange/discovery/selection/storage orchestration are now present as non-instantiated libraries with
+standalone tests. The listener and authorization-session tests use real
 local sockets to verify exclusive `127.0.0.1` binding, bounded HTTP parsing, state rejection, one-shot completion,
 timeout, request limits, cancellation, bind-and-arm-before-open ordering, browser-open failure, re-entrant completion,
 attempt replacement, shutdown, and move-only code/verifier handoff. The browser opener is a fake; the OBS plugin does
@@ -179,7 +196,11 @@ stale-completion rejection. A separate pager follows opaque continuation values 
 candidate set, and fails closed on page/item limits, token cycles, cross-page duplicate IDs, timeout, cancellation, or
 any page failure. It deliberately requests no CDN ingestion fields or stream keys. The resolver separately
 fetches one selected stream and returns its validated RTMPS destination and current key through a move-only result,
-without adding the key to discovery data or persistent settings. The headless provider automatically advances a
+without adding the key to discovery data or persistent settings. The destination preparer reads the saved refresh
+credential immediately before resolving, persists any rotated token before starting the resolver, refuses to resolve
+when that write fails, and retains a successful rotation if a later resolve fails or is cancelled. Its epoch, attempt,
+owner-thread, cancellation, context-invalidation, shutdown, and queued-completion tests reject stale work and keep
+secrets out of public state. The headless provider automatically advances a
 single channel/stream candidate, requires exact-ID selection for multiple candidates, rejects stale work by epoch and
 lease, and commits the refresh token plus non-secret selection transactionally enough to restore the previous token
 when profile persistence fails. None of these libraries is

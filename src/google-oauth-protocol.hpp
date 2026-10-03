@@ -119,6 +119,10 @@ struct GoogleOAuthCallbackResult final {
 	bool hasProviderError() const noexcept { return status == GoogleOAuthCallbackStatus::ProviderError; }
 };
 
+// Shared validation used by authorization and token transports so a caller
+// cannot accept a client ID that a later stage will reject.
+bool isValidGoogleOAuthClientId(const QString &clientId) noexcept;
+
 // RFC 4648 base64url using the URL-safe alphabet and no trailing '=' signs.
 // The returned QByteArray is owned by the caller.  Internal secret-bearing
 // callers wipe their input/output temporaries after copying into SecureBuffer.

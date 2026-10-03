@@ -59,12 +59,6 @@ bool hasWhitespaceOrControlCharacter(const QString &value) noexcept
 	return false;
 }
 
-bool isValidClientId(const QString &clientId) noexcept
-{
-	return !clientId.isEmpty() && clientId.size() <= kGoogleOAuthMaxClientIdCharacters &&
-	       !hasWhitespaceOrControlCharacter(clientId);
-}
-
 bool isExactLoopbackRedirectUri(const QUrl &redirectUri) noexcept
 {
 	return redirectUri.isValid() && !redirectUri.isRelative() && redirectUri.scheme() == QStringLiteral("http") &&
@@ -577,7 +571,7 @@ public:
 		if (!request.attempt.isValid()) {
 			return GoogleOAuthTokenStartStatus::InvalidAttempt;
 		}
-		if (!isValidClientId(request.clientId)) {
+		if (!isValidGoogleOAuthClientId(request.clientId)) {
 			return GoogleOAuthTokenStartStatus::InvalidClientId;
 		}
 		if (!isExactLoopbackRedirectUri(request.redirectUri)) {
@@ -617,7 +611,7 @@ public:
 		if (!request.attempt.isValid()) {
 			return GoogleOAuthTokenStartStatus::InvalidAttempt;
 		}
-		if (!isValidClientId(request.clientId)) {
+		if (!isValidGoogleOAuthClientId(request.clientId)) {
 			return GoogleOAuthTokenStartStatus::InvalidClientId;
 		}
 		if (!isVisibleAscii(request.refreshToken.view(), kGoogleOAuthMaxRefreshTokenBytes)) {

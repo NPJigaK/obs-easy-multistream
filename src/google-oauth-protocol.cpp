@@ -56,12 +56,6 @@ bool hasWhitespaceOrControlCharacter(const QString &value) noexcept
 	return false;
 }
 
-bool isValidClientId(const QString &clientId) noexcept
-{
-	return !clientId.isEmpty() && clientId.size() <= kGoogleOAuthMaxClientIdCharacters &&
-	       !hasWhitespaceOrControlCharacter(clientId);
-}
-
 bool isBase64UrlToken(std::string_view value) noexcept
 {
 	if (value.size() != static_cast<std::size_t>(kGoogleOAuthEncodedRandomLength)) {
@@ -156,6 +150,12 @@ GoogleOAuthCallbackResult callbackFailure(GoogleOAuthCallbackStatus status) noex
 
 } // namespace
 
+bool isValidGoogleOAuthClientId(const QString &clientId) noexcept
+{
+	return !clientId.isEmpty() && clientId.size() <= kGoogleOAuthMaxClientIdCharacters &&
+	       !hasWhitespaceOrControlCharacter(clientId);
+}
+
 QByteArray googleOAuthBase64UrlNoPadding(const QByteArray &bytes)
 {
 	return bytes.toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
@@ -210,7 +210,7 @@ GoogleOAuthAuthorizationResult makeGoogleOAuthAuthorizationRequest(
 	const QString &clientId, int port, GoogleOAuthConsentMode consentMode)
 {
 	GoogleOAuthAuthorizationResult result;
-	if (!isValidClientId(clientId)) {
+	if (!isValidGoogleOAuthClientId(clientId)) {
 		result.status = GoogleOAuthRequestStatus::InvalidClientId;
 		return result;
 	}

@@ -16,7 +16,7 @@ YouTubeServerUrl=rtmps://a.rtmps.youtube.com/live2
 
 The account-ready profile format can also hold a non-secret YouTube channel ID, channel label, reusable-stream ID, and stream label. Those values are strictly bounded and validated, but the unfinished account path is not exposed in the dock and cannot start an output. The connection mode is explicit: an account-mode profile never falls back to the saved manual URL/key path.
 
-The YouTube stream key is stored as a Windows Generic Credential for the current Windows account. It is not stored in `basic.ini`, scene collections, profile exports, plugin logs, or diagnostic text. One credential is shared by all OBS profiles; the dock states this explicitly. The non-secret Stream URL and future account selection are profile-scoped. The separate refresh-token credential target is fixed by the plugin and is never written into a profile; no current production path writes a refresh token yet.
+The YouTube stream key is stored as a Windows Generic Credential for the current Windows account. It is not stored in `basic.ini`, scene collections, profile exports, plugin logs, or diagnostic text. One credential is shared by all OBS profiles; the dock states this explicitly. The non-secret Stream URL and future account selection are profile-scoped. The separate refresh-token credential target is fixed by the plugin and is never written into a profile. Account components require a distinct refresh-token vault type, whose Windows implementation always constructs that fixed target; the manual stream-key vault cannot be passed accidentally. The detached account-destination preparer can read that target and durably write a rotated refresh token, but it is not linked to or instantiated by the current OBS plugin; no plugin runtime path reads or writes the refresh token yet.
 
 Deleting the credential is an explicit, confirmed action. It does not rewrite any profile's non-secret enabled flag. Enabled profiles remain configured but cannot stream until a new shared key is saved.
 
@@ -35,6 +35,8 @@ Qt, OBS, Windows, libobs service settings, and the process allocator can still r
 Known plaintext credential field names are removed before any profile write, including when the proposed settings are otherwise invalid. If the atomic profile save itself fails, the in-memory config remains scrubbed but the previous on-disk file cannot be rewritten; the normal save-failure notice remains visible and the next successful save retries the cleanup. Tests cover both the failure and recovery paths.
 
 The same boundary applies to the account connection under development. Listener-owned byte buffers and the final authorization code container are wiped, but strict callback validation currently passes through transient Qt `QUrl`, `QUrlQuery`, and `QString` values. Qt does not promise to zero those internal allocations when they are released. Authorization codes, state values, and tokens are never logged or persisted through that path, but the project does not claim that every transient copy can be removed from process memory.
+
+The detached destination-preparation layer reads the refresh token only when a selected stream is about to be prepared. The refreshed access token is passed in a move-only buffer to the fixed YouTube stream resolver; a provider-rotated refresh token is synchronously written to Credential Manager before that resolver is started. If the durable write fails, no resolver request is made and the completion contains no destination. Once a rotated token has been written successfully, a later resolver failure or cancellation does not roll it back: it is the newest durable credential returned by Google. The preparer exposes only stable status values and a successful move-only RTMPS URL/key result, never provider text or secret-bearing snapshots. Epoch/attempt checks, cancellation, context invalidation, shutdown, and owner-thread queued delivery reject late work. This layer is currently standalone/test-linked only, so it adds no production plugin network surface.
 
 ## Credential Manager boundary
 
@@ -77,6 +79,11 @@ unexpected YouTube ingestion host. Its successful result contains only a validat
 `SecureBuffer` holding the current `streamName`. The key is not added to discovery results, settings, snapshots, logs,
 diagnostics, or Credential Manager. Response bytes and directly controlled staging buffers are wiped after use;
 short-lived copies made internally by Qt remain subject to the in-memory limitation documented above.
+
+The selected-stream resolver is orchestrated by the detached destination preparer described above. The resolver is not
+started until the refresh-token rotation (when present) has been durably stored, and the preparer never sends the
+refresh token to the YouTube API. A failed preparation cannot alter the native OBS output; this remains a future
+runtime-integration rule, because neither the preparer nor the resolver is currently instantiated by the plugin.
 
 The YouTube output owns a private RTMP service and output while retaining explicit references to the native H.264 and main AAC encoders. It never starts or stops the native OBS stream. A YouTube error closes only the YouTube output, leaves Twitch running, and exposes a separate retry action after teardown completes.
 

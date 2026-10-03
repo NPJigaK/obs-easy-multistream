@@ -3,6 +3,8 @@
 
 #include "youtube-account-provider.hpp"
 
+#include "google-oauth-protocol.hpp"
+
 #include <QPointer>
 #include <QThread>
 
@@ -204,8 +206,8 @@ public:
 	Impl(YouTubeAccountProvider *owner, QString clientId,
 	     std::unique_ptr<YouTubeAccountAuthorizationPort> authorizationPort,
 	     std::unique_ptr<YouTubeAccountTokenPort> tokenPort,
-	     std::unique_ptr<YouTubeAccountDiscoveryPort> discoveryPort, CredentialVault &refreshTokenVault,
-	     YouTubeAccountSelectionCommitter selectionCommitter)
+	     std::unique_ptr<YouTubeAccountDiscoveryPort> discoveryPort,
+	     YouTubeAccountRefreshTokenVault &refreshTokenVault, YouTubeAccountSelectionCommitter selectionCommitter)
 		: owner_(owner),
 		  clientId_(std::move(clientId)),
 		  authorizationPort_(std::move(authorizationPort)),
@@ -227,7 +229,7 @@ public:
 		if (commitInProgress_ || activeLease().has_value()) {
 			return YouTubeAccountProviderStartStatus::Busy;
 		}
-		if (clientId_.isEmpty()) {
+		if (!isValidGoogleOAuthClientId(clientId_)) {
 			return YouTubeAccountProviderStartStatus::InvalidClientId;
 		}
 		if (!selectionCommitter_) {
@@ -821,7 +823,7 @@ private:
 	std::unique_ptr<YouTubeAccountAuthorizationPort> authorizationPort_;
 	std::unique_ptr<YouTubeAccountTokenPort> tokenPort_;
 	std::unique_ptr<YouTubeAccountDiscoveryPort> discoveryPort_;
-	CredentialVault &refreshTokenVault_;
+	YouTubeAccountRefreshTokenVault &refreshTokenVault_;
 	YouTubeAccountSelectionCommitter selectionCommitter_;
 	YouTubeAccountCoordinator coordinator_;
 	YouTubeAccountProviderStage stage_ = YouTubeAccountProviderStage::Idle;
@@ -838,7 +840,7 @@ private:
 
 YouTubeAccountProvider::YouTubeAccountProvider(QString clientId,
 					       GoogleOAuthAuthorizationSession::BrowserOpener browserOpener,
-					       CredentialVault &refreshTokenVault,
+					       YouTubeAccountRefreshTokenVault &refreshTokenVault,
 					       YouTubeAccountSelectionCommitter selectionCommitter, QObject *parent)
 	: YouTubeAccountProvider(std::move(clientId), std::make_unique<AuthorizationAdapter>(std::move(browserOpener)),
 				 std::make_unique<TokenAdapter>(), std::make_unique<DiscoveryAdapter>(),
@@ -850,7 +852,7 @@ YouTubeAccountProvider::YouTubeAccountProvider(QString clientId,
 					       std::unique_ptr<YouTubeAccountAuthorizationPort> authorizationPort,
 					       std::unique_ptr<YouTubeAccountTokenPort> tokenPort,
 					       std::unique_ptr<YouTubeAccountDiscoveryPort> discoveryPort,
-					       CredentialVault &refreshTokenVault,
+					       YouTubeAccountRefreshTokenVault &refreshTokenVault,
 					       YouTubeAccountSelectionCommitter selectionCommitter, QObject *parent)
 	: QObject(parent),
 	  impl_(std::make_unique<Impl>(this, std::move(clientId), std::move(authorizationPort), std::move(tokenPort),
