@@ -599,6 +599,20 @@ void testOperationLockReleaseForCancellationInvalidationAndShutdownFailure()
 		CHECK(fixture.lockApi.releaseCount == 1);
 		CHECK(fixture.lockApi.closeCount == 1);
 	}
+
+	{
+		Fixture fixture;
+		fixture.vault.seed({kProfileBindingA, "channel-1"}, kOldRefreshToken);
+		fixture.lockApi.releaseSucceeds = false;
+		std::vector<Result> results;
+		CHECK(fixture.preparer->start(requestFor({1, 97}), recorder(results)) ==
+		      YouTubeDestinationPrepareStartStatus::Started);
+		CHECK(!fixture.preparer->shutdown());
+		CHECK(fixture.lockApi.releaseCount == 1);
+		fixture.lockApi.releaseSucceeds = true;
+		CHECK(fixture.preparer->shutdown());
+		CHECK(fixture.lockApi.releaseCount == 2);
+	}
 }
 
 void completeRefreshAndReachResolver(Fixture &fixture, bool rotate = false)

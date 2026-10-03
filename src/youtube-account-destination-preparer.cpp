@@ -339,9 +339,9 @@ public:
 		}
 		clearOperation();
 		state_ = YouTubeDestinationPreparerState::Idle;
-		releaseOperationLock();
+		const bool lockReleased = releaseOperationLock();
 		lifecycleMutationInProgress_ = false;
-		return true;
+		return lockReleased;
 	}
 
 	bool shutdown() noexcept
@@ -350,7 +350,8 @@ public:
 			return false;
 		}
 		if (state_ == YouTubeDestinationPreparerState::Closed) {
-			return true;
+			releaseOperationLock();
+			return !operationLock_.acquired();
 		}
 		if (lifecycleMutationInProgress_) {
 			return false;
@@ -365,9 +366,9 @@ public:
 		clearOperation();
 		const bool refreshClosed = refreshPort_->shutdown();
 		const bool resolverClosed = resolverPort_->shutdown();
-		releaseOperationLock();
+		const bool lockReleased = releaseOperationLock();
 		lifecycleMutationInProgress_ = false;
-		return refreshClosed && resolverClosed;
+		return refreshClosed && resolverClosed && lockReleased;
 	}
 
 	YouTubeDestinationPreparerState state() const noexcept { return state_; }
@@ -403,7 +404,7 @@ private:
 		completionDeliveryQueued_ = false;
 	}
 
-	void releaseOperationLock() noexcept { (void)operationLock_.release(); }
+	bool releaseOperationLock() noexcept { return operationLock_.release(); }
 
 	void cancelPorts(YouTubeDestinationPrepareAttempt attempt) noexcept
 	{
