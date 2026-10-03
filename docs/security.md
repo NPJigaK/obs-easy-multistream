@@ -107,10 +107,21 @@ the dock.
 Support is limited to the current interactive Windows session; cross-session use of one OBS profile remains unsupported
 unless a later design adds a user-scoped `Global\\` object with an explicitly reviewed security descriptor.
 
-Before active-profile wiring is exposed, the profile selection must be re-read after acquiring this lock, or profile
-loading and restoration must be performed inside one outer locked transaction. A selection read before lock acquisition
-can be stale if another OBS process changes the same profile. Future disconnect and revoke operations must use the same
-profile-operation boundary.
+The detached `YouTubeAccountProfileRestoreCoordinator` closes the stale-selection gap for saved-account restoration.
+On its owner thread it reads only a value-copy candidate binding, acquires the exact profile-operation lock without
+waiting, re-reads the active profile path and config while the lock is held, verifies the binding again, and then asks
+the provider to inspect credential status and restore its state through that same held lock. It checks the active
+binding once more after the provider transition and rejects a switch before releasing the lock. It releases the lock on
+the owner thread after the transition. Profile invalidation and shutdown requests that re-enter through a synchronous
+dependency callback are deferred until the provider transition completes; nested restore is rejected as busy. This
+prevents cleanup from releasing the profile mutex while credential-derived state is still being changed. Busy or
+unavailable acquisition performs no context/provider mutation; a profile race, invalid or future settings, and native
+release failure fail closed. Owner-thread destruction makes the provider terminal even if native handle cleanup cannot
+complete; any retained ownership remains fail-closed until process teardown. Recovered ownership is accepted only
+for the locked reread and is not user-facing. The coordinator carries only copied non-secret profile/provider values;
+refresh tokens and stream keys remain in their existing secure boundaries. It is detached/test-linked and is not linked
+into or instantiated by the production OBS module. Future selection commit, disconnect, and revoke operations must
+use the same profile-operation boundary.
 
 The YouTube output owns a private RTMP service and output while retaining explicit references to the native H.264 and main AAC encoders. It never starts or stops the native OBS stream. A YouTube error closes only the YouTube output, leaves Twitch running, and exposes a separate retry action after teardown completes.
 

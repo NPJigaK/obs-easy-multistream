@@ -15,9 +15,11 @@
 
 namespace easy_multistream {
 
-// This boundary is owned by the OBS frontend thread. The readers are invoked
-// synchronously and their results are copied immediately; the context never
-// retains an OBS config pointer or a borrowed profile-path buffer.
+// This boundary is owned by the OBS frontend thread. Both readers must observe
+// the same stable active profile and must not process events or re-enter profile
+// switching. They are invoked synchronously and their results are copied
+// immediately; the context never retains an OBS config pointer or a borrowed
+// profile-path buffer.
 class YouTubeAccountProfileContext final {
 public:
 	using ProfilePathReader = std::function<std::string()>;
@@ -73,6 +75,12 @@ public:
 	// profile cannot commit into the new context.
 	LoadResult load();
 
+	// Read only the active profile binding. This is a side-effect-free
+	// discovery operation: it never reads the OBS config, changes the snapshot,
+	// or advances the generation. The returned binding is a value copy, so no
+	// profile-path buffer is retained after the call.
+	std::optional<std::string> currentProfileBinding() const noexcept;
+
 	// Invalidate all profile-bound work. The generation is advanced even when
 	// already invalid so a stale callback can never become current again.
 	void invalidate() noexcept;
@@ -92,7 +100,7 @@ private:
 	static CommitStatus mapCommitStatus(SettingsLoadStatus status) noexcept;
 	static Snapshot snapshotFor(std::uint64_t generation, std::string profileBinding,
 				    const SettingsLoadResult &settings);
-	std::optional<std::string> readProfileBinding();
+	std::optional<std::string> readProfileBinding() const;
 
 	ProfilePathReader profilePathReader_;
 	ConfigReader configReader_;

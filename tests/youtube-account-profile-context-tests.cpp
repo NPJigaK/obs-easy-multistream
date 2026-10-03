@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <iostream>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -166,6 +167,62 @@ void testLoadCopiesValueOnlyProfileContext()
 	CHECK(loaded.snapshot.profileBinding != currentPath);
 	CHECK(context.snapshot().profileBinding == loaded.snapshot.profileBinding);
 	removeTestPath(path);
+}
+
+void testCurrentProfileBindingIsSideEffectFreeAndBounded()
+{
+	int configReads = 0;
+	std::string currentPath(kProfileA);
+	YouTubeAccountProfileContext context(
+		[&currentPath]() { return currentPath; },
+		[&configReads]() {
+			++configReads;
+			throw std::runtime_error("config reader must not be called");
+			return static_cast<config_t *>(nullptr);
+		});
+
+	const auto before = context.snapshot();
+	const auto bindingA = context.currentProfileBinding();
+	const auto expectedA = easy_multistream::makeYouTubeAccountProfileBinding(kProfileA);
+	CHECK(bindingA.has_value());
+	CHECK(expectedA.has_value());
+	if (bindingA.has_value() && expectedA.has_value()) {
+		CHECK(*bindingA == *expectedA);
+	}
+	CHECK(configReads == 0);
+	CHECK(context.snapshot().generation == before.generation);
+	CHECK(context.snapshot().profileBinding == before.profileBinding);
+
+	currentPath = std::string(kProfileB);
+	const auto bindingB = context.currentProfileBinding();
+	const auto expectedB = easy_multistream::makeYouTubeAccountProfileBinding(kProfileB);
+	CHECK(bindingB.has_value());
+	CHECK(expectedB.has_value());
+	if (bindingB.has_value() && expectedB.has_value()) {
+		CHECK(*bindingB == *expectedB);
+	}
+	CHECK(bindingA != bindingB);
+	CHECK(configReads == 0);
+	CHECK(context.snapshot().generation == before.generation);
+	CHECK(context.snapshot().profileBinding == before.profileBinding);
+}
+
+void testCurrentProfileBindingRejectsMissingThrowingAndInvalidReaders()
+{
+	YouTubeAccountProfileContext missing({}, []() { return static_cast<config_t *>(nullptr); });
+	CHECK(!missing.currentProfileBinding().has_value());
+
+	YouTubeAccountProfileContext throwing(
+		[]() -> std::string { throw std::runtime_error("profile reader failed"); },
+		[]() { return static_cast<config_t *>(nullptr); });
+	CHECK(!throwing.currentProfileBinding().has_value());
+
+	for (const std::string path : {std::string(), std::string("profile\0suffix", 14),
+				       std::string(easy_multistream::kMaxYouTubeAccountProfilePathBytes + 1, 'p')}) {
+		YouTubeAccountProfileContext invalid(
+			[&path]() { return path; }, []() { return static_cast<config_t *>(nullptr); });
+		CHECK(!invalid.currentProfileBinding().has_value());
+	}
 }
 
 void testGenerationInvalidationPreventsStaleCommit()
@@ -378,6 +435,8 @@ void testCommitSaveFailureLeavesSnapshotAndConfigUnchanged()
 int main()
 {
 	testLoadCopiesValueOnlyProfileContext();
+	testCurrentProfileBindingIsSideEffectFreeAndBounded();
+	testCurrentProfileBindingRejectsMissingThrowingAndInvalidReaders();
 	testGenerationInvalidationPreventsStaleCommit();
 	testCommitSelectionRequiresFreshProfileAndAccountMode();
 	testManualProfileDoesNotExposePreservedAccountSelection();

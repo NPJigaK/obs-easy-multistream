@@ -243,6 +243,9 @@ public:
 		if (stage_ == YouTubeAccountProviderStage::Closed) {
 			return YouTubeAccountProviderStartStatus::Closed;
 		}
+		if (externalOperationLockBorrowed_) {
+			return YouTubeAccountProviderStartStatus::Busy;
+		}
 		if (!profileBindingValid_) {
 			return YouTubeAccountProviderStartStatus::InvalidProfileBinding;
 		}
@@ -356,61 +359,12 @@ public:
 		return selectStreamCandidate(lease, streamId);
 	}
 
-	YouTubeAccountProviderRestoreStatus restoreSavedState(std::string profileBinding,
-							      std::optional<YouTubeAccountSelection> selection) noexcept
+	YouTubeAccountProviderRestoreStatus restoreSavedStateWhileOperationLockHeld(
+		std::string profileBinding, std::optional<YouTubeAccountSelection> selection) noexcept
 	{
-		if (!onOwnerThread()) {
-			return YouTubeAccountProviderRestoreStatus::WrongThread;
-		}
-		if (stage_ == YouTubeAccountProviderStage::Closed) {
-			return YouTubeAccountProviderRestoreStatus::Closed;
-		}
-		if (commitInProgress_ || lifecycleMutationInProgress_ || activeLease().has_value()) {
-			return YouTubeAccountProviderRestoreStatus::Busy;
-		}
-		// A prior native release failure retains this profile's ownership. Do not
-		// let a credential-free restore path rewrite visible context around that
-		// unfinished transaction; explicit invalidation or shutdown performs the
-		// owner-thread release retry.
-		if (operationLock_.acquired()) {
-			return YouTubeAccountProviderRestoreStatus::Busy;
-		}
-		if (!isValidYouTubeAccountProfileBinding(profileBinding)) {
-			profileBinding_.clear();
-			profileBindingValid_ = false;
-			savedSelection_.reset();
-			operationEpoch_ = nextNonZero(operationEpoch_);
-			clearEphemeral();
-			try {
-				coordinator_.invalidateContext();
-			} catch (...) {
-			}
-			setStage(YouTubeAccountProviderStage::Failed);
-			return YouTubeAccountProviderRestoreStatus::InvalidProfileBinding;
-		}
-
-		// A missing or malformed selection never reads the credential store, so
-		// it does not need to take the cross-process account-operation lease.
-		// For a valid selection, acquire before changing any provider-visible
-		// state. A failed acquisition must leave the current profile context and
-		// snapshot untouched.
 		const bool validSelection = selection.has_value() &&
 					    validateYouTubeAccountSelection(*selection) ==
 						    YouTubeAccountSelectionValidationError::None;
-		if (validSelection) {
-			const auto lockResult = profileOperationLockProvider_.acquire(profileBinding, operationLock_);
-			switch (lockResult.status) {
-			case YouTubeAccountProfileOperationLockStatus::Acquired:
-			case YouTubeAccountProfileOperationLockStatus::Recovered:
-				break;
-			case YouTubeAccountProfileOperationLockStatus::Busy:
-				return YouTubeAccountProviderRestoreStatus::Busy;
-			case YouTubeAccountProfileOperationLockStatus::InvalidProfileBinding:
-				return YouTubeAccountProviderRestoreStatus::InvalidProfileBinding;
-			case YouTubeAccountProfileOperationLockStatus::Unavailable:
-				return YouTubeAccountProviderRestoreStatus::OperationFailed;
-			}
-		}
 
 		lifecycleMutationInProgress_ = true;
 		operationEpoch_ = nextNonZero(operationEpoch_);
@@ -465,9 +419,7 @@ public:
 			stage_ = restoredStage;
 			touch();
 			lifecycleMutationInProgress_ = false;
-			return releaseOperationLockOrMarkUnavailable()
-				       ? restoreStatus
-				       : YouTubeAccountProviderRestoreStatus::OperationFailed;
+			return restoreStatus;
 		} catch (...) {
 			try {
 				coordinator_.invalidateContext();
@@ -477,9 +429,103 @@ public:
 			stage_ = YouTubeAccountProviderStage::Failed;
 			touch();
 			lifecycleMutationInProgress_ = false;
-			(void)releaseOperationLockOrMarkUnavailable();
 			return YouTubeAccountProviderRestoreStatus::OperationFailed;
 		}
+	}
+
+	YouTubeAccountProviderRestoreStatus restoreSavedState(std::string profileBinding,
+							      std::optional<YouTubeAccountSelection> selection) noexcept
+	{
+		if (!onOwnerThread()) {
+			return YouTubeAccountProviderRestoreStatus::WrongThread;
+		}
+		if (stage_ == YouTubeAccountProviderStage::Closed) {
+			return YouTubeAccountProviderRestoreStatus::Closed;
+		}
+		if (externalOperationLockBorrowed_) {
+			return YouTubeAccountProviderRestoreStatus::Busy;
+		}
+		if (commitInProgress_ || lifecycleMutationInProgress_ || activeLease().has_value()) {
+			return YouTubeAccountProviderRestoreStatus::Busy;
+		}
+		// A prior native cleanup failure retains either this profile's ownership
+		// or a handle-close retry. Do not let a credential-free restore rewrite
+		// visible context around that unfinished transaction; explicit invalidation
+		// or shutdown performs owner-thread cleanup.
+		if (operationLock_.cleanupPending()) {
+			return YouTubeAccountProviderRestoreStatus::Busy;
+		}
+		if (!isValidYouTubeAccountProfileBinding(profileBinding)) {
+			profileBinding_.clear();
+			profileBindingValid_ = false;
+			savedSelection_.reset();
+			operationEpoch_ = nextNonZero(operationEpoch_);
+			clearEphemeral();
+			try {
+				coordinator_.invalidateContext();
+			} catch (...) {
+			}
+			setStage(YouTubeAccountProviderStage::Failed);
+			return YouTubeAccountProviderRestoreStatus::InvalidProfileBinding;
+		}
+
+		// A missing or malformed selection never reads the credential store, so
+		// it does not need to take the cross-process account-operation lease.
+		// For a valid selection, acquire before changing any provider-visible
+		// state. A failed acquisition must leave the current profile context and
+		// snapshot untouched.
+		const bool validSelection = selection.has_value() &&
+					    validateYouTubeAccountSelection(*selection) ==
+						    YouTubeAccountSelectionValidationError::None;
+		bool lockHeld = false;
+		if (validSelection) {
+			const auto lockResult = profileOperationLockProvider_.acquire(profileBinding, operationLock_);
+			switch (lockResult.status) {
+			case YouTubeAccountProfileOperationLockStatus::Acquired:
+			case YouTubeAccountProfileOperationLockStatus::Recovered:
+				lockHeld = true;
+				break;
+			case YouTubeAccountProfileOperationLockStatus::Busy:
+				return YouTubeAccountProviderRestoreStatus::Busy;
+			case YouTubeAccountProfileOperationLockStatus::InvalidProfileBinding:
+				return YouTubeAccountProviderRestoreStatus::InvalidProfileBinding;
+			case YouTubeAccountProfileOperationLockStatus::Unavailable:
+				return YouTubeAccountProviderRestoreStatus::OperationFailed;
+			}
+		}
+
+		const auto restoreStatus = restoreSavedStateWhileOperationLockHeld(std::move(profileBinding),
+											 std::move(selection));
+		if (!lockHeld) {
+			return restoreStatus;
+		}
+		return releaseOperationLockOrMarkUnavailable() ? restoreStatus
+										   : YouTubeAccountProviderRestoreStatus::OperationFailed;
+	}
+
+	YouTubeAccountProviderRestoreStatus restoreSavedStateUnderHeldOperationLock(
+		std::string profileBinding, std::optional<YouTubeAccountSelection> selection,
+		const YouTubeAccountProfileOperationLock &heldLock) noexcept
+	{
+		// Validate the borrowed lease before examining or changing provider state.
+		// This also rejects a lock acquired by a different thread, because the
+		// lock object records its owner thread.
+		if (!onOwnerThread()) {
+			return YouTubeAccountProviderRestoreStatus::WrongThread;
+		}
+		if (!heldLock.acquiredFor(profileBinding)) {
+			return YouTubeAccountProviderRestoreStatus::OperationFailed;
+		}
+		if (stage_ == YouTubeAccountProviderStage::Closed) {
+			return YouTubeAccountProviderRestoreStatus::Closed;
+		}
+		if (externalOperationLockBorrowed_ || commitInProgress_ || lifecycleMutationInProgress_ ||
+		    activeLease().has_value() ||
+		    operationLock_.cleanupPending()) {
+			return YouTubeAccountProviderRestoreStatus::Busy;
+		}
+		externalOperationLockBorrowed_ = true;
+		return restoreSavedStateWhileOperationLockHeld(std::move(profileBinding), std::move(selection));
 	}
 
 	bool cancel(YouTubeAccountLease lease) noexcept
@@ -514,7 +560,7 @@ public:
 	bool invalidateContext() noexcept
 	{
 		if (!onOwnerThread() || stage_ == YouTubeAccountProviderStage::Closed || commitInProgress_ ||
-		    lifecycleMutationInProgress_) {
+		    lifecycleMutationInProgress_ || externalOperationLockBorrowed_) {
 			return false;
 		}
 		lifecycleMutationInProgress_ = true;
@@ -539,7 +585,7 @@ public:
 
 	bool shutdown() noexcept
 	{
-		if (!onOwnerThread() || commitInProgress_) {
+		if (!onOwnerThread() || commitInProgress_ || externalOperationLockBorrowed_) {
 			return false;
 		}
 		if (lifecycleMutationInProgress_) {
@@ -576,6 +622,56 @@ public:
 		lifecycleMutationInProgress_ = false;
 		return coordinatorClosed_ && authorizationPortClosed_ && tokenPortClosed_ && discoveryPortClosed_ &&
 		       lockReleased;
+	}
+
+	void markExternalOperationReleaseFailed() noexcept
+	{
+		// The outer transaction owns the borrowed lock. If releasing it fails,
+		// invalidate all provider-visible account state without trying to touch
+		// that lock again. The transaction retains ownership and is responsible
+		// for its owner-thread cleanup retry.
+		if (!onOwnerThread()) {
+			return;
+		}
+		externalOperationLockBorrowed_ = true;
+		if (stage_ == YouTubeAccountProviderStage::Closed) {
+			return;
+		}
+		operationEpoch_ = nextNonZero(operationEpoch_);
+		clearEphemeral();
+		try {
+			if (savedSelection_.has_value()) {
+				coordinator_.restoreSavedConnection(*savedSelection_,
+								    YouTubeAccountSavedCredentialState::Unavailable);
+			} else {
+				coordinator_.invalidateContext();
+			}
+		} catch (...) {
+			try {
+				coordinator_.invalidateContext();
+			} catch (...) {
+			}
+		}
+		setStage(YouTubeAccountProviderStage::Unavailable);
+	}
+
+	void externalOperationLockReleased() noexcept
+	{
+		if (onOwnerThread()) {
+			externalOperationLockBorrowed_ = false;
+		}
+	}
+
+	void shutdownAfterExternalOperationLockFailure() noexcept
+	{
+		if (!onOwnerThread()) {
+			return;
+		}
+		// The owning restore coordinator is being destroyed and cannot service
+		// another account operation. Keep the native lock fail-closed, but allow
+		// provider teardown to close every port and reach its terminal state.
+		externalOperationLockBorrowed_ = false;
+		(void)shutdown();
 	}
 
 	YouTubeAccountProviderSnapshot snapshot() const
@@ -646,7 +742,7 @@ private:
 		// held; CloseHandle failure has already relinquished ownership but still
 		// represents incomplete cleanup. Do not expose either case as a usable
 		// account result. Preserve durable state so owner-thread shutdown or
-		// context invalidation can retry whenever ownership remains.
+		// context invalidation can retry any unfinished native cleanup.
 		try {
 			if (savedSelection_.has_value()) {
 				(void)coordinator_.restoreSavedConnection(
@@ -1136,6 +1232,7 @@ private:
 	bool authorizationPortClosed_ = false;
 	bool tokenPortClosed_ = false;
 	bool discoveryPortClosed_ = false;
+	bool externalOperationLockBorrowed_ = false;
 };
 
 YouTubeAccountProvider::YouTubeAccountProvider(QString clientId,
@@ -1191,9 +1288,31 @@ YouTubeAccountProviderSelectionStatus YouTubeAccountProvider::selectStream(YouTu
 
 YouTubeAccountProviderRestoreStatus
 YouTubeAccountProvider::restoreSavedState(std::string profileBinding,
-					  std::optional<YouTubeAccountSelection> selection) noexcept
+						  std::optional<YouTubeAccountSelection> selection) noexcept
 {
 	return impl_->restoreSavedState(std::move(profileBinding), std::move(selection));
+}
+
+YouTubeAccountProviderRestoreStatus YouTubeAccountProvider::restoreSavedStateUnderHeldOperationLock(
+	std::string profileBinding, std::optional<YouTubeAccountSelection> selection,
+	const YouTubeAccountProfileOperationLock &heldLock) noexcept
+{
+	return impl_->restoreSavedStateUnderHeldOperationLock(std::move(profileBinding), std::move(selection), heldLock);
+}
+
+void YouTubeAccountProvider::externalOperationLockReleased() noexcept
+{
+	impl_->externalOperationLockReleased();
+}
+
+void YouTubeAccountProvider::markExternalOperationReleaseFailed() noexcept
+{
+	impl_->markExternalOperationReleaseFailed();
+}
+
+void YouTubeAccountProvider::shutdownAfterExternalOperationLockFailure() noexcept
+{
+	impl_->shutdownAfterExternalOperationLockFailure();
 }
 
 bool YouTubeAccountProvider::cancel(YouTubeAccountLease lease) noexcept

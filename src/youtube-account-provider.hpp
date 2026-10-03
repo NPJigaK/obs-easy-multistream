@@ -22,6 +22,8 @@
 
 namespace easy_multistream {
 
+class YouTubeAccountProfileRestoreCoordinator;
+
 // These narrow ports keep orchestration independently testable. Production
 // adapters wrap the fixed-origin OAuth/API implementations; only the private
 // test constructor can replace them. Every completion must run on the
@@ -177,6 +179,17 @@ public:
 private:
 	using QObject::moveToThread;
 	friend class YouTubeAccountProviderTestAccess;
+	friend class YouTubeAccountProfileRestoreCoordinator;
+	// Restore through a lock owned by the profile-restore transaction. The
+	// coordinator must later report successful release or failed cleanup. Keeping
+	// this private prevents another caller from borrowing the lock without
+	// completing that lifecycle handshake.
+	YouTubeAccountProviderRestoreStatus restoreSavedStateUnderHeldOperationLock(
+		std::string profileBinding, std::optional<YouTubeAccountSelection> selection,
+		const YouTubeAccountProfileOperationLock &heldLock) noexcept;
+	void externalOperationLockReleased() noexcept;
+	void markExternalOperationReleaseFailed() noexcept;
+	void shutdownAfterExternalOperationLockFailure() noexcept;
 
 	YouTubeAccountProvider(QString clientId, std::unique_ptr<YouTubeAccountAuthorizationPort> authorizationPort,
 			       std::unique_ptr<YouTubeAccountTokenPort> tokenPort,

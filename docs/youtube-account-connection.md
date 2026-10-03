@@ -265,8 +265,19 @@ path. Both detached account classes now require the lock provider and hold it ac
 transactions, including rollback; the preparer releases it before invoking an external completion handler. These
 libraries remain test-linked/detached and are not linked into the OBS plugin or exposed in the dock.
 
-Before active-profile wiring is exposed, the non-secret selection must be re-read after acquiring the lock, or profile
-loading and restoration must run inside one outer locked transaction. A pre-lock selection snapshot can be stale after
-another OBS process changes the same profile, so this remains an integration gate rather than a user-visible behavior.
+The detached `YouTubeAccountProfileRestoreCoordinator` now provides that outer restore transaction. It first reads a
+candidate profile binding without reading the profile config, acquires the matching lock without waiting, re-reads the
+active profile path and config while the lock is held, and rejects the transaction if the binding changed. It then calls
+the provider's held-lock restore path, so credential status and provider state are read or changed inside the same
+critical section without recursively acquiring the mutex. It rechecks the active binding after the provider transition,
+then releases the owner-thread lock; an unannounced profile switch invalidates the restored state before release. The
+coordinator makes its provider terminal during owner-thread destruction even if a final native cleanup retry fails. A
+synchronous callback cannot release that lock early: reentrant invalidation and shutdown are deferred until the
+provider transition completes, while a nested restore returns busy. Busy or unavailable acquisition leaves
+context/provider state untouched; a profile race, invalid or future settings, and native release failure fail closed. A
+recovered mutex is treated as held for the reread but is retained only as internal metadata. The coordinator exposes
+only copied non-secret selection/provider values and remains
+detached/test-linked; the product OBS module does not instantiate it. Active-profile wiring and account UI are still
+release-gated, while future selection commit, disconnect, and revoke operations must use the same profile lock.
 
 No account UI is added merely to advertise unfinished functionality. A build without a complete configured provider continues to show only the working manual setup.
