@@ -32,6 +32,7 @@ using easy_multistream::RuntimeSettings;
 using easy_multistream::SecureBuffer;
 using easy_multistream::SessionPhase;
 using easy_multistream::RuntimeOutputEventKind;
+using easy_multistream::YouTubeConnectionMode;
 using easy_multistream::YouTubeStreamState;
 
 struct FakeAdapter final : IRuntimeYouTubeOutputAdapter {
@@ -83,7 +84,7 @@ struct Harness {
 };
 
 RuntimeSettings twitchSettings(bool enabled = true, bool keyAvailable = true,
-				       std::string server = "rtmps://a.rtmps.youtube.com/live2")
+			       std::string server = "rtmps://a.rtmps.youtube.com/live2")
 {
 	RuntimeSettings settings;
 	settings.nativeDestination = NativeDestination::Twitch;
@@ -300,6 +301,109 @@ void testInvalidUrlAndCredentialReadFailureAreSecondaryOnly()
 	CHECK(adapter.shutdownCalled);
 }
 
+void testAccountModeCannotUseManualDestination()
+{
+	FakeAdapter adapter;
+	Harness harness;
+	int manualKeyReads = 0;
+	RuntimeController controller(
+		adapter,
+		[&manualKeyReads] {
+			++manualKeyReads;
+			return SecureBuffer::copyOf("manual-stream-key");
+		},
+		[&harness](std::function<void()> callback) { harness.post(std::move(callback)); });
+	RuntimeSettings settings = twitchSettings();
+	settings.youtubeConnectionMode = YouTubeConnectionMode::Account;
+	controller.setSettings(std::move(settings));
+
+	controller.onStreamingStarting(NativeDestination::Twitch);
+	const NativeLease lease = nativeLease(controller);
+	controller.onNativeOutputStarting(lease);
+	controller.onStreamingStarted();
+	harness.drain();
+
+	CHECK(controller.snapshot().native == easy_multistream::NativeStreamState::Streaming);
+	CHECK(controller.snapshot().youtube == YouTubeStreamState::SetupRequired);
+	CHECK(adapter.starts.empty());
+	CHECK(manualKeyReads == 0);
+
+	controller.onExit();
+	CHECK(adapter.shutdownCalled);
+}
+
+void testSwitchingToAccountModeStopsManualOutputWithoutFallback()
+{
+	FakeAdapter adapter;
+	Harness harness;
+	int manualKeyReads = 0;
+	RuntimeController controller(
+		adapter,
+		[&manualKeyReads] {
+			++manualKeyReads;
+			return SecureBuffer::copyOf("manual-stream-key");
+		},
+		[&harness](std::function<void()> callback) { harness.post(std::move(callback)); });
+	controller.setSettings(twitchSettings());
+	const OutputLease manualOutput = startNativeAndSecondary(controller, adapter, harness);
+	CHECK(manualKeyReads == 1);
+
+	RuntimeSettings accountSettings = twitchSettings();
+	accountSettings.youtubeConnectionMode = YouTubeConnectionMode::Account;
+	controller.setSettings(std::move(accountSettings));
+	CHECK(adapter.stops.size() == 1);
+	CHECK(adapter.stops.front() == manualOutput);
+
+	adapter.emit(RuntimeOutputEventKind::Released, manualOutput);
+	harness.drain();
+	CHECK(controller.snapshot().native == easy_multistream::NativeStreamState::Streaming);
+	CHECK(controller.snapshot().youtube == YouTubeStreamState::SetupRequired);
+	CHECK(adapter.starts.size() == 1);
+	CHECK(manualKeyReads == 1);
+
+	controller.retryYouTube();
+	CHECK(adapter.starts.size() == 1);
+	CHECK(manualKeyReads == 1);
+	controller.onExit();
+	CHECK(adapter.shutdownCalled);
+}
+
+void testAccountModeProfileChangeCannotRestartOldManualOutput()
+{
+	FakeAdapter adapter;
+	Harness harness;
+	int manualKeyReads = 0;
+	RuntimeController controller(
+		adapter,
+		[&manualKeyReads] {
+			++manualKeyReads;
+			return SecureBuffer::copyOf("manual-stream-key");
+		},
+		[&harness](std::function<void()> callback) { harness.post(std::move(callback)); });
+	controller.setSettings(twitchSettings());
+	const OutputLease oldOutput = startNativeAndSecondary(controller, adapter, harness);
+	CHECK(manualKeyReads == 1);
+
+	controller.onProfileChanging();
+	CHECK(adapter.stops.size() == 1);
+	CHECK(adapter.stops.front() == oldOutput);
+	RuntimeSettings accountSettings = twitchSettings();
+	accountSettings.youtubeConnectionMode = YouTubeConnectionMode::Account;
+	controller.onProfileChanged(std::move(accountSettings));
+	CHECK(controller.snapshot().youtube == YouTubeStreamState::SetupRequired);
+
+	adapter.emit(RuntimeOutputEventKind::Started, oldOutput);
+	adapter.emit(RuntimeOutputEventKind::Released, oldOutput);
+	harness.drain();
+	controller.retryYouTube();
+	CHECK(adapter.starts.size() == 1);
+	CHECK(manualKeyReads == 1);
+	CHECK(controller.snapshot().youtube == YouTubeStreamState::SetupRequired);
+
+	controller.onExit();
+	CHECK(adapter.shutdownCalled);
+}
+
 } // namespace
 
 int main()
@@ -310,6 +414,9 @@ int main()
 	testReleaseBarrierBlocksRapidRestart();
 	testProfileGenerationDropsOldCallbacks();
 	testInvalidUrlAndCredentialReadFailureAreSecondaryOnly();
+	testAccountModeCannotUseManualDestination();
+	testSwitchingToAccountModeStopsManualOutputWithoutFallback();
+	testAccountModeProfileChangeCannotRestartOldManualOutput();
 
 	if (failures != 0) {
 		std::cerr << failures << " runtime-controller test(s) failed\n";

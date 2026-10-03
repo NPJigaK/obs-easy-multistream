@@ -380,6 +380,7 @@ void applyRuntimeSettings(PluginState &state, easy_multistream::Settings setting
 	easy_multistream::RuntimeSettings runtimeSettings;
 	runtimeSettings.nativeDestination = state.nativeDestination;
 	runtimeSettings.youtubeEnabled = settings.youtubeEnabled;
+	runtimeSettings.youtubeConnectionMode = settings.youtubeConnectionMode;
 	runtimeSettings.youtubeKeyAvailable = credentialState == easy_multistream::CredentialDisplayState::Present;
 	runtimeSettings.youtubeServerUrl = std::move(settings.youtubeServerUrl);
 	if (profileChanged) {

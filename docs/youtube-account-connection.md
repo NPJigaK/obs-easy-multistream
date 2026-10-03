@@ -89,6 +89,11 @@ The browser completion page contains no token or code and only tells the user th
 
 Profile settings may contain only non-secret selection data such as the connection mode, channel ID, stream ID, and display labels. They never contain an authorization code, access token, refresh token, PKCE verifier, or stream key.
 
+The profile codec now implements this non-secret boundary. Older manual profiles load as manual mode; account mode
+requires a complete, strictly validated channel/stream selection and does not require a saved ingestion URL. The
+current runtime deliberately treats account mode as unavailable until the asynchronous account provider is complete,
+so a partially implemented or imported account profile cannot silently use the manual URL/key instead.
+
 Windows Credential Manager uses separate targets for:
 
 - the existing manual YouTube stream key;
@@ -170,7 +175,8 @@ stale-completion rejection. It deliberately requests no CDN ingestion fields or 
 fetches one selected stream and returns its validated RTMPS destination and current key through a move-only result,
 without adding the key to discovery data or persistent settings. None of these libraries is
 linked into the OBS plugin, so the product still does not open a browser, listen on a port, make an OAuth/API network
-request, read an account credential, or change the dock/runtime behavior. System-browser launch, bounded multi-page
+request, or read an account credential. The profile format and runtime fail-closed boundary are present, but the dock
+continues to expose only the working manual setup. System-browser launch, bounded multi-page
 orchestration, refresh-token vault integration, runtime handoff, and all later items stay gated, so a partial
 connection path cannot appear in the user interface.
 

@@ -4,7 +4,6 @@
 #include "youtube-account-coordinator.hpp"
 
 #include <limits>
-#include <string_view>
 #include <type_traits>
 #include <utility>
 
@@ -28,79 +27,9 @@ bool isUnavailableFailure(YouTubeAccountFailure failure) noexcept
 	       failure == YouTubeAccountFailure::ServiceUnavailable;
 }
 
-bool isValidIdentifier(std::string_view value) noexcept
-{
-	if (value.empty() || value.size() > kYouTubeAccountMaxIdentifierBytes) {
-		return false;
-	}
-	for (const unsigned char byte : value) {
-		if (byte < 0x21U || byte > 0x7EU) {
-			return false;
-		}
-	}
-	return true;
-}
-
-bool isValidLabel(std::string_view value) noexcept
-{
-	if (value.size() > kYouTubeAccountMaxLabelBytes) {
-		return false;
-	}
-
-	std::size_t index = 0;
-	while (index < value.size()) {
-		const auto first = static_cast<unsigned char>(value[index++]);
-		if (first <= 0x7FU) {
-			if (first <= 0x1FU || first == 0x7FU) {
-				return false;
-			}
-			continue;
-		}
-
-		std::size_t continuationCount = 0;
-		std::uint32_t codePoint = 0;
-		std::uint32_t minimum = 0;
-		if (first >= 0xC2U && first <= 0xDFU) {
-			continuationCount = 1;
-			codePoint = first & 0x1FU;
-			minimum = 0x80U;
-		} else if (first >= 0xE0U && first <= 0xEFU) {
-			continuationCount = 2;
-			codePoint = first & 0x0FU;
-			minimum = 0x800U;
-		} else if (first >= 0xF0U && first <= 0xF4U) {
-			continuationCount = 3;
-			codePoint = first & 0x07U;
-			minimum = 0x10000U;
-		} else {
-			return false;
-		}
-
-		if (value.size() - index < continuationCount) {
-			return false;
-		}
-		for (std::size_t offset = 0; offset < continuationCount; ++offset) {
-			const auto continuation = static_cast<unsigned char>(value[index++]);
-			if ((continuation & 0xC0U) != 0x80U) {
-				return false;
-			}
-			codePoint = (codePoint << 6U) | (continuation & 0x3FU);
-		}
-
-		if (codePoint < minimum || codePoint > 0x10FFFFU ||
-		    (codePoint >= 0xD800U && codePoint <= 0xDFFFU) ||
-		    (codePoint >= 0x80U && codePoint <= 0x9FU)) {
-			return false;
-		}
-	}
-
-	return true;
-}
-
 bool hasRequiredSelection(const YouTubeAccountDiscovery &discovery) noexcept
 {
-	return isValidIdentifier(discovery.channelId) && isValidLabel(discovery.channelLabel) &&
-	       isValidIdentifier(discovery.streamId) && isValidLabel(discovery.streamLabel);
+	return validateYouTubeAccountSelection(discovery) == YouTubeAccountSelectionValidationError::None;
 }
 
 } // namespace
@@ -155,8 +84,8 @@ YouTubeAccountTransition YouTubeAccountCoordinator::tokenExchangeSucceeded(YouTu
 	return result(true);
 }
 
-YouTubeAccountTransition YouTubeAccountCoordinator::discoverySucceeded(
-	YouTubeAccountLease lease, const YouTubeAccountDiscovery &discovery)
+YouTubeAccountTransition YouTubeAccountCoordinator::discoverySucceeded(YouTubeAccountLease lease,
+								       const YouTubeAccountDiscovery &discovery)
 {
 	if (!accepts(lease) || snapshot_.state != YouTubeAccountState::Discovering) {
 		return result();
@@ -200,8 +129,8 @@ YouTubeAccountTransition YouTubeAccountCoordinator::credentialStored(YouTubeAcco
 	return result(true);
 }
 
-YouTubeAccountTransition YouTubeAccountCoordinator::attemptFailed(
-	YouTubeAccountLease lease, YouTubeAccountFailure failure)
+YouTubeAccountTransition YouTubeAccountCoordinator::attemptFailed(YouTubeAccountLease lease,
+								  YouTubeAccountFailure failure)
 {
 	if (!accepts(lease) || !attemptActive() || failure == YouTubeAccountFailure::None ||
 	    failure == YouTubeAccountFailure::Cancelled) {
@@ -290,15 +219,16 @@ YouTubeAccountTransition YouTubeAccountCoordinator::invalidateContext()
 	return result(true);
 }
 
-YouTubeAccountTransition YouTubeAccountCoordinator::markUnavailable(
-	YouTubeAccountLease connectionLease, YouTubeAccountFailure failure)
+YouTubeAccountTransition YouTubeAccountCoordinator::markUnavailable(YouTubeAccountLease connectionLease,
+								    YouTubeAccountFailure failure)
 {
 	if (!isUnavailableFailure(failure) || !committedConnection_.has_value() ||
 	    committedConnection_->lease != connectionLease) {
 		return result();
 	}
 	if (attemptActive()) {
-		if (!replacingConnected_ || committedConnectionFailure_ == YouTubeAccountFailure::ReauthorizationRequired ||
+		if (!replacingConnected_ ||
+		    committedConnectionFailure_ == YouTubeAccountFailure::ReauthorizationRequired ||
 		    committedConnectionFailure_ == failure) {
 			return result();
 		}
@@ -317,8 +247,7 @@ YouTubeAccountTransition YouTubeAccountCoordinator::markUnavailable(
 	return result(true);
 }
 
-YouTubeAccountTransition YouTubeAccountCoordinator::markNeedsReauthorization(
-	YouTubeAccountLease connectionLease)
+YouTubeAccountTransition YouTubeAccountCoordinator::markNeedsReauthorization(YouTubeAccountLease connectionLease)
 {
 	if (!committedConnection_.has_value() || committedConnection_->lease != connectionLease) {
 		return result();
