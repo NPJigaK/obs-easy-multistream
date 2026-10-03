@@ -75,7 +75,7 @@ target_link_libraries(
     ${CMAKE_PROJECT_NAME}-secure-core
     ${CMAKE_PROJECT_NAME}-youtube-destination
     ${CMAKE_PROJECT_NAME}-youtube-account-model
-  PRIVATE Advapi32
+  PRIVATE Advapi32 Bcrypt
 )
 
 target_include_directories(${CMAKE_PROJECT_NAME}-core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")

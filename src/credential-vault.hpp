@@ -4,10 +4,12 @@
 #pragma once
 
 #include "secure-buffer.hpp"
+#include "youtube-account-selection.hpp"
 #include "youtube-destination.hpp"
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <string_view>
 
 namespace easy_multistream {
@@ -20,12 +22,18 @@ enum class CredentialError {
 	Unavailable,
 	ResourceExhausted,
 	CorruptData,
+	// The credential exists, but its profile/channel binding does not match
+	// the caller's requested scope. This must be surfaced separately so the
+	// account flow can request authorization again without treating it as a
+	// transient credential-store outage.
+	ScopeMismatch,
 	OperatingSystemError,
 };
 
 enum class CredentialState {
 	Present,
 	Missing,
+	NeedsReauthorization,
 	Unavailable,
 };
 
@@ -56,12 +64,28 @@ public:
 	virtual CredentialStatus status() noexcept = 0;
 };
 
+// The account credential is scoped to the active OBS profile and the selected
+// YouTube channel. The profile binding is deliberately supplied as a digest,
+// not as a path, so the credential store never has to parse or persist a
+// filesystem path. Both values are non-secret identifiers.
+struct YouTubeAccountCredentialScope final {
+	std::string profileBinding;
+	std::string channelId;
+};
+
 // Semantic capability for the Google account credential. Keeping this as a
 // distinct type prevents the manual YouTube stream-key vault from being wired
-// into OAuth code and accidentally sent to Google's token endpoint.
-class YouTubeAccountRefreshTokenVault : public CredentialVault {
+// into OAuth code and accidentally sent to Google's token endpoint. Unlike a
+// generic vault, every operation must identify its profile/channel scope.
+class YouTubeAccountRefreshTokenStore {
 public:
-	~YouTubeAccountRefreshTokenVault() override = default;
+	virtual ~YouTubeAccountRefreshTokenStore() = default;
+
+	virtual CredentialResult write(const YouTubeAccountCredentialScope &scope,
+					      std::string_view secret) noexcept = 0;
+	virtual CredentialReadResult read(const YouTubeAccountCredentialScope &scope) noexcept = 0;
+	virtual CredentialResult erase(const YouTubeAccountCredentialScope &scope) noexcept = 0;
+	virtual CredentialStatus status(const YouTubeAccountCredentialScope &scope) noexcept = 0;
 };
 
 } // namespace easy_multistream

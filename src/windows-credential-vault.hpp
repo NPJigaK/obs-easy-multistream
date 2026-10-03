@@ -14,6 +14,8 @@
 #include <Windows.h>
 #include <wincred.h>
 
+#include <cstddef>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -59,21 +61,35 @@ private:
 	std::wstring targetName_;
 };
 
-// The target is intentionally fixed. Production account components accept
-// this semantic vault type rather than the generic manual stream-key vault.
-class WindowsYouTubeAccountRefreshTokenVault final : public YouTubeAccountRefreshTokenVault {
+inline constexpr std::size_t kYouTubeAccountProfileBindingHexBytes = 64U;
+inline constexpr std::size_t kMaxYouTubeAccountProfilePathBytes = 32767U;
+
+// The profile path is hashed with the platform crypto provider before it is
+// used as a credential-store namespace. The returned value is always exactly
+// 64 lower-case hexadecimal characters when present.
+std::optional<std::string> makeYouTubeAccountProfileBinding(std::string_view profilePath) noexcept;
+
+// These helpers are public so tests and platform adapters can inspect the
+// deterministic namespace without ever handling a raw profile path or token.
+std::optional<std::wstring> makeYouTubeAccountCredentialTarget(std::string_view profileBinding) noexcept;
+std::optional<std::wstring> makeYouTubeAccountCredentialUserName(std::string_view channelId) noexcept;
+
+// Unlike the manual stream-key vault, the account credential is never stored
+// under one process-wide name. The target is scoped by profileBinding and the
+// UserName carries the selected channel digest, so profile/channel operations
+// cannot silently overwrite a different scope.
+class WindowsYouTubeAccountRefreshTokenStore final : public YouTubeAccountRefreshTokenStore {
 public:
-	explicit WindowsYouTubeAccountRefreshTokenVault(WinCredentialApi &api);
+	explicit WindowsYouTubeAccountRefreshTokenStore(WinCredentialApi &api);
 
-	CredentialResult write(std::string_view secret) noexcept override;
-	CredentialReadResult read() noexcept override;
-	CredentialResult erase() noexcept override;
-	CredentialStatus status() noexcept override;
-
-	const std::wstring &targetName() const noexcept;
+	CredentialResult write(const YouTubeAccountCredentialScope &scope,
+				      std::string_view secret) noexcept override;
+	CredentialReadResult read(const YouTubeAccountCredentialScope &scope) noexcept override;
+	CredentialResult erase(const YouTubeAccountCredentialScope &scope) noexcept override;
+	CredentialStatus status(const YouTubeAccountCredentialScope &scope) noexcept override;
 
 private:
-	WindowsCredentialVault vault_;
+	WinCredentialApi &api_;
 };
 
 const wchar_t *defaultYouTubeCredentialTarget() noexcept;
