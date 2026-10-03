@@ -111,6 +111,7 @@ The provider:
 
 - owns no raw OBS pointer;
 - posts value-only results to the plugin UI thread;
+- shuts down and destroys its Qt network transports on their owner thread before that thread's event loop ends;
 - never touches widgets from a network callback;
 - never blocks the OBS UI thread waiting for network or output teardown;
 - does not automatically reopen the browser at startup;
@@ -156,11 +157,15 @@ The internal implementation order is intentionally not shown in the user interfa
 7. add the account UI and keep manual configuration under advanced settings;
 8. complete Google policy, verification, privacy, quota, and signed-release gates before recommending it to general users.
 
-The first two items and the isolated loopback-listener portion of item three are now present as non-instantiated
-libraries with standalone tests. The listener test uses real local sockets to verify exclusive `127.0.0.1` binding,
-bounded HTTP parsing, state rejection, one-shot completion, timeout, request limits, and cancellation. The listener
-library is not linked into the OBS plugin, so the product still does not open a browser, listen on a port, make an
-OAuth/API network request, read an account credential, or change the dock/runtime behavior. Browser launch, HTTPS
-transport, and all later items stay gated, so a partial connection path cannot appear in the user interface.
+The first two items, the isolated loopback-listener portion of item three, and the token exchange/refresh/revocation
+portion of item four are now present as non-instantiated libraries with standalone tests. The listener test uses real
+local sockets to verify exclusive `127.0.0.1` binding, bounded HTTP parsing, state rejection, one-shot completion,
+timeout, request limits, and cancellation. The token test uses an injected network double to verify exact fixed HTTPS
+endpoints, form encoding, no client secret, verified TLS requirements, redirect rejection, bounded strict parsing,
+provider-error classification, cancellation, stale-reply rejection, shutdown, and secret-size boundaries. Neither
+library is linked into the OBS plugin, so the product still does not open a browser, listen on a port, make an OAuth/API
+network request, read an account credential, or change the dock/runtime behavior. System-browser launch, refresh-token
+vault integration, YouTube channel/stream discovery, and all later items stay gated, so a partial connection path cannot
+appear in the user interface.
 
 No account UI is added merely to advertise unfinished functionality. A build without a complete configured provider continues to show only the working manual setup.

@@ -19,12 +19,16 @@ The planned first useful release is intentionally narrow:
 Browser-based YouTube account connection is the accepted next setup path, but it is not exposed until its complete authorization, secure token storage, endpoint resolution, cancellation, and release requirements are implemented. Automatically creating and managing YouTube broadcasts or scheduled events, three or more destinations, custom output scenes, encoder-controlled YouTube dual streaming, per-destination transcoding, and Twitch-as-secondary remain outside the current boundary.
 
 The current source tree includes a non-instantiated account state machine, Google desktop-authorization protocol core,
-and a separate loopback-listener library. They generate PKCE/state values, build and validate the fixed
-authorization exchange, reject old account-operation leases, and test a short-lived `127.0.0.1` callback listener on
-real local sockets. The listener uses an OS-assigned port, Windows exclusive-address binding, bounded HTTP parsing,
-one-shot completion, cancellation, and timeouts. It is not linked into or instantiated by the OBS plugin yet, so the
-product opens no listener or browser and the current dock and manual RTMPS workflow are unchanged. System-browser
-launch, token transport, YouTube API access, runtime integration, and user-facing account controls remain release-gated.
+a separate loopback-listener library, and a separate fixed-origin HTTPS token transport. They generate PKCE/state
+values, build and validate the authorization exchange, reject old account-operation leases, test a short-lived
+`127.0.0.1` callback listener on real local sockets, and test authorization-code exchange, refresh, and revocation
+against an injected local network double. The listener uses an OS-assigned port, Windows exclusive-address binding,
+bounded HTTP parsing, one-shot completion, cancellation, and timeouts. The HTTPS layer accepts only Google's fixed
+token and revocation endpoints, requires verified TLS, rejects redirects, bounds and strictly parses replies, and does
+not send a client secret. Neither library is linked into or instantiated by the OBS plugin yet, so the product opens no
+listener or browser, makes no OAuth request, and leaves the current dock and manual RTMPS workflow unchanged.
+System-browser launch, YouTube API access, account-provider/vault integration, runtime integration, and user-facing
+account controls remain release-gated.
 
 The recommended Dual stream mode is a YouTube-side feature. Easy Multistream sends one 16:9 H.264/AAC stream to the user-provided RTMPS URL; YouTube creates the 9:16 feed, normally as a centre crop. This keeps the local OBS pipeline to one YouTube output and one shared video encode. The vertical mode must be enabled in YouTube Studio before the stream starts. A separately composed 9:16 stream sent by the encoder would require a second video pipeline and is intentionally deferred.
 
