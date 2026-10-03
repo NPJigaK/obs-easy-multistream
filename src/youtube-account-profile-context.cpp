@@ -74,10 +74,23 @@ YouTubeAccountProfileContext::Snapshot YouTubeAccountProfileContext::snapshotFor
 	return snapshot;
 }
 
-std::optional<std::string> YouTubeAccountProfileContext::readProfileBinding()
+std::optional<std::string> YouTubeAccountProfileContext::readProfileBinding() const
 {
+	if (!profilePathReader_) {
+		return std::nullopt;
+	}
+
 	std::string profilePath = profilePathReader_();
 	return makeYouTubeAccountProfileBinding(profilePath);
+}
+
+std::optional<std::string> YouTubeAccountProfileContext::currentProfileBinding() const noexcept
+{
+	try {
+		return readProfileBinding();
+	} catch (...) {
+		return std::nullopt;
+	}
 }
 
 YouTubeAccountProfileContext::LoadResult YouTubeAccountProfileContext::load()

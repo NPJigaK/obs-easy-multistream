@@ -21,8 +21,9 @@ Browser-based YouTube account connection is the accepted next setup path, but it
 The current source tree includes a non-instantiated account state machine, Google desktop-authorization protocol core,
 a separate loopback-listener library, a browser-opener authorization-session layer, a fixed-origin HTTPS token
 transport, a read-only YouTube discovery transport with bounded pagination, a headless interactive account provider,
-a separate secret-bearing selected-stream resolver, a detached headless destination preparer, and a Windows
-profile-operation lock. The provider and destination preparer both require the lock provider to be injected and keep
+a separate secret-bearing selected-stream resolver, a detached headless destination preparer, a Windows
+profile-operation lock, and a detached active-profile restore coordinator. The provider and destination preparer both
+require the lock provider to be injected and keep
 their profile lock for the complete account transaction. They
 generate PKCE/state values, build and validate the authorization exchange, reject old account-operation leases, test a
 short-lived `127.0.0.1` callback listener on real local sockets, guarantee bind-and-arm-before-browser ordering, and
@@ -52,8 +53,8 @@ the operation re-reads durable state where required and no recovery terminology 
 releases its owner-thread lock after credential/profile rollback or the final commit. The preparer releases its lock
 after queued completion state is finalized and immediately before invoking an external completion handler. If native
 release fails, neither component reports a usable result. When ownership remains, it retains the lock fail-closed and
-retries unfinished lock or port cleanup during shutdown. None of
-these account/network libraries is linked into or instantiated by the OBS plugin yet,
+retries unfinished lock or port cleanup during shutdown. The account/network libraries, including the restore coordinator,
+remain unlinked from and uninstantiated by the OBS plugin,
 so the product opens no listener or browser, makes no OAuth request, and leaves the current dock and manual RTMPS
 workflow unchanged. The profile codec now distinguishes manual and account modes and can preserve a bounded,
 non-secret channel/stream selection. Account mode without a selection is also a valid persisted setup-required state,
@@ -82,9 +83,28 @@ reports recovered ownership only as an internal result. Future disconnect and re
 profile boundary for their selection and credential changes. Account libraries remain detached from the production
 plugin, dock, and runtime.
 
-Before active-profile wiring is exposed, the non-secret profile selection must be re-read after acquiring this lock, or
-profile loading and account restoration must run inside one outer locked transaction. Passing a selection snapshot that
-was read before lock acquisition can otherwise restore stale state after another OBS process has changed the profile.
+The detached `YouTubeAccountProfileRestoreCoordinator` now supplies the outer restore transaction needed before
+active-profile wiring can be exposed. On its owner thread it first obtains only a value-copy candidate binding, then
+performs a non-blocking acquisition of the exact profile-operation lock. While that lock is held it re-reads the active
+profile path and config, verifies that the binding is unchanged, and asks the provider to perform credential-status
+inspection and saved-state restoration through the already-held lock. It verifies the active binding again after that
+transition and before release, rejecting any unannounced profile switch. The lock is released on the same owner thread
+after the provider transition. Reentrant profile-invalidation or shutdown requests are recorded and applied only after
+the in-flight provider transition has finished, so an injected callback cannot release the mutex around unfinished
+state mutation. A nested restore is rejected as busy. A busy or unavailable acquisition leaves both context and
+provider state unchanged; an active-profile race, invalid or future settings, and native-release failure fail closed.
+Owner-thread destruction makes the provider terminal even if the last native cleanup retry fails; any retained native
+ownership remains fail-closed until process teardown. Recovered ownership is accepted only for the same locked reread
+and remains internal metadata. It passes only copied non-secret values across
+the transaction boundary; refresh tokens and stream keys stay in their credential/output boundaries. The coordinator
+is detached and test-linked only; the production OBS plugin does not instantiate it. Future selection commit,
+disconnect, and revoke operations must use the same profile-operation boundary.
+
+The profile path/config readers are a frontend-thread contract: both must observe the same stable active profile and
+must not process events. OBS emits `PROFILE_CHANGING` before activation, swaps `activeConfiguration` and the current
+profile identity, and emits `PROFILE_CHANGED` only afterward; the plugin invalidates on the former and loads on the
+latter. The initial module load also runs on that same frontend thread. A test adapter that returns a config from a
+different profile violates this boundary and is not an accepted dependency implementation.
 
 The recommended Dual stream mode is a YouTube-side feature. Easy Multistream sends one 16:9 H.264/AAC stream to the user-provided RTMPS URL; YouTube creates the 9:16 feed, normally as a centre crop. This keeps the local OBS pipeline to one YouTube output and one shared video encode. The vertical mode must be enabled in YouTube Studio before the stream starts. A separately composed 9:16 stream sent by the encoder would require a second video pipeline and is intentionally deferred.
 

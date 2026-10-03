@@ -360,16 +360,37 @@ void testAcquiredAndReleaseReacquire()
 	CHECK(!result.recovered());
 	CHECK(lock.acquired());
 	CHECK(!lock.recovered());
+	CHECK(lock.acquiredFor(kBindingA));
+	CHECK(!lock.acquiredFor(kBindingB));
+	CHECK(!lock.acquiredFor("not-a-binding"));
 	CHECK(api.lastName == *easy_multistream::makeYouTubeAccountProfileOperationLockName(kBindingA));
 	lock.release();
 	CHECK(!lock.acquired());
+	CHECK(!lock.acquiredFor(kBindingA));
 	CHECK(api.releaseCount == 1);
 	CHECK(api.closeCount == 1);
 	const auto second = provider.acquire(kBindingA, lock);
 	CHECK(second.status == YouTubeAccountProfileOperationLockStatus::Acquired);
+	CHECK(lock.acquiredFor(kBindingA));
 	CHECK(api.createCount == 2);
 	lock.release();
 	CHECK(api.releaseCount == 2);
+}
+
+void testAcquiredForRequiresOwnerThread()
+{
+	FakeLockApi api;
+	YouTubeAccountProfileOperationLockProvider provider(api);
+	YouTubeAccountProfileOperationLock lock;
+	CHECK(provider.acquire(kBindingA, lock).acquired());
+
+	bool acquiredForOnWorker = true;
+	std::thread worker([&]() { acquiredForOnWorker = lock.acquiredFor(kBindingA); });
+	worker.join();
+	CHECK(!acquiredForOnWorker);
+	CHECK(lock.acquiredFor(kBindingA));
+
+	lock.release();
 }
 
 void testSameProcessDuplicateAcrossFactoriesIsBusy()
@@ -518,9 +539,16 @@ void testCloseFailureDoesNotRetainClaim()
 	api.closeError = ERROR_INVALID_HANDLE;
 	CHECK(!lock.release());
 	CHECK(!lock.acquired());
+	CHECK(lock.cleanupPending());
+	CHECK(!lock.acquiredFor(kBindingA));
+	CHECK(!lock.recovered());
 	CHECK(api.releaseCount == 1);
 	CHECK(api.closeCount == 1);
 	api.closeResult = true;
+	CHECK(lock.release());
+	CHECK(!lock.cleanupPending());
+	CHECK(api.releaseCount == 1);
+	CHECK(api.closeCount == 2);
 	CHECK(provider.acquire(kBindingA, lock).acquired());
 	CHECK(lock.release());
 }
@@ -536,6 +564,7 @@ int wmain(int argc, wchar_t **argv)
 	testNameValidationAndDerivation();
 	testInvalidBindingDoesNotTouchApi();
 	testAcquiredAndReleaseReacquire();
+	testAcquiredForRequiresOwnerThread();
 	testSameProcessDuplicateAcrossFactoriesIsBusy();
 	testDifferentBindingsCanBeHeldTogether();
 	testWaitStatusMappingsAndRollback();

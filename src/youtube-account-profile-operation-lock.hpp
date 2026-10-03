@@ -79,8 +79,18 @@ public:
 	// thread or when ReleaseMutex fails.
 	bool release() noexcept;
 
-	bool acquired() const noexcept { return handle_ != nullptr; }
+	// acquired() reports native mutex ownership. cleanupPending() also remains
+	// true after ownership was released if closing the handle failed and must be
+	// retried on the owner thread.
+	bool acquired() const noexcept { return handle_ != nullptr && mutexOwned_; }
+	bool cleanupPending() const noexcept { return handle_ != nullptr; }
 	bool recovered() const noexcept { return recovered_; }
+
+	// Verifies that this lock is currently held by the calling owner thread
+	// for exactly the mutex derived from profileBinding. This is intentionally
+	// stricter than acquired(): borrowed-lock users must not accidentally use a
+	// lock for another OBS profile or from a different thread.
+	bool acquiredFor(std::string_view profileBinding) const noexcept;
 
 private:
 	friend class YouTubeAccountProfileOperationLockProvider;
@@ -90,6 +100,7 @@ private:
 	std::wstring name_;
 	DWORD ownerThreadId_ = 0;
 	bool claimed_ = false;
+	bool mutexOwned_ = false;
 	bool recovered_ = false;
 };
 

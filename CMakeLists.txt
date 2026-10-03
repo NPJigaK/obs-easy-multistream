@@ -33,6 +33,7 @@ add_library(${CMAKE_PROJECT_NAME}-youtube-account-profile-lock STATIC)
 # intentionally module-local and complements the cross-process named mutex.
 add_library(${CMAKE_PROJECT_NAME}-youtube-account-provider STATIC)
 add_library(${CMAKE_PROJECT_NAME}-youtube-account-destination-preparer STATIC)
+add_library(${CMAKE_PROJECT_NAME}-youtube-account-profile-restore STATIC)
 
 find_package(libobs REQUIRED)
 find_package(obs-frontend-api REQUIRED)
@@ -231,6 +232,25 @@ target_link_libraries(
     ${CMAKE_PROJECT_NAME}-oauth-token-transport
     ${CMAKE_PROJECT_NAME}-youtube-stream-resolver
     ${CMAKE_PROJECT_NAME}-youtube-account-model
+    Qt6::Core
+)
+
+target_sources(
+  ${CMAKE_PROJECT_NAME}-youtube-account-profile-restore
+  PRIVATE
+    src/youtube-account-profile-restore.cpp
+    src/youtube-account-profile-restore.hpp
+)
+target_include_directories(
+  ${CMAKE_PROJECT_NAME}-youtube-account-profile-restore
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+target_link_libraries(
+  ${CMAKE_PROJECT_NAME}-youtube-account-profile-restore
+  PUBLIC
+    ${CMAKE_PROJECT_NAME}-core
+    ${CMAKE_PROJECT_NAME}-youtube-account-provider
+    ${CMAKE_PROJECT_NAME}-youtube-account-profile-lock
     Qt6::Core
 )
 
@@ -570,6 +590,33 @@ if(BUILD_TESTING)
     COMMAND ${CMAKE_PROJECT_NAME}-youtube-account-profile-context-tests
   )
 
+  add_executable(${CMAKE_PROJECT_NAME}-youtube-account-profile-restore-tests)
+  target_sources(
+    ${CMAKE_PROJECT_NAME}-youtube-account-profile-restore-tests
+    PRIVATE tests/youtube-account-profile-restore-tests.cpp
+  )
+  target_link_libraries(
+    ${CMAKE_PROJECT_NAME}-youtube-account-profile-restore-tests
+    PRIVATE ${CMAKE_PROJECT_NAME}-youtube-account-profile-restore
+  )
+
+  add_custom_command(
+    TARGET ${CMAKE_PROJECT_NAME}-youtube-account-profile-restore-tests
+    POST_BUILD
+    COMMAND
+      "${CMAKE_COMMAND}" -E copy_if_different
+      $<TARGET_RUNTIME_DLLS:${CMAKE_PROJECT_NAME}-youtube-account-profile-restore-tests>
+      $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}-youtube-account-profile-restore-tests>
+    COMMAND_EXPAND_LISTS
+    COMMENT "Copy YouTube account profile restore test runtime dependencies"
+    VERBATIM
+  )
+
+  add_test(
+    NAME ${CMAKE_PROJECT_NAME}-youtube-account-profile-restore
+    COMMAND ${CMAKE_PROJECT_NAME}-youtube-account-profile-restore-tests
+  )
+
   add_executable(${CMAKE_PROJECT_NAME}-youtube-account-profile-lock-tests)
   target_sources(
     ${CMAKE_PROJECT_NAME}-youtube-account-profile-lock-tests
@@ -681,6 +728,7 @@ if(BUILD_TESTING)
     ${CMAKE_PROJECT_NAME}-youtube-stream-resolver
     ${CMAKE_PROJECT_NAME}-youtube-account-destination-preparer
     ${CMAKE_PROJECT_NAME}-youtube-account-profile-context
+    ${CMAKE_PROJECT_NAME}-youtube-account-profile-restore
     PROPERTIES ENVIRONMENT_MODIFICATION "${test_runtime_environment}"
   )
 endif()

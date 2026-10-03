@@ -72,11 +72,11 @@ public:
 	{
 		++closeCount;
 		lastCloseHandle = handle;
-		openHandles.erase(handle);
 		if (!closeResult) {
 			error = closeError;
 			return false;
 		}
+		openHandles.erase(handle);
 		error = ERROR_SUCCESS;
 		return true;
 	}
@@ -141,6 +141,15 @@ public:
 	{
 		return provider_->restoreSavedState(std::move(profileBinding), std::move(selection));
 	}
+	YouTubeAccountProviderRestoreStatus restoreSavedStateUnderHeldOperationLock(
+		std::string profileBinding, std::optional<YouTubeAccountSelection> selection,
+		const YouTubeAccountProfileOperationLock &heldLock) noexcept
+	{
+		return provider_->restoreSavedStateUnderHeldOperationLock(std::move(profileBinding), std::move(selection),
+												 heldLock);
+	}
+	void markExternalOperationReleaseFailed() noexcept { provider_->markExternalOperationReleaseFailed(); }
+	void externalOperationLockReleased() noexcept { provider_->externalOperationLockReleased(); }
 	bool cancel(YouTubeAccountLease lease) noexcept { return provider_->cancel(lease); }
 	bool invalidateContext() noexcept { return provider_->invalidateContext(); }
 	bool shutdown() noexcept { return provider_->shutdown(); }
@@ -208,6 +217,7 @@ using easy_multistream::YouTubeAccountAuthorizationPort;
 using easy_multistream::YouTubeAccountTokenPort;
 using easy_multistream::YouTubeAccountProviderTestAccess;
 using easy_multistream::FakeYouTubeAccountProfileOperationLockApi;
+using easy_multistream::YouTubeAccountProfileOperationLock;
 using easy_multistream::YouTubeAccountProfileOperationLockProvider;
 
 constexpr char kAccessToken[] = "access-token-sentinel";
@@ -1719,6 +1729,110 @@ void testProfileOperationLockSpansRestoreStatusAndPreservesRejectedRestore()
 	CHECK(fixture.vault.statusScopes.back().profileBinding == kProfileA);
 }
 
+void testHeldProfileOperationLockRestoreDoesNotReacquireOrRelease()
+{
+	Fixture fixture;
+	YouTubeAccountProfileOperationLock heldLock;
+	const auto lockResult = fixture.operationLockProvider->acquire(kProfileA, heldLock);
+	CHECK(lockResult.acquired());
+	CHECK(heldLock.acquiredFor(kProfileA));
+
+	fixture.vault.forcedStatus = CredentialStatus{CredentialState::Present, {CredentialError::None, 0}};
+	bool lockHeldDuringStatus = false;
+	fixture.vault.onStatus = [&]() { lockHeldDuringStatus = heldLock.acquiredFor(kProfileA); };
+	const auto before = fixture.provider->snapshot();
+	CHECK(fixture.provider->restoreSavedStateUnderHeldOperationLock(kProfileA, savedSelection("borrowed"), heldLock) ==
+	      YouTubeAccountProviderRestoreStatus::Configured);
+	CHECK(lockHeldDuringStatus);
+	CHECK(heldLock.acquired());
+	CHECK(fixture.operationLockApi.createCount == 1);
+	CHECK(fixture.operationLockApi.waitCount == 1);
+	// The provider borrowed the caller's lock. Only the explicit cleanup below
+	// is allowed to release it.
+	CHECK(fixture.operationLockApi.releaseCount == 0);
+	CHECK(fixture.operationLockApi.closeCount == 0);
+	CHECK(fixture.vault.statusCount == 1);
+	CHECK(fixture.provider->snapshot().revision != before.revision);
+	CHECK(heldLock.release());
+	fixture.provider->externalOperationLockReleased();
+	CHECK(fixture.operationLockApi.releaseCount == 1);
+	CHECK(fixture.operationLockApi.closeCount == 1);
+}
+
+void testHeldProfileOperationLockRestoreSkipsCredentialForMissingSelection()
+{
+	Fixture fixture;
+	YouTubeAccountProfileOperationLock heldLock;
+	CHECK(fixture.operationLockProvider->acquire(kProfileA, heldLock).acquired());
+
+	const auto before = fixture.provider->snapshot();
+	CHECK(fixture.provider->restoreSavedStateUnderHeldOperationLock(kProfileA, std::nullopt, heldLock) ==
+	      YouTubeAccountProviderRestoreStatus::SetupRequired);
+	CHECK(fixture.vault.statusCount == 0);
+	CHECK(heldLock.acquired());
+	CHECK(fixture.operationLockApi.releaseCount == 0);
+	CHECK(fixture.provider->snapshot().revision != before.revision);
+	CHECK(heldLock.release());
+	fixture.provider->externalOperationLockReleased();
+}
+
+void testHeldProfileOperationLockRestoreRejectsWrongOrUnheldLockWithoutMutation()
+{
+	Fixture fixture;
+	const auto before = fixture.provider->snapshot();
+	YouTubeAccountProfileOperationLock heldLock;
+	CHECK(fixture.operationLockProvider->acquire(kProfileA, heldLock).acquired());
+
+	CHECK(fixture.provider->restoreSavedStateUnderHeldOperationLock(kProfileB, savedSelection("wrong-binding"), heldLock) ==
+	      YouTubeAccountProviderRestoreStatus::OperationFailed);
+	CHECK(fixture.vault.statusCount == 0);
+	CHECK(fixture.provider->snapshot().revision == before.revision);
+	CHECK(fixture.provider->snapshot().stage == before.stage);
+	CHECK(heldLock.acquired());
+
+	YouTubeAccountProfileOperationLock unheldLock;
+	CHECK(fixture.provider->restoreSavedStateUnderHeldOperationLock(kProfileA, savedSelection("unheld"), unheldLock) ==
+	      YouTubeAccountProviderRestoreStatus::OperationFailed);
+	CHECK(fixture.vault.statusCount == 0);
+	CHECK(fixture.provider->snapshot().revision == before.revision);
+	CHECK(heldLock.acquired());
+
+	std::optional<YouTubeAccountProviderRestoreStatus> wrongThreadResult;
+	std::thread wrongThread([&]() {
+		wrongThreadResult = fixture.provider->restoreSavedStateUnderHeldOperationLock(
+			kProfileA, savedSelection("wrong-thread"), heldLock);
+	});
+	wrongThread.join();
+	CHECK(wrongThreadResult == YouTubeAccountProviderRestoreStatus::WrongThread);
+	CHECK(fixture.vault.statusCount == 0);
+	CHECK(fixture.provider->snapshot().revision == before.revision);
+	CHECK(heldLock.acquired());
+	CHECK(heldLock.release());
+}
+
+void testExternalOperationReleaseFailureCanFailProviderClosed()
+{
+	Fixture fixture;
+	YouTubeAccountProfileOperationLock heldLock;
+	CHECK(fixture.operationLockProvider->acquire(kProfileA, heldLock).acquired());
+	fixture.vault.forcedStatus = CredentialStatus{CredentialState::Present, {CredentialError::None, 0}};
+	CHECK(fixture.provider->restoreSavedStateUnderHeldOperationLock(kProfileA, savedSelection("external-failure"), heldLock) ==
+	      YouTubeAccountProviderRestoreStatus::Configured);
+	CHECK(heldLock.acquired());
+
+	fixture.provider->markExternalOperationReleaseFailed();
+	const auto failed = fixture.provider->snapshot();
+	CHECK(failed.stage == YouTubeAccountProviderStage::Unavailable);
+	CHECK(failed.account.state == easy_multistream::YouTubeAccountState::Unavailable);
+	CHECK(!failed.account.connectionLease.has_value());
+	CHECK(failed.account.failure == easy_multistream::YouTubeAccountFailure::CredentialUnavailable);
+	CHECK(heldLock.acquired());
+	CHECK(fixture.operationLockApi.releaseCount == 0);
+	CHECK(heldLock.release());
+	fixture.provider->externalOperationLockReleased();
+	CHECK(fixture.provider->invalidateContext());
+}
+
 void testProfileOperationLockIsNotNeededForNonCredentialRestore()
 {
 	Fixture fixture;
@@ -1886,6 +2000,10 @@ int main(int argc, char **argv)
 	testProfileOperationLockFailureDoesNotMutateStart();
 	testRecoveredProfileOperationLockContinuesNormally();
 	testProfileOperationLockSpansRestoreStatusAndPreservesRejectedRestore();
+	testHeldProfileOperationLockRestoreDoesNotReacquireOrRelease();
+	testHeldProfileOperationLockRestoreSkipsCredentialForMissingSelection();
+	testHeldProfileOperationLockRestoreRejectsWrongOrUnheldLockWithoutMutation();
+	testExternalOperationReleaseFailureCanFailProviderClosed();
 	testProfileOperationLockIsNotNeededForNonCredentialRestore();
 	testProfileOperationLockReleasesOnLifecycleTermination();
 	testProfileOperationLockReleaseFailuresFailClosedAndRetry();

@@ -171,6 +171,17 @@ YouTubeAccountProfileOperationLock::~YouTubeAccountProfileOperationLock()
 	(void)release();
 }
 
+bool YouTubeAccountProfileOperationLock::acquiredFor(std::string_view profileBinding) const noexcept
+{
+	if (!acquired() || !claimed_ || api_ == nullptr || ownerThreadId_ == 0 ||
+	    ownerThreadId_ != GetCurrentThreadId()) {
+		return false;
+	}
+
+	const auto expectedName = makeYouTubeAccountProfileOperationLockName(profileBinding);
+	return expectedName.has_value() && name_ == *expectedName;
+}
+
 bool YouTubeAccountProfileOperationLock::release() noexcept
 {
 	if (handle_ == nullptr) {
@@ -180,18 +191,29 @@ bool YouTubeAccountProfileOperationLock::release() noexcept
 		return false;
 	}
 
-	DWORD releaseError = ERROR_SUCCESS;
-	if (!api_->releaseMutex(handle_, releaseError)) {
-		// Ownership is now uncertain. Retain both the native handle and the
-		// process claim so another local operation cannot enter incorrectly.
-		return false;
+	if (mutexOwned_) {
+		DWORD releaseError = ERROR_SUCCESS;
+		if (!api_->releaseMutex(handle_, releaseError)) {
+			// Ownership is now uncertain. Retain both the native handle and the
+			// process claim so another local operation cannot enter incorrectly.
+			return false;
+		}
+
+		mutexOwned_ = false;
+		recovered_ = false;
+		if (claimed_) {
+			releaseName(name_);
+			claimed_ = false;
+		}
 	}
 
 	DWORD closeError = ERROR_SUCCESS;
 	const bool closed = api_->closeHandle(handle_, closeError);
-
-	if (claimed_) {
-		releaseName(name_);
+	if (!closed) {
+		// Mutex ownership and the in-process claim have been relinquished, but
+		// retain the handle/API/thread metadata so owner-thread cleanup can retry
+		// CloseHandle without attempting ReleaseMutex a second time.
+		return false;
 	}
 
 	api_ = nullptr;
@@ -199,8 +221,9 @@ bool YouTubeAccountProfileOperationLock::release() noexcept
 	name_.clear();
 	ownerThreadId_ = 0;
 	claimed_ = false;
+	mutexOwned_ = false;
 	recovered_ = false;
-	return closed;
+	return true;
 }
 
 YouTubeAccountProfileOperationLockResult
@@ -209,7 +232,7 @@ YouTubeAccountProfileOperationLockProvider::acquire(std::string_view profileBind
 {
 	// Never replace a currently held lock. This keeps a failed/rejected
 	// acquisition from accidentally releasing an active operation.
-	if (lock.acquired()) {
+	if (lock.cleanupPending()) {
 		return {YouTubeAccountProfileOperationLockStatus::Busy, ERROR_BUSY};
 	}
 
@@ -243,6 +266,7 @@ YouTubeAccountProfileOperationLockProvider::acquire(std::string_view profileBind
 		lock.handle_ = handle;
 		lock.ownerThreadId_ = GetCurrentThreadId();
 		lock.claimed_ = true;
+		lock.mutexOwned_ = true;
 		lock.recovered_ = waitResult == WAIT_ABANDONED;
 		return {waitResult == WAIT_ABANDONED ? YouTubeAccountProfileOperationLockStatus::Recovered
 						     : YouTubeAccountProfileOperationLockStatus::Acquired,
