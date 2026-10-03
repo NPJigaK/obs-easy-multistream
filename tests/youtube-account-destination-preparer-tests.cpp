@@ -8,6 +8,7 @@
 
 #include <functional>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -23,11 +24,11 @@ namespace easy_multistream {
 class YouTubeAccountDestinationPreparerTestAccess final {
 public:
 	YouTubeAccountDestinationPreparerTestAccess(std::unique_ptr<YouTubeDestinationRefreshPort> refresh,
-						    std::unique_ptr<YouTubeDestinationResolverPort> resolver,
-						    YouTubeAccountRefreshTokenVault &vault,
-						    QString clientId = QStringLiteral("test-client-id"))
+							    std::unique_ptr<YouTubeDestinationResolverPort> resolver,
+							    YouTubeAccountRefreshTokenStore &store,
+							    QString clientId = QStringLiteral("test-client-id"))
 		: preparer_(new YouTubeAccountDestinationPreparer(std::move(clientId), std::move(refresh),
-								  std::move(resolver), vault, nullptr))
+								  std::move(resolver), store, nullptr))
 	{
 	}
 
@@ -174,24 +175,31 @@ private:
 	std::shared_ptr<ResolverState> state_;
 };
 
-class FakeCredentialVault final : public YouTubeAccountRefreshTokenVault {
+class FakeCredentialVault final : public YouTubeAccountRefreshTokenStore {
 public:
-	CredentialResult write(std::string_view value) noexcept override
+	CredentialResult write(const YouTubeAccountCredentialScope &scope, std::string_view value) noexcept override
 	{
 		++writeCount;
+		lastWriteScope = scope;
 		lastWritten = SecureBuffer::copyOf(value);
 		if (writeError != CredentialError::None) {
 			return {writeError, 1};
 		}
 		stored = SecureBuffer::copyOf(value);
+		storedByScope[scopeKey(scope)] = std::string(value);
 		return {};
 	}
 
-	CredentialReadResult read() noexcept override
+	CredentialReadResult read(const YouTubeAccountCredentialScope &scope) noexcept override
 	{
 		++readCount;
+		lastReadScope = scope;
 		if (readError != CredentialError::None) {
 			return {{readError, 1}, {}};
+		}
+		const auto scoped = storedByScope.find(scopeKey(scope));
+		if (scoped != storedByScope.end()) {
+			return {{}, SecureBuffer::copyOf(scoped->second)};
 		}
 		if (stored.empty()) {
 			return {{CredentialError::NotFound, 0}, {}};
@@ -199,14 +207,17 @@ public:
 		return {{}, SecureBuffer::copyOf(stored.view())};
 	}
 
-	CredentialResult erase() noexcept override
+	CredentialResult erase(const YouTubeAccountCredentialScope &scope) noexcept override
 	{
+		lastEraseScope = scope;
 		stored.clear();
+		storedByScope.erase(scopeKey(scope));
 		return {};
 	}
 
-	CredentialStatus status() noexcept override
+	CredentialStatus status(const YouTubeAccountCredentialScope &scope) noexcept override
 	{
+		lastStatusScope = scope;
 		if (readError == CredentialError::None && !stored.empty()) {
 			return {CredentialState::Present, {}};
 		}
@@ -220,8 +231,28 @@ public:
 	SecureBuffer lastWritten;
 	CredentialError readError = CredentialError::None;
 	CredentialError writeError = CredentialError::None;
+	std::optional<YouTubeAccountCredentialScope> lastReadScope;
+	std::optional<YouTubeAccountCredentialScope> lastWriteScope;
+	std::optional<YouTubeAccountCredentialScope> lastEraseScope;
+	std::optional<YouTubeAccountCredentialScope> lastStatusScope;
 	int readCount = 0;
 	int writeCount = 0;
+
+	void seed(const YouTubeAccountCredentialScope &scope, std::string_view value)
+	{
+		storedByScope[scopeKey(scope)] = std::string(value);
+	}
+
+private:
+	static std::string scopeKey(const YouTubeAccountCredentialScope &scope)
+	{
+		std::string key = scope.profileBinding;
+		key.push_back('\x1f');
+		key += scope.channelId;
+		return key;
+	}
+
+	std::map<std::string, std::string> storedByScope;
 };
 
 // Keep only non-secret completion data. The key is copied transiently so the
@@ -262,6 +293,7 @@ YouTubeDestinationPrepareRequest requestFor(YouTubeDestinationPrepareAttempt att
 {
 	YouTubeDestinationPrepareRequest request;
 	request.attempt = attempt;
+	request.profileBinding = "profile-binding-1";
 	request.selection = validSelection();
 	return request;
 }
@@ -361,6 +393,11 @@ void testSuccessAndExistingRefreshTokenIsRetained()
 	std::vector<Result> results;
 	const YouTubeDestinationPrepareAttempt attempt{1, 1};
 	beginWithStoredCredential(fixture, attempt, results);
+	CHECK(fixture.vault.lastReadScope.has_value());
+	if (fixture.vault.lastReadScope.has_value()) {
+		CHECK(fixture.vault.lastReadScope->profileBinding == "profile-binding-1");
+		CHECK(fixture.vault.lastReadScope->channelId == "channel-1");
+	}
 	completeRefreshAndReachResolver(fixture, false);
 	CHECK(fixture.vault.writeCount == 0);
 	CHECK(fixture.resolverState->lastAccessToken == kAccessToken);
@@ -392,6 +429,11 @@ void testRefreshTokenRotationIsPersistedBeforeResolve()
 	beginWithStoredCredential(fixture, attempt, results);
 	completeRefreshAndReachResolver(fixture, true);
 	CHECK(fixture.vault.writeCount == 1);
+	CHECK(fixture.vault.lastWriteScope.has_value());
+	if (fixture.vault.lastWriteScope.has_value()) {
+		CHECK(fixture.vault.lastWriteScope->profileBinding == "profile-binding-1");
+		CHECK(fixture.vault.lastWriteScope->channelId == "channel-1");
+	}
 	CHECK(std::string(fixture.vault.stored.view()) == kRotatedRefreshToken);
 	CHECK(std::string(fixture.vault.lastWritten.view()) == kRotatedRefreshToken);
 	CHECK(fixture.resolverState->handlers.size() == 1);
@@ -463,6 +505,7 @@ void testCredentialReadFailuresAreSanitized()
 	const std::vector<std::pair<CredentialError, YouTubeDestinationPrepareStatus>> cases = {
 		{CredentialError::NotFound, YouTubeDestinationPrepareStatus::ReauthorizationRequired},
 		{CredentialError::CorruptData, YouTubeDestinationPrepareStatus::ReauthorizationRequired},
+		{CredentialError::ScopeMismatch, YouTubeDestinationPrepareStatus::ReauthorizationRequired},
 		{CredentialError::AccessDenied, YouTubeDestinationPrepareStatus::CredentialUnavailable},
 		{CredentialError::Unavailable, YouTubeDestinationPrepareStatus::CredentialUnavailable},
 	};
@@ -481,6 +524,56 @@ void testCredentialReadFailuresAreSanitized()
 		}
 		CHECK(fixture.refreshState->handlers.empty());
 	}
+}
+
+void testInvalidProfileBindingDoesNotTouchCredentialStore()
+{
+	Fixture fixture;
+	fixture.vault.stored = SecureBuffer::copyOf(kOldRefreshToken);
+	std::vector<Result> results;
+	YouTubeDestinationPrepareRequest request = requestFor({4, 900});
+	request.profileBinding = "";
+	CHECK(fixture.preparer->start(std::move(request), recorder(results)) ==
+	      YouTubeDestinationPrepareStartStatus::InvalidProfileBinding);
+	CHECK(fixture.vault.readCount == 0);
+	CHECK(!fixture.vault.lastReadScope.has_value());
+	CHECK(fixture.refreshState->handlers.empty());
+}
+
+void testProfileAndChannelScopesDoNotCrossTalk()
+{
+	Fixture fixture;
+	const YouTubeAccountCredentialScope firstScope{"profile-binding-1", "channel-1"};
+	fixture.vault.seed(firstScope, kOldRefreshToken);
+
+	std::vector<Result> firstResults;
+	const auto firstAttempt = YouTubeDestinationPrepareAttempt{4, 901};
+	CHECK(fixture.preparer->start(requestFor(firstAttempt), recorder(firstResults)) ==
+	      YouTubeDestinationPrepareStartStatus::Started);
+	CHECK(fixture.vault.lastReadScope.has_value());
+	CHECK(fixture.preparer->cancel(firstAttempt));
+	processQueuedEvents();
+	CHECK(firstResults.size() == 1);
+	CHECK(firstResults[0].status == YouTubeDestinationPrepareStatus::Cancelled);
+
+	YouTubeDestinationPrepareRequest second = requestFor({4, 902});
+	second.profileBinding = "profile-binding-2";
+	second.selection.channelId = "channel-2";
+	second.selection.channelLabel = "Second channel";
+	second.selection.streamId = "stream-2";
+	second.selection.streamLabel = "Second stream";
+	std::vector<Result> secondResults;
+	CHECK(fixture.preparer->start(std::move(second), recorder(secondResults)) ==
+	      YouTubeDestinationPrepareStartStatus::Started);
+	CHECK(fixture.vault.lastReadScope.has_value());
+	if (fixture.vault.lastReadScope.has_value()) {
+		CHECK(fixture.vault.lastReadScope->profileBinding == "profile-binding-2");
+		CHECK(fixture.vault.lastReadScope->channelId == "channel-2");
+	}
+	processQueuedEvents();
+	CHECK(secondResults.size() == 1);
+	CHECK(secondResults[0].status == YouTubeDestinationPrepareStatus::ReauthorizationRequired);
+	CHECK(fixture.refreshState->handlers.size() == 1);
 }
 
 void testTokenProviderFailuresMapWithoutLeakingDetails()
@@ -687,10 +780,11 @@ void testCancelAtRefreshAndLateCallback()
 	// A late transport callback is ignored and cannot publish a second result.
 	CHECK(fixture.refreshState->lastAttempt.has_value());
 	if (fixture.refreshState->lastAttempt.has_value()) {
-		fixture.refreshState->handlers.front()(refreshSuccess(*fixture.refreshState->lastAttempt));
+		fixture.refreshState->handlers.front()(refreshSuccess(*fixture.refreshState->lastAttempt, true));
 	}
 	processQueuedEvents();
 	CHECK(results.size() == 1);
+	CHECK(fixture.vault.writeCount == 0);
 }
 
 void testCancelAtResolverAndLateCallback()
@@ -790,11 +884,13 @@ void testStaleAttemptCannotReplaceNewAttempt()
 	const YouTubeDestinationPrepareAttempt first{11, 1};
 	const YouTubeDestinationPrepareAttempt second{11, 2};
 	beginWithStoredCredential(fixture, first, firstResults);
-	CHECK(fixture.preparer->cancel(first));
+		CHECK(fixture.preparer->cancel(first));
 	processQueuedEvents();
 	CHECK(firstResults.size() == 1);
 	CHECK(firstResults[0].status == YouTubeDestinationPrepareStatus::Cancelled);
-	CHECK(fixture.preparer->start(requestFor(second), recorder(secondResults)) ==
+	YouTubeDestinationPrepareRequest secondRequest = requestFor(second);
+	secondRequest.profileBinding = "profile-binding-2";
+	CHECK(fixture.preparer->start(std::move(secondRequest), recorder(secondResults)) ==
 	      YouTubeDestinationPrepareStartStatus::Started);
 	CHECK(fixture.refreshState->handlers.size() >= 2);
 	// Complete the old callback after the new attempt is active.
@@ -804,6 +900,11 @@ void testStaleAttemptCannotReplaceNewAttempt()
 	CHECK(fixture.preparer->activeAttempt().has_value());
 	if (fixture.refreshState->lastAttempt.has_value()) {
 		fixture.refreshState->handlers.back()(refreshSuccess(*fixture.refreshState->lastAttempt));
+	}
+	CHECK(fixture.vault.lastReadScope.has_value());
+	if (fixture.vault.lastReadScope.has_value()) {
+		CHECK(fixture.vault.lastReadScope->profileBinding == "profile-binding-2");
+		CHECK(fixture.vault.lastReadScope->channelId == "channel-1");
 	}
 	processQueuedEvents();
 	CHECK(fixture.resolverState->handlers.size() >= 1);
@@ -837,6 +938,7 @@ void testInvalidRequestAndBusyState()
 	CHECK(fixture.preparer->start({}, recorder(results)) == YouTubeDestinationPrepareStartStatus::InvalidAttempt);
 	YouTubeDestinationPrepareRequest invalidSelection;
 	invalidSelection.attempt = {12, 1};
+	invalidSelection.profileBinding = "profile-binding-1";
 	CHECK(fixture.preparer->start(std::move(invalidSelection), recorder(results)) ==
 	      YouTubeDestinationPrepareStartStatus::InvalidSelection);
 	fixture.vault.stored = SecureBuffer::copyOf(kOldRefreshToken);
@@ -939,6 +1041,8 @@ int main(int argc, char **argv)
 	testRefreshTokenRotationWriteFailureStopsBeforeResolver();
 	testPersistedRotationIsNotRolledBackAfterResolveFailureOrCancel();
 	testCredentialReadFailuresAreSanitized();
+	testInvalidProfileBindingDoesNotTouchCredentialStore();
+	testProfileAndChannelScopesDoNotCrossTalk();
 	testTokenProviderFailuresMapWithoutLeakingDetails();
 	testUnexpectedTokenOperationFailsClosed();
 	testResolverFailuresMapWithoutLeakingDestination();
