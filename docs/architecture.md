@@ -22,7 +22,8 @@ The current source tree includes a non-instantiated account state machine, Googl
 a separate loopback-listener library, a browser-opener authorization-session layer, a fixed-origin HTTPS token
 transport, a read-only YouTube discovery transport with bounded pagination, a headless interactive account provider,
 a separate secret-bearing selected-stream resolver, a detached headless destination preparer, and a Windows
-profile-operation lock. They
+profile-operation lock. The provider and destination preparer both require the lock provider to be injected and keep
+their profile lock for the complete account transaction. They
 generate PKCE/state values, build and validate the authorization exchange, reject old account-operation leases, test a
 short-lived `127.0.0.1` callback listener on real local sockets, guarantee bind-and-arm-before-browser ordering, and
 test authorization-code exchange, refresh, and revocation against injected local doubles. The discovery transport obtains exactly one bounded page of owned channels or
@@ -45,7 +46,14 @@ a rotated refresh token in that same scope before starting the selected-stream r
 returns only a validated RTMPS URL plus a move-only key. A refresh-token write failure stops preparation before any
 resolver request; a rotation that has been written is not rolled back when a later resolver request fails or is cancelled.
 Its completions are guarded by an owner-thread epoch and attempt, and cancellation, context invalidation, shutdown, and
-late callbacks fail closed. None of these account/network libraries is linked into or instantiated by the OBS plugin yet,
+late callbacks fail closed. Lock acquisition never waits: a busy profile returns before changing provider/preparer
+state, while an unavailable lock fails closed. A recovered named mutex is accepted only as an internal recovery result;
+the operation re-reads durable state where required and no recovery terminology reaches user-facing text. The provider
+releases its owner-thread lock after credential/profile rollback or the final commit. The preparer releases its lock
+after queued completion state is finalized and immediately before invoking an external completion handler. If native
+release fails, neither component reports a usable result. When ownership remains, it retains the lock fail-closed and
+retries unfinished lock or port cleanup during shutdown. None of
+these account/network libraries is linked into or instantiated by the OBS plugin yet,
 so the product opens no listener or browser, makes no OAuth request, and leaves the current dock and manual RTMPS
 workflow unchanged. The profile codec now distinguishes manual and account modes and can preserve a bounded,
 non-secret channel/stream selection. Account mode without a selection is also a valid persisted setup-required state,
@@ -70,8 +78,13 @@ profile cannot read or write another profile's credential. Before any output can
 and resolve the exact saved channel and stream. If profile selection is persisted before a new token is written and that
 write fails, the selection is rolled back. The profile-operation lock derives a non-secret `Local\\` mutex name from the
 same validated binding, rejects both other-process ownership and same-process recursive acquisition without waiting, and
-reports abandoned ownership so durable state can be re-read. Account libraries remain detached from the production plugin,
-dock, and runtime.
+reports recovered ownership only as an internal result. Future disconnect and revoke operations must use this same
+profile boundary for their selection and credential changes. Account libraries remain detached from the production
+plugin, dock, and runtime.
+
+Before active-profile wiring is exposed, the non-secret profile selection must be re-read after acquiring this lock, or
+profile loading and account restoration must run inside one outer locked transaction. Passing a selection snapshot that
+was read before lock acquisition can otherwise restore stale state after another OBS process has changed the profile.
 
 The recommended Dual stream mode is a YouTube-side feature. Easy Multistream sends one 16:9 H.264/AAC stream to the user-provided RTMPS URL; YouTube creates the 9:16 feed, normally as a centre crop. This keeps the local OBS pipeline to one YouTube output and one shared video encode. The vertical mode must be enabled in YouTube Studio before the stream starts. A separately composed 9:16 stream sent by the encoder would require a second video pipeline and is intentionally deferred.
 
