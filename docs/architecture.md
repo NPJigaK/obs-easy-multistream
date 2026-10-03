@@ -20,7 +20,8 @@ Browser-based YouTube account connection is the accepted next setup path, but it
 
 The current source tree includes a non-instantiated account state machine, Google desktop-authorization protocol core,
 a separate loopback-listener library, a browser-opener authorization-session layer, a fixed-origin HTTPS token
-transport, a read-only YouTube discovery transport, and a separate secret-bearing selected-stream resolver. They
+transport, a read-only YouTube discovery transport with bounded pagination, a headless interactive account provider,
+and a separate secret-bearing selected-stream resolver. They
 generate PKCE/state values, build and validate the authorization exchange, reject old account-operation leases, test a
 short-lived `127.0.0.1` callback listener on real local sockets, guarantee bind-and-arm-before-browser ordering, and
 test authorization-code exchange, refresh, and revocation against injected local doubles. The discovery transport obtains exactly one bounded page of owned channels or
@@ -30,14 +31,18 @@ bounded HTTP parsing, one-shot completion, cancellation, and timeouts. The autho
 injected browser opener, preserves the PKCE verifier until a validated callback wins, and invalidates cancelled,
 replaced, or shutdown work by attempt and internal epoch. The HTTPS layer accepts only Google's fixed
 token and revocation endpoints, requires verified TLS, rejects redirects, bounds and strictly parses replies, and does
-not send a client secret. The resolver fetches only the explicitly selected stream ID immediately before a future
+not send a client secret. The provider serializes authorization, token exchange, complete channel/stream discovery,
+exact-ID selection, refresh-token storage, and non-secret profile-selection commit. A single candidate advances
+automatically; multiple candidates wait for an explicit ID. Credential replacement is rolled back if the profile
+selection cannot be committed, and a failed rollback clears the visible connection instead of restoring uncertain
+state. The resolver fetches only the explicitly selected stream ID immediately before a future
 start, revalidates its channel, state, RTMPS host, and stream key, and returns the key in a move-only buffer rather than
-any discovery or settings type. None of these network libraries is linked into or instantiated by the OBS plugin yet,
+any discovery or settings type. None of these account/network libraries is linked into or instantiated by the OBS plugin yet,
 so the product opens no listener or browser, makes no OAuth request, and leaves the current dock and manual RTMPS
 workflow unchanged. The profile codec now distinguishes manual and account modes and can preserve a bounded,
 non-secret channel/stream selection. Until the complete account provider is integrated, account mode fails closed and
-cannot consume the manual URL/key destination. Production browser-opener wiring, multi-page discovery orchestration,
-account-provider/vault integration, runtime integration, and user-facing
+cannot consume the manual URL/key destination. Production browser-opener and active-profile wiring, refresh/revoke,
+runtime integration, and user-facing
 account controls remain release-gated.
 
 The recommended Dual stream mode is a YouTube-side feature. Easy Multistream sends one 16:9 H.264/AAC stream to the user-provided RTMPS URL; YouTube creates the 9:16 feed, normally as a centre crop. This keeps the local OBS pipeline to one YouTube output and one shared video encode. The vertical mode must be enabled in YouTube Studio before the stream starts. A separately composed 9:16 stream sent by the encoder would require a second video pipeline and is intentionally deferred.
@@ -80,7 +85,7 @@ OBS dock wrapper (OBS-owned)
 
 Windows Credential Manager
   ├─ one Easy Multistream YouTube key for the current Windows account
-  └─ a separate reserved target for the future Google refresh token
+  └─ a separate plugin-owned target for the future Google refresh token
 
 Current OBS profile/basic.ini
   ├─ SchemaVersion + YouTubeEnabled + explicit connection mode

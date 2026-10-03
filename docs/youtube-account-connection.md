@@ -91,7 +91,8 @@ Profile settings may contain only non-secret selection data such as the connecti
 
 The profile codec now implements this non-secret boundary. Older manual profiles load as manual mode; account mode
 requires a complete, strictly validated channel/stream selection and does not require a saved ingestion URL. The
-current runtime deliberately treats account mode as unavailable until the asynchronous account provider is complete,
+current runtime deliberately treats account mode as unavailable until the headless provider is wired through the
+plugin lifecycle and output preparation,
 so a partially implemented or imported account profile cannot silently use the manual URL/key instead.
 
 Windows Credential Manager uses separate targets for:
@@ -162,9 +163,10 @@ The internal implementation order is intentionally not shown in the user interfa
 7. add the account UI and keep manual configuration under advanced settings;
 8. complete Google policy, verification, privacy, quota, and signed-release gates before recommending it to general users.
 
-The first two items, the loopback listener and injected browser-opener authorization-session portions of item three, the token exchange/refresh/revocation plus
-bounded channel/reusable-stream discovery portions of item four, and the selected-stream resolver in item five are now
-present as non-instantiated libraries with standalone tests. The listener and authorization-session tests use real
+The first two items, the loopback listener and injected browser-opener authorization-session portions of item three,
+the token transport plus bounded channel/reusable-stream discovery portions of item four, the selected-stream resolver
+in item five, and the interactive authorization/exchange/discovery/selection/storage orchestration are now present as
+non-instantiated libraries with standalone tests. The listener and authorization-session tests use real
 local sockets to verify exclusive `127.0.0.1` binding, bounded HTTP parsing, state rejection, one-shot completion,
 timeout, request limits, cancellation, bind-and-arm-before-open ordering, browser-open failure, re-entrant completion,
 attempt replacement, shutdown, and move-only code/verifier handoff. The browser opener is a fake; the OBS plugin does
@@ -177,11 +179,14 @@ stale-completion rejection. A separate pager follows opaque continuation values 
 candidate set, and fails closed on page/item limits, token cycles, cross-page duplicate IDs, timeout, cancellation, or
 any page failure. It deliberately requests no CDN ingestion fields or stream keys. The resolver separately
 fetches one selected stream and returns its validated RTMPS destination and current key through a move-only result,
-without adding the key to discovery data or persistent settings. None of these libraries is
+without adding the key to discovery data or persistent settings. The headless provider automatically advances a
+single channel/stream candidate, requires exact-ID selection for multiple candidates, rejects stale work by epoch and
+lease, and commits the refresh token plus non-secret selection transactionally enough to restore the previous token
+when profile persistence fails. None of these libraries is
 linked into the OBS plugin, so the product still does not open a browser, listen on a port, make an OAuth/API network
 request, or read an account credential. The profile format and runtime fail-closed boundary are present, but the dock
-continues to expose only the working manual setup. Production browser-opener/provider integration, candidate-selection
-flow, refresh-token vault integration, runtime handoff, and all later items stay gated, so a partial
+continues to expose only the working manual setup. Production browser-opener and active-profile adapters,
+refresh/revoke and startup hydration, runtime handoff, and all later items stay gated, so a partial
 connection path cannot appear in the user interface.
 
 No account UI is added merely to advertise unfinished functionality. A build without a complete configured provider continues to show only the working manual setup.

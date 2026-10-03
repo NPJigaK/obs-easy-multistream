@@ -91,6 +91,7 @@ public:
 	// Return a value so callers cannot retain a reference across a transition,
 	// queued UI delivery, or destruction of the coordinator.
 	YouTubeAccountSnapshot snapshot() const;
+	std::optional<YouTubeAccountLease> activeLease() const noexcept;
 
 	// A second begin while an attempt is active is a no-op. Reauthorizing a
 	// connected account stages a replacement while preserving the committed
@@ -107,8 +108,17 @@ public:
 	// thread dispatch without yielding to the event loop. An asynchronous vault
 	// implementation instead needs attempt-scoped staging and rollback.
 	YouTubeAccountTransition credentialStored(YouTubeAccountLease lease);
+	// The provider calls this only after its credential and non-secret profile
+	// writes have succeeded. discoverySucceeded() prebuilds every string-bearing
+	// value, so this final visibility commit performs move assignment only and
+	// cannot fail with an allocation exception.
+	bool commitCredentialStored(YouTubeAccountLease lease) noexcept;
 	YouTubeAccountTransition attemptFailed(YouTubeAccountLease lease, YouTubeAccountFailure failure);
 	YouTubeAccountTransition cancel(YouTubeAccountLease lease);
+	// A failed credential rollback means the visible selection can no longer be
+	// trusted to match the single plugin-owned credential. Fail closed instead
+	// of restoring a formerly connected snapshot.
+	YouTubeAccountTransition credentialStateUncertain(YouTubeAccountLease lease);
 
 	// Context invalidation discards the committed selection and invalidates all
 	// outstanding work. Closed is terminal.
@@ -121,6 +131,10 @@ private:
 	struct CommittedConnection {
 		YouTubeAccountDiscovery discovery;
 		YouTubeAccountLease lease;
+	};
+	struct PendingConnectionCommit {
+		CommittedConnection connection;
+		YouTubeAccountSnapshot snapshot;
 	};
 
 	YouTubeAccountTransition result(bool changed = false);
@@ -136,7 +150,7 @@ private:
 	YouTubeAccountSnapshot snapshot_;
 	std::uint64_t nextAttempt_ = 0;
 	std::optional<CommittedConnection> committedConnection_;
-	std::optional<YouTubeAccountDiscovery> pendingDiscovery_;
+	std::optional<PendingConnectionCommit> pendingCommit_;
 	std::optional<YouTubeAccountFailure> committedConnectionFailure_;
 	bool replacingConnected_ = false;
 };

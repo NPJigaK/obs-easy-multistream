@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <iostream>
+#include <utility>
 
 namespace {
 
@@ -25,6 +26,9 @@ using easy_multistream::YouTubeAccountLease;
 using easy_multistream::YouTubeAccountSelectionValidationError;
 using easy_multistream::YouTubeAccountState;
 using easy_multistream::validateYouTubeAccountSelection;
+
+static_assert(noexcept(
+	std::declval<YouTubeAccountCoordinator &>().commitCredentialStored(std::declval<YouTubeAccountLease>())));
 
 YouTubeAccountLease leaseFrom(const easy_multistream::YouTubeAccountTransition &transition)
 {
@@ -250,6 +254,47 @@ void testReplacementCommitsOnlyAfterCredentialStorage()
 	CHECK(committed.snapshot.failure == YouTubeAccountFailure::None);
 }
 
+void testNoThrowCredentialCommitIsAttemptScoped()
+{
+	YouTubeAccountCoordinator coordinator;
+	const YouTubeAccountLease lease = leaseFrom(coordinator.beginAuthorization());
+	coordinator.authorizationCallbackAccepted(lease);
+	coordinator.tokenExchangeSucceeded(lease);
+	const auto staged = coordinator.discoverySucceeded(lease, selection("prepared"));
+	const std::uint64_t stagedRevision = staged.snapshot.revision;
+
+	CHECK(!coordinator.commitCredentialStored({lease.generation, lease.attempt + 1}));
+	CHECK(coordinator.snapshot().state == YouTubeAccountState::PersistingCredential);
+	CHECK(coordinator.commitCredentialStored(lease));
+	const auto committed = coordinator.snapshot();
+	CHECK(committed.state == YouTubeAccountState::Connected);
+	CHECK(committed.channelId == "channel-prepared");
+	CHECK(committed.streamId == "stream-prepared");
+	CHECK(committed.connectionLease == lease);
+	CHECK(committed.revision != stagedRevision);
+	CHECK(!coordinator.commitCredentialStored(lease));
+}
+
+void testCredentialRollbackFailureFailsClosed()
+{
+	YouTubeAccountCoordinator coordinator;
+	connect(coordinator, selection("old"));
+	const YouTubeAccountLease replacement = leaseFrom(coordinator.beginAuthorization());
+	coordinator.authorizationCallbackAccepted(replacement);
+	coordinator.tokenExchangeSucceeded(replacement);
+	coordinator.discoverySucceeded(replacement, selection("new"));
+
+	const auto failedClosed = coordinator.credentialStateUncertain(replacement);
+	CHECK(failedClosed.changed);
+	CHECK(failedClosed.snapshot.state == YouTubeAccountState::Unavailable);
+	CHECK(failedClosed.snapshot.failure == YouTubeAccountFailure::CredentialUnavailable);
+	CHECK(failedClosed.snapshot.channelId.empty());
+	CHECK(failedClosed.snapshot.streamId.empty());
+	CHECK(!failedClosed.snapshot.connectionLease.has_value());
+	CHECK(failedClosed.snapshot.generation != replacement.generation);
+	CHECK(!coordinator.commitCredentialStored(replacement));
+}
+
 void testInvalidReplacementPreservesCommittedConnection()
 {
 	YouTubeAccountCoordinator coordinator;
@@ -454,6 +499,8 @@ int main()
 	testSharedSelectionValidationClassifiesEachField();
 	testReplacementIsTransactional();
 	testReplacementCommitsOnlyAfterCredentialStorage();
+	testNoThrowCredentialCommitIsAttemptScoped();
+	testCredentialRollbackFailureFailsClosed();
 	testInvalidReplacementPreservesCommittedConnection();
 	testFailureClassificationAndExplicitReauthorization();
 	testOldConnectionResultsCannotReplaceNewConnection();

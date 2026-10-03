@@ -50,9 +50,9 @@ The repository also contains loopback-listener and authorization-session librari
 
 PKCE, state validation, and exclusive binding prevent an unrelated local process from successfully completing or taking over an authorization attempt, but they cannot make the desktop resistant to denial by malware already running as the same Windows user. Such a process can repeatedly connect to the temporary port, consume the bounded connection budget, or keep bounded client slots busy until their timeout. The listener fails closed and requires a retry rather than accepting a callback after its limits are exhausted.
 
-The repository also contains a separate token-transport library that is linked only to a standalone development test. It posts form data only to Google's fixed HTTPS token and revocation endpoints, never accepts an endpoint from settings, never sends a client secret, requires peer-verified TLS 1.2 or later, rejects redirects and missing encryption proof, disables credential and cookie reuse, and applies independent time and 64 KiB response limits. Responses are type-checked, known security fields cannot be duplicated, raw provider descriptions are not returned, and operation generations prevent a cancelled or replaced request from completing newer work. Authorization codes, PKCE verifiers, response bodies, and parsed token staging buffers are explicitly cleared where the involved API permits it. Qt and operating-system internals may still make transient copies under the in-memory limitations documented above.
+The repository also contains a separate token-transport library used by the detached account-provider library and standalone development tests, but not by the OBS plugin module. It posts form data only to Google's fixed HTTPS token and revocation endpoints, never accepts an endpoint from settings, never sends a client secret, requires peer-verified TLS 1.2 or later, rejects redirects and missing encryption proof, disables credential and cookie reuse, and applies independent time and 64 KiB response limits. Responses are type-checked, known security fields cannot be duplicated, raw provider descriptions are not returned, and operation generations prevent a cancelled or replaced request from completing newer work. Authorization codes, PKCE verifiers, response bodies, and parsed token staging buffers are explicitly cleared where the involved API permits it. Qt and operating-system internals may still make transient copies under the in-memory limitations documented above.
 
-The repository also builds a separate read-only YouTube discovery transport only for its standalone development test.
+The repository also builds a separate read-only YouTube discovery transport only for standalone development tests.
 It sends a move-only access-token buffer solely as a Bearer header to the fixed `channels.list` and
 `liveStreams.list` HTTPS endpoints. It requests one bounded page at a time, uses `mine=true`, strictly validates IDs,
 labels, page tokens, headers, JSON, TLS, and final URLs, and returns stable error enums rather than provider text. Its
@@ -61,6 +61,14 @@ or returned by this layer. A separate, test-only-linked pagination layer follows
 with fixed total-time, page, and item limits. It rejects continuation cycles and cross-page duplicate IDs and returns
 no partial candidates after any page failure, timeout, cancellation, or limit breach. Access tokens are copied only
 into move-only buffers for the active page and are cleared with the aggregate operation state.
+
+A separate headless account-provider library composes authorization, code exchange, bounded discovery, exact candidate
+selection, refresh-token storage, and non-secret selection persistence. It is still not linked into the OBS plugin.
+Its deterministic test uses fake browser/token/API/vault boundaries and no real network or global Credential Manager.
+Provider snapshots contain only stable state, candidate IDs/labels, and account leases. A replacement token is not made
+visible until discovery and both persistence steps succeed; profile-save failure restores the previous credential, and
+rollback failure clears the visible account and fails closed. All lower completions are owner-thread operations guarded
+by an independent epoch, the account lease, and the expected stage.
 
 The repository also contains a separate selected-stream resolver that is built only for its standalone development
 test. It requests one explicitly selected stream ID from the fixed `liveStreams.list` endpoint, rechecks the returned

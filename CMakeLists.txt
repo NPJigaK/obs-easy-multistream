@@ -28,6 +28,7 @@ add_library(${CMAKE_PROJECT_NAME}-oauth-token-transport STATIC)
 add_library(${CMAKE_PROJECT_NAME}-youtube-discovery STATIC)
 add_library(${CMAKE_PROJECT_NAME}-youtube-discovery-pager STATIC)
 add_library(${CMAKE_PROJECT_NAME}-youtube-stream-resolver STATIC)
+add_library(${CMAKE_PROJECT_NAME}-youtube-account-provider STATIC)
 
 find_package(libobs REQUIRED)
 find_package(obs-frontend-api REQUIRED)
@@ -176,6 +177,25 @@ target_include_directories(
 target_link_libraries(
   ${CMAKE_PROJECT_NAME}-youtube-stream-resolver
   PUBLIC ${CMAKE_PROJECT_NAME}-secure-core ${CMAKE_PROJECT_NAME}-youtube-destination Qt6::Core Qt6::Network
+)
+
+target_sources(
+  ${CMAKE_PROJECT_NAME}-youtube-account-provider
+  PRIVATE src/youtube-account-provider.cpp src/youtube-account-provider.hpp
+)
+target_include_directories(
+  ${CMAKE_PROJECT_NAME}-youtube-account-provider
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+target_link_libraries(
+  ${CMAKE_PROJECT_NAME}-youtube-account-provider
+  PUBLIC
+    ${CMAKE_PROJECT_NAME}-session-core
+    ${CMAKE_PROJECT_NAME}-oauth-authorization-session
+    ${CMAKE_PROJECT_NAME}-oauth-token-transport
+    ${CMAKE_PROJECT_NAME}-youtube-discovery-pager
+    ${CMAKE_PROJECT_NAME}-secure-core
+    Qt6::Core
 )
 
 configure_file(src/version.hpp.in generated/version.hpp @ONLY)
@@ -405,6 +425,33 @@ if(BUILD_TESTING)
     COMMAND ${CMAKE_PROJECT_NAME}-youtube-discovery-pager-tests
   )
 
+  add_executable(${CMAKE_PROJECT_NAME}-youtube-account-provider-tests)
+  target_sources(
+    ${CMAKE_PROJECT_NAME}-youtube-account-provider-tests
+    PRIVATE tests/youtube-account-provider-tests.cpp
+  )
+  target_link_libraries(
+    ${CMAKE_PROJECT_NAME}-youtube-account-provider-tests
+    PRIVATE ${CMAKE_PROJECT_NAME}-youtube-account-provider
+  )
+
+  add_custom_command(
+    TARGET ${CMAKE_PROJECT_NAME}-youtube-account-provider-tests
+    POST_BUILD
+    COMMAND
+      "${CMAKE_COMMAND}" -E copy_if_different
+      $<TARGET_RUNTIME_DLLS:${CMAKE_PROJECT_NAME}-youtube-account-provider-tests>
+      $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}-youtube-account-provider-tests>
+    COMMAND_EXPAND_LISTS
+    COMMENT "Copy YouTube account provider test runtime dependencies"
+    VERBATIM
+  )
+
+  add_test(
+    NAME ${CMAKE_PROJECT_NAME}-youtube-account-provider
+    COMMAND ${CMAKE_PROJECT_NAME}-youtube-account-provider-tests
+  )
+
   add_executable(${CMAKE_PROJECT_NAME}-youtube-stream-resolver-tests)
   target_sources(
     ${CMAKE_PROJECT_NAME}-youtube-stream-resolver-tests
@@ -524,6 +571,7 @@ if(BUILD_TESTING)
     ${CMAKE_PROJECT_NAME}-google-oauth-token
     ${CMAKE_PROJECT_NAME}-youtube-discovery
     ${CMAKE_PROJECT_NAME}-youtube-discovery-pager
+    ${CMAKE_PROJECT_NAME}-youtube-account-provider
     ${CMAKE_PROJECT_NAME}-youtube-stream-resolver
     PROPERTIES ENVIRONMENT_MODIFICATION "${test_runtime_environment}"
   )
