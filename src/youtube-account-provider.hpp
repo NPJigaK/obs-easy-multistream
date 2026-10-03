@@ -86,6 +86,7 @@ enum class YouTubeAccountProviderStartStatus {
 	Busy,
 	Closed,
 	InvalidClientId,
+	InvalidProfileBinding,
 	InvalidSelectionCommitter,
 	OperationFailed,
 };
@@ -98,6 +99,7 @@ enum class YouTubeAccountProviderRestoreStatus {
 	WrongThread,
 	Busy,
 	Closed,
+	InvalidProfileBinding,
 	InvalidSelection,
 	OperationFailed,
 };
@@ -126,7 +128,7 @@ struct YouTubeAccountProviderSnapshot final {
 // active OBS profile. It must not process events or re-enter the provider, and
 // a false result must leave the prior profile value intact. The existing
 // settings writer already provides that rollback contract.
-using YouTubeAccountSelectionCommitter = std::function<bool(const YouTubeAccountSelection &selection)>;
+using YouTubeAccountSelectionCommitter = std::function<bool(const std::optional<YouTubeAccountSelection> &selection)>;
 
 // Headless, owner-thread-only orchestration for one interactive account
 // connection. It is deliberately detached from PluginState, docks, runtime
@@ -134,8 +136,11 @@ using YouTubeAccountSelectionCommitter = std::function<bool(const YouTubeAccount
 // reviewed integration slices.
 class YouTubeAccountProvider final : public QObject {
 public:
+	// profileBinding is a validated, non-secret identity for the active OBS
+	// profile. It is kept in memory only and combined with the selected channel
+	// for every credential-store operation.
 	YouTubeAccountProvider(QString clientId, GoogleOAuthAuthorizationSession::BrowserOpener browserOpener,
-			       YouTubeAccountRefreshTokenVault &refreshTokenVault,
+			       YouTubeAccountRefreshTokenStore &refreshTokenStore, std::string profileBinding,
 			       YouTubeAccountSelectionCommitter selectionCommitter, QObject *parent = nullptr);
 	~YouTubeAccountProvider() override;
 
@@ -152,13 +157,13 @@ public:
 							   std::string_view streamId) noexcept;
 	// Restore profile-scoped, non-secret selection state without opening a
 	// browser or starting any network port. A missing selection is a valid
-	// setup-required account state and does not inspect or delete the shared
-	// Windows credential. Credential presence produces only Configured state;
+	// setup-required account state and does not inspect or delete any credential.
+	// Credential presence produces only Configured state;
 	// it does not prove that the token belongs to the saved channel. Call
 	// invalidateContext() during PROFILE_CHANGING so an interactive attempt
 	// cannot cross into the newly loaded profile.
 	YouTubeAccountProviderRestoreStatus
-	restoreSavedState(std::optional<YouTubeAccountSelection> selection) noexcept;
+	restoreSavedState(std::string profileBinding, std::optional<YouTubeAccountSelection> selection) noexcept;
 
 	bool cancel(YouTubeAccountLease lease) noexcept;
 	bool invalidateContext() noexcept;
@@ -173,7 +178,7 @@ private:
 	YouTubeAccountProvider(QString clientId, std::unique_ptr<YouTubeAccountAuthorizationPort> authorizationPort,
 			       std::unique_ptr<YouTubeAccountTokenPort> tokenPort,
 			       std::unique_ptr<YouTubeAccountDiscoveryPort> discoveryPort,
-			       YouTubeAccountRefreshTokenVault &refreshTokenVault,
+			       YouTubeAccountRefreshTokenStore &refreshTokenStore, std::string profileBinding,
 			       YouTubeAccountSelectionCommitter selectionCommitter, QObject *parent);
 
 	class Impl;

@@ -19,33 +19,17 @@ namespace easy_multistream {
 namespace {
 
 constexpr wchar_t kYouTubeCredentialTarget[] = L"NPJigaK/obs-easy-multistream/v1/youtube-stream-key";
-constexpr wchar_t kYouTubeAccountRefreshTokenTarget[] =
-	L"NPJigaK/obs-easy-multistream/v1/youtube-account-refresh-token";
 constexpr wchar_t kYouTubeAccountRefreshTokenTargetPrefix[] =
 	L"NPJigaK/obs-easy-multistream/v2/youtube-account-refresh-token/profile-";
-constexpr wchar_t kYouTubeAccountCredentialUserNamePrefix[] =
-	L"NPJigaK/obs-easy-multistream/youtube-account/channel-";
+constexpr wchar_t kYouTubeAccountCredentialUserNamePrefix[] = L"NPJigaK/obs-easy-multistream/youtube-account/channel-";
 wchar_t kYouTubeUserName[] = L"YouTube";
 
 constexpr std::size_t kSha256Bytes = 32U;
 constexpr std::size_t kSha256HexBytes = kSha256Bytes * 2U;
 
-bool isLowerHex(std::string_view value) noexcept
-{
-	if (value.size() != kSha256HexBytes) {
-		return false;
-	}
-	for (const unsigned char byte : value) {
-		if (!((byte >= static_cast<unsigned char>('0') && byte <= static_cast<unsigned char>('9')) ||
-		      (byte >= static_cast<unsigned char>('a') && byte <= static_cast<unsigned char>('f')))) {
-			return false;
-		}
-	}
-	return true;
-}
-
 class BCryptAlgorithmGuard final {
 public:
+	BCryptAlgorithmGuard() = default;
 	BCRYPT_ALG_HANDLE handle = nullptr;
 
 	~BCryptAlgorithmGuard()
@@ -61,6 +45,7 @@ public:
 
 class BCryptHashGuard final {
 public:
+	BCryptHashGuard() = default;
 	BCRYPT_HASH_HANDLE handle = nullptr;
 
 	~BCryptHashGuard()
@@ -107,9 +92,8 @@ std::optional<std::array<BYTE, kSha256Bytes>> sha256(std::string_view value) noe
 
 		ULONG objectLength = 0;
 		ULONG propertyLength = 0;
-		if (BCryptGetProperty(algorithm.handle, BCRYPT_OBJECT_LENGTH,
-				      reinterpret_cast<PUCHAR>(&objectLength), sizeof(objectLength), &propertyLength, 0) !=
-			    0 ||
+		if (BCryptGetProperty(algorithm.handle, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&objectLength),
+				      sizeof(objectLength), &propertyLength, 0) != 0 ||
 		    propertyLength != sizeof(objectLength) || objectLength == 0 || objectLength > 1024U) {
 			return std::nullopt;
 		}
@@ -129,7 +113,7 @@ std::optional<std::array<BYTE, kSha256Bytes>> sha256(std::string_view value) noe
 
 		BCryptHashGuard hash;
 		if (BCryptCreateHash(algorithm.handle, &hash.handle, hashObject.data(), objectLength, nullptr, 0, 0) !=
-			0) {
+		    0) {
 			return std::nullopt;
 		}
 		if (BCryptHashData(hash.handle, mutableValue.data(), static_cast<ULONG>(mutableValue.size()), 0) != 0) {
@@ -194,7 +178,7 @@ CredentialResult mapCredentialError(DWORD error) noexcept
 
 std::optional<std::wstring> makeTarget(std::string_view profileBinding) noexcept
 {
-	if (!isLowerHex(profileBinding)) {
+	if (!isValidYouTubeAccountProfileBinding(profileBinding)) {
 		return std::nullopt;
 	}
 	try {
@@ -253,15 +237,27 @@ std::optional<DerivedCredentialScope> deriveScope(const YouTubeAccountCredential
 	}
 }
 
-CredentialResult validateScopedCredential(const CREDENTIALW *credential, const DerivedCredentialScope &scope) noexcept
+CredentialResult validateScopedIdentity(const CREDENTIALW *credential, const DerivedCredentialScope &scope) noexcept
 {
 	if (credential == nullptr) {
 		return {CredentialError::CorruptData, ERROR_INVALID_DATA};
 	}
 	if (credential->TargetName == nullptr || std::wcscmp(credential->TargetName, scope.target.c_str()) != 0 ||
-	    credential->Type != CRED_TYPE_GENERIC || credential->UserName == nullptr ||
+	    credential->UserName == nullptr ||
 	    std::wcscmp(credential->UserName, scope.userName.c_str()) != 0) {
 		return {CredentialError::ScopeMismatch, ERROR_INVALID_DATA};
+	}
+	return {};
+}
+
+CredentialResult validateScopedCredential(const CREDENTIALW *credential, const DerivedCredentialScope &scope) noexcept
+{
+	const CredentialResult identity = validateScopedIdentity(credential, scope);
+	if (!identity.succeeded()) {
+		return identity;
+	}
+	if (credential->Type != CRED_TYPE_GENERIC) {
+		return {CredentialError::CorruptData, ERROR_INVALID_DATA};
 	}
 	if (credential->CredentialBlob == nullptr || credential->CredentialBlobSize == 0 ||
 	    credential->CredentialBlobSize > CRED_MAX_CREDENTIAL_BLOB_SIZE) {
@@ -478,7 +474,7 @@ std::optional<std::wstring> makeYouTubeAccountCredentialUserName(std::string_vie
 WindowsYouTubeAccountRefreshTokenStore::WindowsYouTubeAccountRefreshTokenStore(WinCredentialApi &api) : api_(api) {}
 
 CredentialResult WindowsYouTubeAccountRefreshTokenStore::write(const YouTubeAccountCredentialScope &scope,
-								       std::string_view secret) noexcept
+							       std::string_view secret) noexcept
 {
 	auto derived = deriveScope(scope);
 	if (!derived.has_value() || secret.empty() || secret.size() > kMaxCredentialSecretBytes ||
@@ -510,8 +506,7 @@ CredentialResult WindowsYouTubeAccountRefreshTokenStore::write(const YouTubeAcco
 	return {};
 }
 
-CredentialReadResult WindowsYouTubeAccountRefreshTokenStore::read(
-	const YouTubeAccountCredentialScope &scope) noexcept
+CredentialReadResult WindowsYouTubeAccountRefreshTokenStore::read(const YouTubeAccountCredentialScope &scope) noexcept
 {
 	const auto derived = deriveScope(scope);
 	if (!derived.has_value()) {
@@ -560,7 +555,10 @@ CredentialResult WindowsYouTubeAccountRefreshTokenStore::erase(const YouTubeAcco
 		return mapCredentialError(error);
 	}
 	ReadCredentialGuard guard(api_, credential);
-	const CredentialResult validation = validateScopedCredential(credential, *derived);
+	// Deletion needs only the exact target/channel identity. A corrupt blob or
+	// type must remain removable so the user can recover without opening the
+	// Windows Credential Manager manually.
+	const CredentialResult validation = validateScopedIdentity(credential, *derived);
 	if (!validation.succeeded()) {
 		return validation;
 	}
@@ -572,8 +570,7 @@ CredentialResult WindowsYouTubeAccountRefreshTokenStore::erase(const YouTubeAcco
 	return {};
 }
 
-CredentialStatus WindowsYouTubeAccountRefreshTokenStore::status(
-	const YouTubeAccountCredentialScope &scope) noexcept
+CredentialStatus WindowsYouTubeAccountRefreshTokenStore::status(const YouTubeAccountCredentialScope &scope) noexcept
 {
 	const auto derived = deriveScope(scope);
 	if (!derived.has_value()) {
@@ -605,11 +602,6 @@ bool WindowsCredentialVault::targetIsValid() const noexcept
 const wchar_t *defaultYouTubeCredentialTarget() noexcept
 {
 	return kYouTubeCredentialTarget;
-}
-
-const wchar_t *defaultYouTubeAccountRefreshTokenTarget() noexcept
-{
-	return kYouTubeAccountRefreshTokenTarget;
 }
 
 } // namespace easy_multistream

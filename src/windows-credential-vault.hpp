@@ -61,7 +61,6 @@ private:
 	std::wstring targetName_;
 };
 
-inline constexpr std::size_t kYouTubeAccountProfileBindingHexBytes = 64U;
 inline constexpr std::size_t kMaxYouTubeAccountProfilePathBytes = 32767U;
 
 // The profile path is hashed with the platform crypto provider before it is
@@ -75,15 +74,14 @@ std::optional<std::wstring> makeYouTubeAccountCredentialTarget(std::string_view 
 std::optional<std::wstring> makeYouTubeAccountCredentialUserName(std::string_view channelId) noexcept;
 
 // Unlike the manual stream-key vault, the account credential is never stored
-// under one process-wide name. The target is scoped by profileBinding and the
-// UserName carries the selected channel digest, so profile/channel operations
-// cannot silently overwrite a different scope.
+// under one process-wide name. Each profile owns one current credential. Its
+// target is scoped by profileBinding, and read/status/erase verify the selected
+// channel digest carried in UserName before acting on the record.
 class WindowsYouTubeAccountRefreshTokenStore final : public YouTubeAccountRefreshTokenStore {
 public:
 	explicit WindowsYouTubeAccountRefreshTokenStore(WinCredentialApi &api);
 
-	CredentialResult write(const YouTubeAccountCredentialScope &scope,
-				      std::string_view secret) noexcept override;
+	CredentialResult write(const YouTubeAccountCredentialScope &scope, std::string_view secret) noexcept override;
 	CredentialReadResult read(const YouTubeAccountCredentialScope &scope) noexcept override;
 	CredentialResult erase(const YouTubeAccountCredentialScope &scope) noexcept override;
 	CredentialStatus status(const YouTubeAccountCredentialScope &scope) noexcept override;
@@ -93,6 +91,5 @@ private:
 };
 
 const wchar_t *defaultYouTubeCredentialTarget() noexcept;
-const wchar_t *defaultYouTubeAccountRefreshTokenTarget() noexcept;
 
 } // namespace easy_multistream

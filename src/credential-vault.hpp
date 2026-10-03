@@ -73,6 +73,25 @@ struct YouTubeAccountCredentialScope final {
 	std::string channelId;
 };
 
+inline constexpr std::size_t kYouTubeAccountProfileBindingHexBytes = 64U;
+
+// Profile bindings are SHA-256 digests encoded as canonical lower-case hex.
+// Keeping this validator platform-independent lets asynchronous account
+// components reject a malformed scope before touching Credential Manager.
+inline bool isValidYouTubeAccountProfileBinding(std::string_view value) noexcept
+{
+	if (value.size() != kYouTubeAccountProfileBindingHexBytes) {
+		return false;
+	}
+	for (const unsigned char byte : value) {
+		if (!((byte >= static_cast<unsigned char>('0') && byte <= static_cast<unsigned char>('9')) ||
+		      (byte >= static_cast<unsigned char>('a') && byte <= static_cast<unsigned char>('f')))) {
+			return false;
+		}
+	}
+	return true;
+}
+
 // Semantic capability for the Google account credential. Keeping this as a
 // distinct type prevents the manual YouTube stream-key vault from being wired
 // into OAuth code and accidentally sent to Google's token endpoint. Unlike a
@@ -82,7 +101,7 @@ public:
 	virtual ~YouTubeAccountRefreshTokenStore() = default;
 
 	virtual CredentialResult write(const YouTubeAccountCredentialScope &scope,
-					      std::string_view secret) noexcept = 0;
+				       std::string_view secret) noexcept = 0;
 	virtual CredentialReadResult read(const YouTubeAccountCredentialScope &scope) noexcept = 0;
 	virtual CredentialResult erase(const YouTubeAccountCredentialScope &scope) noexcept = 0;
 	virtual CredentialStatus status(const YouTubeAccountCredentialScope &scope) noexcept = 0;

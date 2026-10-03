@@ -219,15 +219,18 @@ public:
 	     std::unique_ptr<YouTubeAccountAuthorizationPort> authorizationPort,
 	     std::unique_ptr<YouTubeAccountTokenPort> tokenPort,
 	     std::unique_ptr<YouTubeAccountDiscoveryPort> discoveryPort,
-	     YouTubeAccountRefreshTokenVault &refreshTokenVault, YouTubeAccountSelectionCommitter selectionCommitter)
+	     YouTubeAccountRefreshTokenStore &refreshTokenStore, std::string profileBinding,
+	     YouTubeAccountSelectionCommitter selectionCommitter)
 		: owner_(owner),
 		  clientId_(std::move(clientId)),
 		  authorizationPort_(std::move(authorizationPort)),
 		  tokenPort_(std::move(tokenPort)),
 		  discoveryPort_(std::move(discoveryPort)),
-		  refreshTokenVault_(refreshTokenVault),
+		  refreshTokenStore_(refreshTokenStore),
+		  profileBinding_(std::move(profileBinding)),
 		  selectionCommitter_(std::move(selectionCommitter))
 	{
+		profileBindingValid_ = isValidYouTubeAccountProfileBinding(profileBinding_);
 	}
 
 	YouTubeAccountProviderStartStatus startConnection(GoogleOAuthConsentMode consentMode) noexcept
@@ -237,6 +240,9 @@ public:
 		}
 		if (stage_ == YouTubeAccountProviderStage::Closed) {
 			return YouTubeAccountProviderStartStatus::Closed;
+		}
+		if (!profileBindingValid_) {
+			return YouTubeAccountProviderStartStatus::InvalidProfileBinding;
 		}
 		if (commitInProgress_ || lifecycleMutationInProgress_ || activeLease().has_value()) {
 			return YouTubeAccountProviderStartStatus::Busy;
@@ -331,7 +337,8 @@ public:
 		return selectStreamCandidate(lease, streamId);
 	}
 
-	YouTubeAccountProviderRestoreStatus restoreSavedState(std::optional<YouTubeAccountSelection> selection) noexcept
+	YouTubeAccountProviderRestoreStatus restoreSavedState(std::string profileBinding,
+							      std::optional<YouTubeAccountSelection> selection) noexcept
 	{
 		if (!onOwnerThread()) {
 			return YouTubeAccountProviderRestoreStatus::WrongThread;
@@ -342,13 +349,29 @@ public:
 		if (commitInProgress_ || lifecycleMutationInProgress_ || activeLease().has_value()) {
 			return YouTubeAccountProviderRestoreStatus::Busy;
 		}
+		if (!isValidYouTubeAccountProfileBinding(profileBinding)) {
+			profileBinding_.clear();
+			profileBindingValid_ = false;
+			savedSelection_.reset();
+			operationEpoch_ = nextNonZero(operationEpoch_);
+			clearEphemeral();
+			try {
+				coordinator_.invalidateContext();
+			} catch (...) {
+			}
+			setStage(YouTubeAccountProviderStage::Failed);
+			return YouTubeAccountProviderRestoreStatus::InvalidProfileBinding;
+		}
 
 		lifecycleMutationInProgress_ = true;
 		operationEpoch_ = nextNonZero(operationEpoch_);
 		clearEphemeral();
 		try {
+			profileBinding_ = std::move(profileBinding);
+			profileBindingValid_ = true;
 			if (!selection.has_value()) {
 				coordinator_.invalidateContext();
+				savedSelection_.reset();
 				stage_ = YouTubeAccountProviderStage::Idle;
 				touch();
 				lifecycleMutationInProgress_ = false;
@@ -358,6 +381,7 @@ public:
 			const bool validSelection = validateYouTubeAccountSelection(*selection) ==
 						    YouTubeAccountSelectionValidationError::None;
 			if (!validSelection) {
+				savedSelection_.reset();
 				coordinator_.restoreSavedConnection(*selection,
 								    YouTubeAccountSavedCredentialState::Present);
 				stage_ = YouTubeAccountProviderStage::Failed;
@@ -366,7 +390,7 @@ public:
 				return YouTubeAccountProviderRestoreStatus::InvalidSelection;
 			}
 
-			const CredentialStatus credential = refreshTokenVault_.status();
+			const CredentialStatus credential = refreshTokenStore_.status(credentialScope(*selection));
 			YouTubeAccountSavedCredentialState savedCredential =
 				YouTubeAccountSavedCredentialState::Unavailable;
 			YouTubeAccountProviderRestoreStatus restoreStatus =
@@ -382,9 +406,15 @@ public:
 				savedCredential = YouTubeAccountSavedCredentialState::Missing;
 				restoreStatus = YouTubeAccountProviderRestoreStatus::ReauthorizationRequired;
 				restoredStage = YouTubeAccountProviderStage::NeedsReauthorization;
+			} else if (credential.state == CredentialState::NeedsReauthorization ||
+				   credential.result.error == CredentialError::ScopeMismatch) {
+				savedCredential = YouTubeAccountSavedCredentialState::Missing;
+				restoreStatus = YouTubeAccountProviderRestoreStatus::ReauthorizationRequired;
+				restoredStage = YouTubeAccountProviderStage::NeedsReauthorization;
 			}
 
 			coordinator_.restoreSavedConnection(*selection, savedCredential);
+			savedSelection_ = *selection;
 			stage_ = restoredStage;
 			touch();
 			lifecycleMutationInProgress_ = false;
@@ -394,6 +424,7 @@ public:
 				coordinator_.invalidateContext();
 			} catch (...) {
 			}
+			savedSelection_.reset();
 			stage_ = YouTubeAccountProviderStage::Failed;
 			touch();
 			lifecycleMutationInProgress_ = false;
@@ -440,6 +471,7 @@ public:
 			cancelPorts(*lease);
 		}
 		clearEphemeral();
+		savedSelection_.reset();
 		try {
 			coordinator_.invalidateContext();
 			setStage(YouTubeAccountProviderStage::Idle);
@@ -516,6 +548,11 @@ private:
 	bool isCurrent(std::uint64_t epoch, YouTubeAccountLease lease, YouTubeAccountProviderStage stage) const noexcept
 	{
 		return operationEpoch_ == epoch && stage_ == stage && leaseIsActive(lease);
+	}
+
+	YouTubeAccountCredentialScope credentialScope(const YouTubeAccountSelection &selection) const
+	{
+		return {profileBinding_, selection.channelId};
 	}
 
 	void setStage(YouTubeAccountProviderStage stage) noexcept
@@ -822,39 +859,47 @@ private:
 
 	bool persistConnection(YouTubeAccountLease lease, const YouTubeAccountSelection &selection) noexcept
 	{
-		if (commitInProgress_ || refreshToken_.empty() || !leaseIsActive(lease)) {
+		if (commitInProgress_ || refreshToken_.empty() || !leaseIsActive(lease) || !profileBindingValid_) {
 			failAttempt(lease, YouTubeAccountFailure::InvalidResponse);
 			return false;
 		}
 
 		commitInProgress_ = true;
+		std::optional<YouTubeAccountSelection> previousSelection;
+		std::optional<YouTubeAccountSelection> nextSelection;
+		std::optional<YouTubeAccountCredentialScope> previousScope;
 		CredentialReadResult previous;
+		YouTubeAccountCredentialScope scope;
 		try {
-			previous = refreshTokenVault_.read();
+			previousSelection = savedSelection_;
+			nextSelection = selection;
+			scope = credentialScope(selection);
+			if (previousSelection.has_value()) {
+				previousScope = credentialScope(*previousSelection);
+				previous = refreshTokenStore_.read(*previousScope);
+			} else {
+				// A profile with no saved selection has no owned prior account
+				// credential. Do not inspect another channel's shared target.
+				previous.result = {CredentialError::NotFound, 0};
+			}
 		} catch (...) {
 			commitInProgress_ = false;
 			failAttempt(lease, YouTubeAccountFailure::CredentialUnavailable);
 			return false;
 		}
-		const bool credentialWasMissing = previous.result.error == CredentialError::NotFound;
-		if (!previous.result.succeeded() && !credentialWasMissing) {
+		const bool previousCredentialPresent = previous.result.succeeded();
+		const bool previousCredentialMissing = previous.result.error == CredentialError::NotFound ||
+						       previous.result.error == CredentialError::ScopeMismatch ||
+						       previous.result.error == CredentialError::CorruptData;
+		if (!previousCredentialPresent && !previousCredentialMissing) {
 			commitInProgress_ = false;
 			failAttempt(lease, YouTubeAccountFailure::CredentialUnavailable);
 			return false;
 		}
 
-		CredentialResult writeResult;
-		try {
-			writeResult = refreshTokenVault_.write(refreshToken_.view());
-		} catch (...) {
-			writeResult.error = CredentialError::OperatingSystemError;
-		}
-		if (!writeResult.succeeded()) {
-			commitInProgress_ = false;
-			failAttempt(lease, YouTubeAccountFailure::CredentialUnavailable);
-			return false;
-		}
-
+		// Save the non-secret selection first. This makes the profile the source
+		// of truth while the new refresh token is being staged. If the token
+		// write fails, restore the exact prior optional selection synchronously.
 		bool selectionSaved = false;
 		try {
 			selectionSaved = selectionCommitter_(selection);
@@ -862,10 +907,23 @@ private:
 			selectionSaved = false;
 		}
 		if (!selectionSaved) {
-			const bool rolledBack = rollbackCredential(previous, credentialWasMissing);
 			commitInProgress_ = false;
-			refreshToken_.clear();
-			if (!rolledBack) {
+			previous.secret.clear();
+			failAttempt(lease, YouTubeAccountFailure::CredentialUnavailable);
+			return false;
+		}
+
+		CredentialResult writeResult;
+		try {
+			writeResult = refreshTokenStore_.write(scope, refreshToken_.view());
+		} catch (...) {
+			writeResult.error = CredentialError::OperatingSystemError;
+		}
+		if (!writeResult.succeeded()) {
+			const bool selectionRolledBack = rollbackSelection(previousSelection);
+			previous.secret.clear();
+			commitInProgress_ = false;
+			if (!selectionRolledBack) {
 				failCredentialStateUncertain(lease);
 			} else {
 				failAttempt(lease, YouTubeAccountFailure::CredentialUnavailable);
@@ -880,13 +938,25 @@ private:
 		commitInProgress_ = false;
 		refreshToken_.clear();
 		if (!committed) {
-			// The non-secret profile is already saved. Do not claim either the old
-			// or new account is usable if the invariant was violated.
-			rollbackCredential(previous, credentialWasMissing);
-			failCredentialStateUncertain(lease);
+			// The non-secret profile and scoped credential are already saved. Do not
+			// claim either the old or new account is usable if the invariant was
+			// violated. Restore both durable stores before failing closed.
+			const bool credentialRolledBack =
+				rollbackCredential(scope, previousScope, previous, previousCredentialPresent);
+			const bool selectionRolledBack = rollbackSelection(previousSelection);
+			previous.secret.clear();
+			if (!credentialRolledBack || !selectionRolledBack) {
+				failCredentialStateUncertain(lease);
+			} else {
+				failAttempt(lease, YouTubeAccountFailure::CredentialUnavailable);
+			}
 			return false;
 		}
 		previous.secret.clear();
+		// nextSelection was prepared before any durable side effect, so this
+		// move cannot allocate. The saved-selection cache advances only after
+		// the coordinator's visibility commit succeeds.
+		savedSelection_ = std::move(nextSelection);
 
 		channels_.clear();
 		streams_.clear();
@@ -896,17 +966,35 @@ private:
 		return true;
 	}
 
-	bool rollbackCredential(CredentialReadResult &previous, bool credentialWasMissing) noexcept
+	bool rollbackCredential(const YouTubeAccountCredentialScope &newScope,
+				const std::optional<YouTubeAccountCredentialScope> &previousScope,
+				CredentialReadResult &previous, bool previousCredentialPresent) noexcept
 	{
 		CredentialResult result;
 		try {
-			result = credentialWasMissing ? refreshTokenVault_.erase()
-						      : refreshTokenVault_.write(previous.secret.view());
+			if (previousCredentialPresent && previousScope.has_value()) {
+				// The Windows target is profile-scoped and the channel binding is
+				// carried in the credential metadata. Writing the old scope restores
+				// the single record; deleting the new scope here would target the same
+				// record and report ScopeMismatch after the restore.
+				result = refreshTokenStore_.write(*previousScope, previous.secret.view());
+			} else {
+				result = refreshTokenStore_.erase(newScope);
+			}
 		} catch (...) {
 			result.error = CredentialError::OperatingSystemError;
 		}
 		previous.secret.clear();
-		return result.succeeded() || (credentialWasMissing && result.error == CredentialError::NotFound);
+		return result.succeeded() || (!previousCredentialPresent && result.error == CredentialError::NotFound);
+	}
+
+	bool rollbackSelection(const std::optional<YouTubeAccountSelection> &previous) noexcept
+	{
+		try {
+			return selectionCommitter_(previous);
+		} catch (...) {
+			return false;
+		}
 	}
 
 	void failCredentialStateUncertain(YouTubeAccountLease lease) noexcept
@@ -916,6 +1004,7 @@ private:
 		operationEpoch_ = nextNonZero(operationEpoch_);
 		cancelPorts(lease);
 		clearEphemeral();
+		savedSelection_.reset();
 		try {
 			coordinator_.credentialStateUncertain(lease);
 		} catch (...) {
@@ -929,7 +1018,9 @@ private:
 	std::unique_ptr<YouTubeAccountAuthorizationPort> authorizationPort_;
 	std::unique_ptr<YouTubeAccountTokenPort> tokenPort_;
 	std::unique_ptr<YouTubeAccountDiscoveryPort> discoveryPort_;
-	YouTubeAccountRefreshTokenVault &refreshTokenVault_;
+	YouTubeAccountRefreshTokenStore &refreshTokenStore_;
+	std::string profileBinding_;
+	bool profileBindingValid_ = false;
 	YouTubeAccountSelectionCommitter selectionCommitter_;
 	YouTubeAccountCoordinator coordinator_;
 	YouTubeAccountProviderStage stage_ = YouTubeAccountProviderStage::Idle;
@@ -941,17 +1032,19 @@ private:
 	std::vector<YouTubeReusableStream> streams_;
 	std::optional<YouTubeOwnedChannel> selectedChannel_;
 	std::optional<YouTubeReusableStream> selectedStream_;
+	std::optional<YouTubeAccountSelection> savedSelection_;
 	bool commitInProgress_ = false;
 	bool lifecycleMutationInProgress_ = false;
 };
 
 YouTubeAccountProvider::YouTubeAccountProvider(QString clientId,
 					       GoogleOAuthAuthorizationSession::BrowserOpener browserOpener,
-					       YouTubeAccountRefreshTokenVault &refreshTokenVault,
+					       YouTubeAccountRefreshTokenStore &refreshTokenStore,
+					       std::string profileBinding,
 					       YouTubeAccountSelectionCommitter selectionCommitter, QObject *parent)
 	: YouTubeAccountProvider(std::move(clientId), std::make_unique<AuthorizationAdapter>(std::move(browserOpener)),
 				 std::make_unique<TokenAdapter>(), std::make_unique<DiscoveryAdapter>(),
-				 refreshTokenVault, std::move(selectionCommitter), parent)
+				 refreshTokenStore, std::move(profileBinding), std::move(selectionCommitter), parent)
 {
 }
 
@@ -959,11 +1052,13 @@ YouTubeAccountProvider::YouTubeAccountProvider(QString clientId,
 					       std::unique_ptr<YouTubeAccountAuthorizationPort> authorizationPort,
 					       std::unique_ptr<YouTubeAccountTokenPort> tokenPort,
 					       std::unique_ptr<YouTubeAccountDiscoveryPort> discoveryPort,
-					       YouTubeAccountRefreshTokenVault &refreshTokenVault,
+					       YouTubeAccountRefreshTokenStore &refreshTokenStore,
+					       std::string profileBinding,
 					       YouTubeAccountSelectionCommitter selectionCommitter, QObject *parent)
 	: QObject(parent),
 	  impl_(std::make_unique<Impl>(this, std::move(clientId), std::move(authorizationPort), std::move(tokenPort),
-				       std::move(discoveryPort), refreshTokenVault, std::move(selectionCommitter)))
+				       std::move(discoveryPort), refreshTokenStore, std::move(profileBinding),
+				       std::move(selectionCommitter)))
 {
 }
 
@@ -991,9 +1086,10 @@ YouTubeAccountProviderSelectionStatus YouTubeAccountProvider::selectStream(YouTu
 }
 
 YouTubeAccountProviderRestoreStatus
-YouTubeAccountProvider::restoreSavedState(std::optional<YouTubeAccountSelection> selection) noexcept
+YouTubeAccountProvider::restoreSavedState(std::string profileBinding,
+					  std::optional<YouTubeAccountSelection> selection) noexcept
 {
-	return impl_->restoreSavedState(std::move(selection));
+	return impl_->restoreSavedState(std::move(profileBinding), std::move(selection));
 }
 
 bool YouTubeAccountProvider::cancel(YouTubeAccountLease lease) noexcept

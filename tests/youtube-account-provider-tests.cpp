@@ -26,11 +26,13 @@ public:
 	YouTubeAccountProviderTestAccess(std::unique_ptr<YouTubeAccountAuthorizationPort> authorization,
 					 std::unique_ptr<YouTubeAccountTokenPort> token,
 					 std::unique_ptr<YouTubeAccountDiscoveryPort> discovery,
-					 YouTubeAccountRefreshTokenVault &vault,
+					 YouTubeAccountRefreshTokenStore &store, std::string profileBinding,
 					 YouTubeAccountSelectionCommitter committer,
 					 QString clientId = QStringLiteral("test-client-id"))
 		: provider_(new YouTubeAccountProvider(std::move(clientId), std::move(authorization), std::move(token),
-						       std::move(discovery), vault, std::move(committer), nullptr))
+						       std::move(discovery), store, profileBinding,
+						       std::move(committer), nullptr)),
+		  profileBinding_(std::move(profileBinding))
 	{
 	}
 
@@ -49,7 +51,12 @@ public:
 	}
 	YouTubeAccountProviderRestoreStatus restoreSavedState(std::optional<YouTubeAccountSelection> selection) noexcept
 	{
-		return provider_->restoreSavedState(std::move(selection));
+		return provider_->restoreSavedState(profileBinding_, std::move(selection));
+	}
+	YouTubeAccountProviderRestoreStatus restoreSavedState(std::string profileBinding,
+							      std::optional<YouTubeAccountSelection> selection) noexcept
+	{
+		return provider_->restoreSavedState(std::move(profileBinding), std::move(selection));
 	}
 	bool cancel(YouTubeAccountLease lease) noexcept { return provider_->cancel(lease); }
 	bool invalidateContext() noexcept { return provider_->invalidateContext(); }
@@ -58,6 +65,7 @@ public:
 
 private:
 	std::unique_ptr<YouTubeAccountProvider> provider_;
+	std::string profileBinding_;
 };
 
 } // namespace easy_multistream
@@ -79,7 +87,7 @@ using easy_multistream::CredentialReadResult;
 using easy_multistream::CredentialResult;
 using easy_multistream::CredentialState;
 using easy_multistream::CredentialStatus;
-using easy_multistream::CredentialVault;
+using easy_multistream::YouTubeAccountCredentialScope;
 using easy_multistream::GoogleOAuthAuthorizationCompletion;
 using easy_multistream::GoogleOAuthAuthorizationCompletionStatus;
 using easy_multistream::GoogleOAuthAuthorizationStartStatus;
@@ -101,7 +109,7 @@ using easy_multistream::YouTubeAccountProviderRestoreStatus;
 using easy_multistream::YouTubeAccountProviderSnapshot;
 using easy_multistream::YouTubeAccountProviderStage;
 using easy_multistream::YouTubeAccountProviderStartStatus;
-using easy_multistream::YouTubeAccountRefreshTokenVault;
+using easy_multistream::YouTubeAccountRefreshTokenStore;
 using easy_multistream::YouTubeAccountSelection;
 using easy_multistream::YouTubeApiPagedCompletion;
 using easy_multistream::YouTubeApiPagerStartStatus;
@@ -121,6 +129,8 @@ constexpr char kAccessToken[] = "access-token-sentinel";
 constexpr char kRefreshToken[] = "refresh-token-sentinel";
 constexpr char kAuthorizationCode[] = "authorization-code-sentinel";
 constexpr char kVerifier[] = "verifier-sentinel-012345678901234567890123456789012345";
+constexpr char kProfileA[] = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+constexpr char kProfileB[] = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
 YouTubeAccountSelection savedSelection(const char *suffix)
 {
@@ -422,58 +432,125 @@ public:
 	CompletionHandler streamHandler;
 };
 
-class FakeCredentialVault final : public YouTubeAccountRefreshTokenVault {
+class FakeCredentialStore final : public YouTubeAccountRefreshTokenStore {
 public:
-	CredentialResult write(std::string_view value) noexcept override
+	struct Record final {
+		YouTubeAccountCredentialScope scope;
+		SecureBuffer secret;
+	};
+
+	CredentialResult write(const YouTubeAccountCredentialScope &scope, std::string_view value) noexcept override
 	{
 		++writeCount;
+		writeScopes.push_back(scope);
 		lastWritten = SecureBuffer::copyOf(value);
 		if (writeError != CredentialError::None ||
 		    (failWriteOnCall.has_value() && writeCount == *failWriteOnCall)) {
 			return {writeError == CredentialError::None ? CredentialError::Unavailable : writeError, 1};
 		}
+		Record *record = findByProfile(scope.profileBinding);
+		if (record == nullptr) {
+			records.push_back({scope, SecureBuffer{}});
+			record = &records.back();
+		}
+		record->scope = scope;
+		record->secret = SecureBuffer::copyOf(value);
 		stored = SecureBuffer::copyOf(value);
 		return {};
 	}
 
-	CredentialReadResult read() noexcept override
+	CredentialReadResult read(const YouTubeAccountCredentialScope &scope) noexcept override
 	{
 		++readCount;
+		readScopes.push_back(scope);
 		if (readError != CredentialError::None) {
 			return {{readError, 1}, {}};
 		}
-		if (stored.empty()) {
+		const Record *record = findByProfile(scope.profileBinding);
+		if (record == nullptr || record->secret.empty()) {
 			return {{CredentialError::NotFound, 0}, {}};
 		}
-		return {{}, SecureBuffer::copyOf(stored.view())};
+		if (record->scope.channelId != scope.channelId) {
+			return {{CredentialError::ScopeMismatch, 1}, {}};
+		}
+		return {{}, SecureBuffer::copyOf(record->secret.view())};
 	}
 
-	CredentialResult erase() noexcept override
+	CredentialResult erase(const YouTubeAccountCredentialScope &scope) noexcept override
 	{
 		++eraseCount;
-		stored.clear();
+		eraseScopes.push_back(scope);
 		if (eraseError != CredentialError::None) {
 			return {eraseError, 1};
 		}
+		Record *record = findByProfile(scope.profileBinding);
+		if (record == nullptr || record->secret.empty()) {
+			return {};
+		}
+		if (record->scope.channelId != scope.channelId) {
+			return {CredentialError::ScopeMismatch, 1};
+		}
+		record->secret.clear();
+		stored.clear();
 		return {};
 	}
 
-	CredentialStatus status() noexcept override
+	CredentialStatus status(const YouTubeAccountCredentialScope &scope) noexcept override
 	{
 		++statusCount;
+		statusScopes.push_back(scope);
 		if (onStatus) {
 			onStatus();
 		}
 		if (forcedStatus.has_value()) {
 			return *forcedStatus;
 		}
-		if (statusState == CredentialState::Present) {
-			return {CredentialState::Present, {}};
-		}
-		if (statusState == CredentialState::Missing) {
+		const Record *record = findByProfile(scope.profileBinding);
+		if (record == nullptr || record->secret.empty()) {
 			return {CredentialState::Missing, {CredentialError::NotFound, 0}};
 		}
-		return {CredentialState::Unavailable, {CredentialError::Unavailable, 1}};
+		if (record->scope.channelId != scope.channelId) {
+			return {CredentialState::NeedsReauthorization, {CredentialError::ScopeMismatch, 1}};
+		}
+		return {CredentialState::Present, {}};
+	}
+
+	void forceStatus(CredentialState state)
+	{
+		if (state == CredentialState::Present) {
+			forcedStatus = CredentialStatus{CredentialState::Present, {}};
+		} else if (state == CredentialState::Missing) {
+			forcedStatus = CredentialStatus{CredentialState::Missing, {CredentialError::NotFound, 0}};
+		} else if (state == CredentialState::NeedsReauthorization) {
+			forcedStatus =
+				CredentialStatus{CredentialState::NeedsReauthorization, {CredentialError::ScopeMismatch, 1}};
+		} else {
+			forcedStatus = CredentialStatus{CredentialState::Unavailable, {CredentialError::Unavailable, 1}};
+		}
+	}
+
+	/*
+	 * Records model the production Windows store: one target per profile and
+	 * the current channel binding in credential metadata.
+	 */
+	Record *findByProfile(std::string_view profileBinding) noexcept
+	{
+		for (Record &record : records) {
+			if (record.scope.profileBinding == profileBinding) {
+				return &record;
+			}
+		}
+		return nullptr;
+	}
+
+	const Record *findByProfile(std::string_view profileBinding) const noexcept
+	{
+		for (const Record &record : records) {
+			if (record.scope.profileBinding == profileBinding) {
+				return &record;
+			}
+		}
+		return nullptr;
 	}
 
 	int writeCount = 0;
@@ -486,19 +563,26 @@ public:
 	std::optional<int> failWriteOnCall;
 	CredentialError readError = CredentialError::None;
 	CredentialError eraseError = CredentialError::None;
-	CredentialState statusState = CredentialState::Missing;
 	std::optional<CredentialStatus> forcedStatus;
 	std::function<void()> onStatus;
+	std::vector<Record> records;
+	std::vector<YouTubeAccountCredentialScope> writeScopes;
+	std::vector<YouTubeAccountCredentialScope> readScopes;
+	std::vector<YouTubeAccountCredentialScope> eraseScopes;
+	std::vector<YouTubeAccountCredentialScope> statusScopes;
 };
 
 struct Fixture final {
 	std::unique_ptr<FakeAuthorizationPort> authorization;
 	std::unique_ptr<FakeTokenPort> token;
 	std::unique_ptr<FakeDiscoveryPort> discovery;
-	FakeCredentialVault vault;
+	FakeCredentialStore vault;
+	std::string profileBinding = kProfileA;
 	bool commitResult = true;
 	int commitCount = 0;
+	std::optional<int> failCommitOnCall;
 	std::optional<easy_multistream::YouTubeAccountSelection> committedSelection;
+	std::vector<std::optional<easy_multistream::YouTubeAccountSelection>> commitHistory;
 	std::unique_ptr<YouTubeAccountProviderTestAccess> provider;
 
 	Fixture()
@@ -510,9 +594,13 @@ struct Fixture final {
 		FakeTokenPort *tokenPointer = token.get();
 		FakeDiscoveryPort *discoveryPointer = discovery.get();
 		provider = std::make_unique<YouTubeAccountProviderTestAccess>(
-			std::move(authorization), std::move(token), std::move(discovery), vault,
-			[this](const easy_multistream::YouTubeAccountSelection &selection) {
+			std::move(authorization), std::move(token), std::move(discovery), vault, profileBinding,
+			[this](const std::optional<easy_multistream::YouTubeAccountSelection> &selection) {
 				++commitCount;
+				commitHistory.push_back(selection);
+				if (failCommitOnCall.has_value() && commitCount == *failCommitOnCall) {
+					return false;
+				}
 				if (commitResult) {
 					committedSelection = selection;
 				}
@@ -789,7 +877,11 @@ void testVaultAndSelectionCommitFailuresDoNotPublishConnection()
 		fixture.discoveryPointer->completeStreams(streamPage({{"stream", "channel", "Stream"}}));
 		CHECK(fixture.provider->snapshot().stage != YouTubeAccountProviderStage::Connected);
 		CHECK(fixture.provider->snapshot().account.state != easy_multistream::YouTubeAccountState::Connected);
-		CHECK(fixture.commitCount == 0);
+		CHECK(fixture.commitCount == 2);
+		CHECK(!fixture.committedSelection.has_value());
+		CHECK(fixture.commitHistory.size() == 2);
+		CHECK(fixture.commitHistory.front().has_value());
+		CHECK(!fixture.commitHistory.back().has_value());
 	}
 
 	{
@@ -801,8 +893,8 @@ void testVaultAndSelectionCommitFailuresDoNotPublishConnection()
 		CHECK(fixture.commitCount == 1);
 		CHECK(fixture.provider->snapshot().stage != YouTubeAccountProviderStage::Connected);
 		CHECK(fixture.provider->snapshot().account.state != easy_multistream::YouTubeAccountState::Connected);
-		CHECK(fixture.vault.writeCount == 1);
-		CHECK(fixture.vault.eraseCount == 1);
+		CHECK(fixture.vault.writeCount == 0);
+		CHECK(fixture.vault.eraseCount == 0);
 		CHECK(fixture.vault.stored.empty());
 	}
 }
@@ -853,8 +945,8 @@ void testReplacementRollbackRestoresOldCredentialAndFailsClosedWhenItCannot()
 	{
 		Fixture fixture;
 		connectFixture(fixture);
-		fixture.commitResult = false;
-		fixture.vault.failWriteOnCall = fixture.vault.writeCount + 2;
+		fixture.vault.failWriteOnCall = fixture.vault.writeCount + 1;
+		fixture.failCommitOnCall = fixture.commitCount + 2;
 
 		CHECK(fixture.provider->startConnection() == YouTubeAccountProviderStartStatus::Started);
 		completeAuthorization(fixture);
@@ -927,6 +1019,9 @@ void testCredentialReadFailureAndContextInvalidationDoNotPersist()
 {
 	{
 		Fixture fixture;
+		fixture.vault.forceStatus(CredentialState::Present);
+		CHECK(fixture.provider->restoreSavedState(kProfileA, savedSelection("prior")) ==
+		      YouTubeAccountProviderRestoreStatus::Configured);
 		fixture.vault.readError = CredentialError::AccessDenied;
 		startAndReachChannelListing(fixture);
 		fixture.discoveryPointer->completeChannels(channelPage({{"channel", "Channel"}}));
@@ -953,6 +1048,38 @@ void testCredentialReadFailureAndContextInvalidationDoNotPersist()
 		CHECK(fixture.vault.writeCount == 0);
 		CHECK(fixture.provider->snapshot().stage == YouTubeAccountProviderStage::Idle);
 	}
+}
+
+void testExplicitReauthorizationReplacesCorruptCredential()
+{
+	Fixture fixture;
+	const auto prior = savedSelection("corrupt");
+	fixture.vault.forcedStatus =
+		CredentialStatus{CredentialState::NeedsReauthorization, {CredentialError::CorruptData, 1}};
+	CHECK(fixture.provider->restoreSavedState(kProfileA, prior) ==
+	      YouTubeAccountProviderRestoreStatus::ReauthorizationRequired);
+	CHECK(fixture.provider->snapshot().stage == YouTubeAccountProviderStage::NeedsReauthorization);
+
+	fixture.vault.forcedStatus.reset();
+	fixture.vault.readError = CredentialError::CorruptData;
+	startAndReachChannelListing(fixture);
+	fixture.discoveryPointer->completeChannels(channelPage({{"replacement-channel", "Replacement channel"}}));
+	fixture.discoveryPointer->completeStreams(
+		streamPage({{"replacement-stream", "replacement-channel", "Replacement stream"}}));
+
+	const auto snapshot = fixture.provider->snapshot();
+	CHECK(snapshot.stage == YouTubeAccountProviderStage::Connected);
+	CHECK(snapshot.account.state == easy_multistream::YouTubeAccountState::Connected);
+	CHECK(snapshot.account.channelId == "replacement-channel");
+	CHECK(snapshot.account.streamId == "replacement-stream");
+	CHECK(fixture.vault.writeCount == 1);
+	CHECK(!fixture.vault.writeScopes.empty());
+	if (!fixture.vault.writeScopes.empty()) {
+		CHECK(fixture.vault.writeScopes.back().profileBinding == kProfileA);
+		CHECK(fixture.vault.writeScopes.back().channelId == "replacement-channel");
+	}
+	CHECK(fixture.committedSelection.has_value());
+	CHECK(fixture.committedSelection->channelId == "replacement-channel");
 }
 
 void testCancelAtEachActiveStageSuppressesLateCallbacks()
@@ -1052,7 +1179,7 @@ void testSavedStateRestoreUsesOnlyCredentialStatus()
 {
 	{
 		Fixture fixture;
-		fixture.vault.statusState = CredentialState::Present;
+		fixture.vault.forceStatus(CredentialState::Present);
 		const YouTubeAccountSelection selection = savedSelection("saved");
 		CHECK(fixture.provider->restoreSavedState(selection) ==
 		      YouTubeAccountProviderRestoreStatus::Configured);
@@ -1073,7 +1200,7 @@ void testSavedStateRestoreUsesOnlyCredentialStatus()
 
 	{
 		Fixture fixture;
-		fixture.vault.statusState = CredentialState::Present;
+		fixture.vault.forceStatus(CredentialState::Present);
 		CHECK(fixture.provider->restoreSavedState(std::nullopt) ==
 		      YouTubeAccountProviderRestoreStatus::SetupRequired);
 		const auto snapshot = fixture.provider->snapshot();
@@ -1087,7 +1214,7 @@ void testSavedStateRestoreUsesOnlyCredentialStatus()
 
 	{
 		Fixture fixture;
-		fixture.vault.statusState = CredentialState::Missing;
+		fixture.vault.forceStatus(CredentialState::Missing);
 		const YouTubeAccountSelection selection = savedSelection("missing");
 		CHECK(fixture.provider->restoreSavedState(selection) ==
 		      YouTubeAccountProviderRestoreStatus::ReauthorizationRequired);
@@ -1104,7 +1231,7 @@ void testSavedStateRestoreUsesOnlyCredentialStatus()
 
 	{
 		Fixture fixture;
-		fixture.vault.statusState = CredentialState::Unavailable;
+		fixture.vault.forceStatus(CredentialState::Unavailable);
 		const YouTubeAccountSelection selection = savedSelection("unavailable");
 		CHECK(fixture.provider->restoreSavedState(selection) ==
 		      YouTubeAccountProviderRestoreStatus::CredentialUnavailable);
@@ -1161,9 +1288,9 @@ void testSavedStateRestoreInvalidatesOldProfileWork()
 	CHECK(fixture.vault.statusCount == 0);
 	CHECK(fixture.provider->invalidateContext());
 
-	fixture.vault.statusState = CredentialState::Present;
+	fixture.vault.forceStatus(CredentialState::Present);
 	const auto restoredSelection = savedSelection("new-profile");
-	CHECK(fixture.provider->restoreSavedState(restoredSelection) ==
+	CHECK(fixture.provider->restoreSavedState(kProfileB, restoredSelection) ==
 	      YouTubeAccountProviderRestoreStatus::Configured);
 	const auto restored = fixture.provider->snapshot();
 	CHECK(restored.account.connectionLease.has_value());
@@ -1181,7 +1308,7 @@ void testSavedStateRestoreInvalidatesOldProfileWork()
 void testConfiguredReauthorizationPreservesSavedConnectionUntilSuccess()
 {
 	Fixture fixture;
-	fixture.vault.statusState = CredentialState::Present;
+	fixture.vault.forceStatus(CredentialState::Present);
 	const YouTubeAccountSelection saved = savedSelection("saved");
 	CHECK(fixture.provider->restoreSavedState(saved) == YouTubeAccountProviderRestoreStatus::Configured);
 	const YouTubeAccountLease savedLease =
@@ -1223,19 +1350,19 @@ void testSavedStateRestoreReevaluatesCredentialPresence()
 {
 	Fixture fixture;
 	const YouTubeAccountSelection selection = savedSelection("repeat");
-	fixture.vault.statusState = CredentialState::Missing;
+	fixture.vault.forceStatus(CredentialState::Missing);
 	CHECK(fixture.provider->restoreSavedState(selection) ==
 	      YouTubeAccountProviderRestoreStatus::ReauthorizationRequired);
 	const std::uint64_t missingGeneration = fixture.provider->snapshot().account.generation;
 
-	fixture.vault.statusState = CredentialState::Present;
+	fixture.vault.forceStatus(CredentialState::Present);
 	CHECK(fixture.provider->restoreSavedState(selection) == YouTubeAccountProviderRestoreStatus::Configured);
 	const auto connected = fixture.provider->snapshot();
 	CHECK(connected.account.generation != missingGeneration);
 	CHECK(connected.account.connectionLease.has_value());
 	const YouTubeAccountLease connectedLease = connected.account.connectionLease.value_or(YouTubeAccountLease{});
 
-	fixture.vault.statusState = CredentialState::Missing;
+	fixture.vault.forceStatus(CredentialState::Missing);
 	CHECK(fixture.provider->restoreSavedState(selection) ==
 	      YouTubeAccountProviderRestoreStatus::ReauthorizationRequired);
 	const auto missingAgain = fixture.provider->snapshot();
@@ -1272,7 +1399,7 @@ void testSavedStateRestoreIsThreadBoundAndReentrySafe()
 	std::optional<YouTubeAccountProviderStartStatus> nestedStart;
 	std::optional<YouTubeAccountProviderRestoreStatus> nestedRestore;
 	std::optional<bool> nestedShutdown;
-	fixture.vault.statusState = CredentialState::Present;
+	fixture.vault.forceStatus(CredentialState::Present);
 	fixture.vault.onStatus = [&]() {
 		nestedStart = fixture.provider->startConnection();
 		nestedRestore = fixture.provider->restoreSavedState(savedSelection("nested"));
@@ -1290,6 +1417,68 @@ void testSavedStateRestoreIsThreadBoundAndReentrySafe()
 	CHECK(fixture.provider->restoreSavedState(savedSelection("closed")) ==
 	      YouTubeAccountProviderRestoreStatus::Closed);
 	CHECK(fixture.vault.statusCount == 1);
+}
+
+void testProfileAndChannelScopeRoutingAndMismatch()
+{
+	Fixture fixture;
+	connectFixture(fixture, "channel-a", "stream-a");
+	CHECK(!fixture.vault.writeScopes.empty());
+	if (!fixture.vault.writeScopes.empty()) {
+		const auto &scope = fixture.vault.writeScopes.back();
+		CHECK(scope.profileBinding == kProfileA);
+		CHECK(scope.channelId == "channel-a");
+	}
+
+	const YouTubeAccountSelection restored{"channel-a", "Channel A", "stream-a", "Stream A"};
+	CHECK(fixture.provider->restoreSavedState(kProfileB, restored) ==
+	      YouTubeAccountProviderRestoreStatus::ReauthorizationRequired);
+	CHECK(!fixture.vault.statusScopes.empty());
+	if (!fixture.vault.statusScopes.empty()) {
+		const auto &scope = fixture.vault.statusScopes.back();
+		CHECK(scope.profileBinding == kProfileB);
+		CHECK(scope.channelId == restored.channelId);
+	}
+	CHECK(fixture.provider->restoreSavedState(kProfileA, restored) ==
+	      YouTubeAccountProviderRestoreStatus::Configured);
+	CHECK(fixture.vault.statusScopes.back().profileBinding == kProfileA);
+	CHECK(fixture.vault.statusScopes.back().channelId == "channel-a");
+
+	fixture.vault.forcedStatus =
+		CredentialStatus{CredentialState::NeedsReauthorization, {CredentialError::ScopeMismatch, 1}};
+	const auto mismatched = savedSelection("mismatch");
+	CHECK(fixture.provider->restoreSavedState(kProfileB, mismatched) ==
+	      YouTubeAccountProviderRestoreStatus::ReauthorizationRequired);
+	CHECK(fixture.provider->snapshot().stage == YouTubeAccountProviderStage::NeedsReauthorization);
+	CHECK(fixture.vault.statusScopes.back().profileBinding == kProfileB);
+	CHECK(fixture.vault.statusScopes.back().channelId == mismatched.channelId);
+
+	CHECK(fixture.provider->restoreSavedState(kProfileA, std::nullopt) ==
+	      YouTubeAccountProviderRestoreStatus::SetupRequired);
+	const std::size_t statusCount = fixture.vault.statusScopes.size();
+	CHECK(fixture.provider->restoreSavedState(kProfileB, std::nullopt) ==
+	      YouTubeAccountProviderRestoreStatus::SetupRequired);
+	CHECK(fixture.vault.statusScopes.size() == statusCount);
+}
+
+void testInvalidProfileBindingFailsClosedWithoutCredentialAccess()
+{
+	Fixture fixture;
+	const std::string invalid(64U, 'A');
+	CHECK(fixture.provider->restoreSavedState(invalid, savedSelection("invalid-profile")) ==
+	      YouTubeAccountProviderRestoreStatus::InvalidProfileBinding);
+	CHECK(fixture.provider->snapshot().stage == YouTubeAccountProviderStage::Failed);
+	CHECK(fixture.vault.statusCount == 0);
+	CHECK(fixture.provider->startConnection() == YouTubeAccountProviderStartStatus::InvalidProfileBinding);
+	checkNoConnectionPortsStarted(fixture);
+
+	FakeCredentialStore store;
+	YouTubeAccountProviderTestAccess provider(std::make_unique<FakeAuthorizationPort>(),
+						  std::make_unique<FakeTokenPort>(),
+						  std::make_unique<FakeDiscoveryPort>(), store, invalid,
+						  [](const std::optional<YouTubeAccountSelection> &) { return true; });
+	CHECK(provider.startConnection() == YouTubeAccountProviderStartStatus::InvalidProfileBinding);
+	CHECK(store.statusCount == 0);
 }
 
 void testFailureCleanupRejectsSynchronousLifecycleReentry()
@@ -1315,12 +1504,12 @@ void testFailureCleanupRejectsSynchronousLifecycleReentry()
 
 void testInvalidStartAndCommitterFailureDoNotMutateState()
 {
-	FakeCredentialVault vault;
+	FakeCredentialStore vault;
 	int commits = 0;
 	YouTubeAccountProviderTestAccess provider(
 		std::make_unique<FakeAuthorizationPort>(), std::make_unique<FakeTokenPort>(),
-		std::make_unique<FakeDiscoveryPort>(), vault,
-		[&](const easy_multistream::YouTubeAccountSelection &) {
+		std::make_unique<FakeDiscoveryPort>(), vault, kProfileA,
+		[&](const std::optional<easy_multistream::YouTubeAccountSelection> &) {
 			++commits;
 			return true;
 		},
@@ -1345,6 +1534,7 @@ int main(int argc, char **argv)
 	testReplacementRollbackRestoresOldCredentialAndFailsClosedWhenItCannot();
 	testSynchronousStartFailuresAndMissingRefreshTokenTerminate();
 	testCredentialReadFailureAndContextInvalidationDoNotPersist();
+	testExplicitReauthorizationReplacesCorruptCredential();
 	testCancelAtEachActiveStageSuppressesLateCallbacks();
 	testStaleOldAttemptCannotReplaceNewAttempt();
 	testInvalidSelectionLeaseAndShutdownAreSafe();
@@ -1354,6 +1544,8 @@ int main(int argc, char **argv)
 	testConfiguredReauthorizationPreservesSavedConnectionUntilSuccess();
 	testSavedStateRestoreReevaluatesCredentialPresence();
 	testSavedStateRestoreIsThreadBoundAndReentrySafe();
+	testProfileAndChannelScopeRoutingAndMismatch();
+	testInvalidProfileBindingFailsClosedWithoutCredentialAccess();
 	testFailureCleanupRejectsSynchronousLifecycleReentry();
 	testInvalidStartAndCommitterFailureDoNotMutateState();
 

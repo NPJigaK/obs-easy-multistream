@@ -15,6 +15,7 @@
 #include <iostream>
 #include <iterator>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -22,6 +23,8 @@ namespace {
 
 int failures = 0;
 constexpr std::string_view kValidYouTubeServerUrl = "rtmps://a.rtmps.youtube.com/live2";
+constexpr wchar_t kLegacyYouTubeAccountRefreshTokenTarget[] =
+	L"NPJigaK/obs-easy-multistream/v1/youtube-account-refresh-token";
 
 easy_multistream::YouTubeAccountSelection accountSelection()
 {
@@ -64,12 +67,16 @@ public:
 		writeType = credential->Type;
 		writePersist = credential->Persist;
 		writeTarget = credential->TargetName != nullptr ? credential->TargetName : L"";
+		writeUserName = credential->UserName != nullptr ? credential->UserName : L"";
+		writeTargets.push_back(writeTarget);
+		writeUserNames.push_back(writeUserName);
 		if (credential->CredentialBlob != nullptr && credential->CredentialBlobSize != 0) {
 			writeBlob.assign(credential->CredentialBlob,
 					 credential->CredentialBlob + credential->CredentialBlobSize);
 		} else {
 			writeBlob.clear();
 		}
+		writeBlobs.push_back(writeBlob);
 		error = writeError;
 		return writeSucceeds;
 	}
@@ -78,6 +85,7 @@ public:
 	{
 		++readCalls;
 		readTarget = targetName != nullptr ? targetName : L"";
+		readTargets.push_back(readTarget);
 		readType = type;
 		readFlags = flags;
 		error = readError;
@@ -92,6 +100,13 @@ public:
 							    ? static_cast<DWORD>(readBlob.size())
 							    : credentialBlobSizeOverride;
 		readCredential.CredentialBlob = readBlob.empty() ? nullptr : readBlob.data();
+		if (readMetadataOverride) {
+			readCredential.TargetName = readCredentialTarget.data();
+			readCredential.UserName = readCredentialUserName.data();
+		} else {
+			readCredential.TargetName = readTarget.data();
+			readCredential.UserName = defaultReadUserName.data();
+		}
 		credential = &readCredential;
 		return true;
 	}
@@ -100,6 +115,7 @@ public:
 	{
 		++eraseCalls;
 		eraseTarget = targetName != nullptr ? targetName : L"";
+		eraseTargets.push_back(eraseTarget);
 		eraseType = type;
 		eraseFlags = flags;
 		error = eraseError;
@@ -118,8 +134,16 @@ public:
 				reinterpret_cast<const BYTE *>(value.data()) + value.size());
 		credentialBlobSizeOverride = 0;
 		credentialType = CRED_TYPE_GENERIC;
+		readMetadataOverride = false;
 		readSucceeds = true;
 		readError = ERROR_SUCCESS;
+	}
+
+	void setReadMetadata(std::wstring target, std::wstring userName)
+	{
+		readCredentialTarget = std::move(target);
+		readCredentialUserName = std::move(userName);
+		readMetadataOverride = true;
 	}
 
 	bool writeSucceeds = true;
@@ -129,7 +153,11 @@ public:
 	DWORD writeType = 0;
 	DWORD writePersist = 0;
 	std::wstring writeTarget;
+	std::wstring writeUserName;
+	std::vector<std::wstring> writeTargets;
+	std::vector<std::wstring> writeUserNames;
 	std::vector<BYTE> writeBlob;
+	std::vector<std::vector<BYTE>> writeBlobs;
 
 	bool readSucceeds = false;
 	DWORD readError = ERROR_NOT_FOUND;
@@ -139,6 +167,11 @@ public:
 	DWORD credentialType = CRED_TYPE_GENERIC;
 	DWORD credentialBlobSizeOverride = 0;
 	std::wstring readTarget;
+	std::vector<std::wstring> readTargets;
+	std::wstring readCredentialTarget;
+	std::wstring readCredentialUserName;
+	std::wstring defaultReadUserName = L"YouTube";
+	bool readMetadataOverride = false;
 	std::vector<BYTE> readBlob;
 	CREDENTIALW readCredential{};
 	int freeCalls = 0;
@@ -149,6 +182,7 @@ public:
 	DWORD eraseFlags = 0;
 	DWORD eraseType = 0;
 	std::wstring eraseTarget;
+	std::vector<std::wstring> eraseTargets;
 };
 
 void testSettingsDefaults()
@@ -814,24 +848,312 @@ void testCredentialWriteContract()
 	CHECK(api.writeType == CRED_TYPE_GENERIC);
 	CHECK(api.writePersist == CRED_PERSIST_LOCAL_MACHINE);
 	CHECK(api.writeTarget == easy_multistream::defaultYouTubeCredentialTarget());
+	CHECK(api.writeUserName == L"YouTube");
 	CHECK(std::string(api.writeBlob.begin(), api.writeBlob.end()) == "valid-key");
 }
 
-void testAccountCredentialTargetIsIsolated()
+easy_multistream::YouTubeAccountCredentialScope
+accountCredentialScope(std::string_view profilePath, std::string_view channelId = "UC-account-channel")
 {
-	const std::wstring streamKeyTarget = easy_multistream::defaultYouTubeCredentialTarget();
-	const std::wstring refreshTokenTarget = easy_multistream::defaultYouTubeAccountRefreshTokenTarget();
-	CHECK(!streamKeyTarget.empty());
-	CHECK(!refreshTokenTarget.empty());
-	CHECK(streamKeyTarget != refreshTokenTarget);
+	const auto binding = easy_multistream::makeYouTubeAccountProfileBinding(profilePath);
+	CHECK(binding.has_value());
+	return {binding.value_or(""), std::string(channelId)};
+}
+
+void setReadCredentialForScope(FakeWinCredentialApi &api, const easy_multistream::YouTubeAccountCredentialScope &scope,
+			       std::string_view secret)
+{
+	const auto target = easy_multistream::makeYouTubeAccountCredentialTarget(scope.profileBinding);
+	const auto userName = easy_multistream::makeYouTubeAccountCredentialUserName(scope.channelId);
+	CHECK(target.has_value());
+	CHECK(userName.has_value());
+	api.setReadBlob(secret);
+	if (target.has_value() && userName.has_value()) {
+		api.setReadMetadata(*target, *userName);
+	}
+}
+
+void testAccountCredentialNamespaceDerivation()
+{
+	const std::string profilePathA = R"(C:\Users\devkey\OBS Profiles\Gaming)";
+	const std::string profilePathB = R"(C:\Users\devkey\OBS Profiles\Recording)";
+	const auto bindingA = easy_multistream::makeYouTubeAccountProfileBinding(profilePathA);
+	const auto bindingARepeat = easy_multistream::makeYouTubeAccountProfileBinding(profilePathA);
+	const auto bindingB = easy_multistream::makeYouTubeAccountProfileBinding(profilePathB);
+
+	CHECK(bindingA.has_value());
+	CHECK(bindingARepeat.has_value());
+	CHECK(bindingB.has_value());
+	if (bindingA.has_value() && bindingARepeat.has_value() && bindingB.has_value()) {
+		CHECK(*bindingA == *bindingARepeat);
+		CHECK(*bindingA != *bindingB);
+		CHECK(bindingA->size() == easy_multistream::kYouTubeAccountProfileBindingHexBytes);
+		CHECK(std::all_of(bindingA->begin(), bindingA->end(), [](char value) {
+			const auto byte = static_cast<unsigned char>(value);
+			return (byte >= static_cast<unsigned char>('0') && byte <= static_cast<unsigned char>('9')) ||
+			       (byte >= static_cast<unsigned char>('a') && byte <= static_cast<unsigned char>('f'));
+		}));
+	}
+
+	CHECK(!easy_multistream::makeYouTubeAccountProfileBinding("").has_value());
+	const std::string embeddedNull("profile\0suffix", 14);
+	CHECK(!easy_multistream::makeYouTubeAccountProfileBinding(embeddedNull).has_value());
+	CHECK(!easy_multistream::makeYouTubeAccountProfileBinding(
+		       std::string(easy_multistream::kMaxYouTubeAccountProfilePathBytes + 1, 'p'))
+		       .has_value());
+
+	if (!bindingA.has_value() || !bindingB.has_value()) {
+		return;
+	}
+	const auto targetA = easy_multistream::makeYouTubeAccountCredentialTarget(*bindingA);
+	const auto targetB = easy_multistream::makeYouTubeAccountCredentialTarget(*bindingB);
+	CHECK(targetA.has_value());
+	CHECK(targetB.has_value());
+	if (targetA.has_value() && targetB.has_value()) {
+		CHECK(*targetA != *targetB);
+		CHECK(targetA->find(L"C:") == std::wstring::npos);
+		CHECK(targetA->find(L"Users") == std::wstring::npos);
+		CHECK(targetA->find(L"Gaming") == std::wstring::npos);
+		CHECK(targetA->find(L'\\') == std::wstring::npos);
+		CHECK(*targetA != std::wstring(easy_multistream::defaultYouTubeCredentialTarget()));
+		CHECK(*targetA != std::wstring(kLegacyYouTubeAccountRefreshTokenTarget));
+	}
+
+	const auto userNameA = easy_multistream::makeYouTubeAccountCredentialUserName("UC-account-channel");
+	const auto userNameB = easy_multistream::makeYouTubeAccountCredentialUserName("UC-other-channel");
+	CHECK(userNameA.has_value());
+	CHECK(userNameB.has_value());
+	if (userNameA.has_value() && userNameB.has_value()) {
+		CHECK(*userNameA != *userNameB);
+		CHECK(userNameA->find(L"UC-account-channel") == std::wstring::npos);
+		CHECK(userNameA->find(L"UC-other-channel") == std::wstring::npos);
+	}
+
+	CHECK(!easy_multistream::makeYouTubeAccountCredentialTarget("").has_value());
+	CHECK(!easy_multistream::makeYouTubeAccountCredentialTarget(std::string(64, 'A')).has_value());
+	CHECK(!easy_multistream::makeYouTubeAccountCredentialTarget(std::string("a\0", 2) + std::string(62, 'a'))
+		       .has_value());
+	CHECK(!easy_multistream::makeYouTubeAccountCredentialTarget(std::string(65, 'a')).has_value());
+	CHECK(!easy_multistream::makeYouTubeAccountCredentialUserName("").has_value());
+	CHECK(!easy_multistream::makeYouTubeAccountCredentialUserName(std::string(257, 'U')).has_value());
+}
+
+void testAccountCredentialScopedWrite()
+{
+	const auto scope = accountCredentialScope(R"(C:\Users\devkey\OBS Profiles\Gaming)");
+	const auto target = easy_multistream::makeYouTubeAccountCredentialTarget(scope.profileBinding);
+	const auto userName = easy_multistream::makeYouTubeAccountCredentialUserName(scope.channelId);
+	CHECK(target.has_value());
+	CHECK(userName.has_value());
 
 	FakeWinCredentialApi api;
-	easy_multistream::WindowsYouTubeAccountRefreshTokenVault refreshTokenVault(api);
-	CHECK(refreshTokenVault.targetName() == refreshTokenTarget);
-	CHECK(refreshTokenVault.write("test-refresh-token").succeeded());
-	CHECK(api.writeTarget == refreshTokenTarget);
-	CHECK(api.writeTarget != streamKeyTarget);
+	easy_multistream::WindowsYouTubeAccountRefreshTokenStore store(api);
+	const auto result = store.write(scope, "test-refresh-token");
+	CHECK(result.succeeded());
+	CHECK(api.writeCalls == 1);
+	CHECK(api.writeFlags == 0);
+	CHECK(api.writeType == CRED_TYPE_GENERIC);
+	CHECK(api.writePersist == CRED_PERSIST_LOCAL_MACHINE);
+	if (target.has_value()) {
+		CHECK(api.writeTarget == *target);
+	}
+	if (userName.has_value()) {
+		CHECK(api.writeUserName == *userName);
+	}
 	CHECK(std::string(api.writeBlob.begin(), api.writeBlob.end()) == "test-refresh-token");
+	CHECK(api.writeTargets.size() == 1);
+	CHECK(api.writeTargets.front() != std::wstring(kLegacyYouTubeAccountRefreshTokenTarget));
+	CHECK(api.writeTargets.front() != std::wstring(easy_multistream::defaultYouTubeCredentialTarget()));
+}
+
+void testAccountCredentialScopedReadAndStatus()
+{
+	const auto scope = accountCredentialScope(R"(C:\Users\devkey\OBS Profiles\Gaming)");
+	const auto target = easy_multistream::makeYouTubeAccountCredentialTarget(scope.profileBinding);
+	CHECK(target.has_value());
+
+	FakeWinCredentialApi api;
+	easy_multistream::WindowsYouTubeAccountRefreshTokenStore store(api);
+	setReadCredentialForScope(api, scope, "stored-refresh-token");
+	const auto read = store.read(scope);
+	CHECK(read.result.succeeded());
+	CHECK(read.secret.view() == "stored-refresh-token");
+	CHECK(api.freeCalls == 1);
+	CHECK(api.readType == CRED_TYPE_GENERIC);
+	CHECK(api.readFlags == 0);
+	if (target.has_value()) {
+		CHECK(api.readTarget == *target);
+	}
+	CHECK(std::all_of(api.readBlob.begin(), api.readBlob.end(), [](BYTE value) { return value == 0; }));
+
+	setReadCredentialForScope(api, scope, "status-refresh-token");
+	const auto status = store.status(scope);
+	CHECK(status.state == easy_multistream::CredentialState::Present);
+	CHECK(status.result.succeeded());
+	CHECK(api.freeCalls == 2);
+	// status() reports only metadata/state and must not create a second secret
+	// buffer. The source blob is still scrubbed by the read guard.
+	CHECK(std::all_of(api.readBlob.begin(), api.readBlob.end(), [](BYTE value) { return value == 0; }));
+	CHECK(api.readTargets.size() == 2);
+	if (target.has_value()) {
+		CHECK(api.readTargets[0] == *target);
+		CHECK(api.readTargets[1] == *target);
+	}
+
+	setReadCredentialForScope(api, scope, "erase-refresh-token");
+	const auto erased = store.erase(scope);
+	CHECK(erased.succeeded());
+	CHECK(api.eraseCalls == 1);
+	CHECK(api.eraseType == CRED_TYPE_GENERIC);
+	CHECK(api.eraseFlags == 0);
+	if (target.has_value()) {
+		CHECK(api.eraseTarget == *target);
+	}
+	CHECK(api.freeCalls == 3);
+	CHECK(std::all_of(api.readBlob.begin(), api.readBlob.end(), [](BYTE value) { return value == 0; }));
+}
+
+void testAccountCredentialProfilesAreSeparated()
+{
+	const auto scopeA = accountCredentialScope(R"(C:\Users\devkey\OBS Profiles\Gaming)");
+	const auto scopeB = accountCredentialScope(R"(C:\Users\devkey\OBS Profiles\Recording)");
+	FakeWinCredentialApi api;
+	easy_multistream::WindowsYouTubeAccountRefreshTokenStore store(api);
+
+	CHECK(store.write(scopeA, "profile-a-token").succeeded());
+	CHECK(store.write(scopeB, "profile-b-token").succeeded());
+	CHECK(api.writeTargets.size() == 2);
+	CHECK(api.writeUserNames.size() == 2);
+	CHECK(api.writeBlobs.size() == 2);
+	if (api.writeTargets.size() == 2 && api.writeUserNames.size() == 2 && api.writeBlobs.size() == 2) {
+		CHECK(api.writeTargets[0] != api.writeTargets[1]);
+		CHECK(api.writeUserNames[0] == api.writeUserNames[1]);
+		CHECK(std::string(api.writeBlobs[0].begin(), api.writeBlobs[0].end()) == "profile-a-token");
+		CHECK(std::string(api.writeBlobs[1].begin(), api.writeBlobs[1].end()) == "profile-b-token");
+	}
+	for (const auto &target : api.writeTargets) {
+		CHECK(target != std::wstring(kLegacyYouTubeAccountRefreshTokenTarget));
+	}
+}
+
+void testAccountCredentialMismatchNeedsReauthorization()
+{
+	const auto scope = accountCredentialScope(R"(C:\Users\devkey\OBS Profiles\Gaming)");
+	const auto target = easy_multistream::makeYouTubeAccountCredentialTarget(scope.profileBinding);
+	const auto wrongUserName = easy_multistream::makeYouTubeAccountCredentialUserName("UC-wrong-channel");
+	CHECK(target.has_value());
+	CHECK(wrongUserName.has_value());
+	if (!target.has_value() || !wrongUserName.has_value()) {
+		return;
+	}
+
+	FakeWinCredentialApi api;
+	easy_multistream::WindowsYouTubeAccountRefreshTokenStore store(api);
+	api.setReadBlob("mismatched-channel-secret");
+	api.setReadMetadata(*target, *wrongUserName);
+	const auto read = store.read(scope);
+	CHECK(read.result.error == easy_multistream::CredentialError::ScopeMismatch);
+	CHECK(read.secret.empty());
+	CHECK(api.freeCalls == 1);
+	CHECK(std::all_of(api.readBlob.begin(), api.readBlob.end(), [](BYTE value) { return value == 0; }));
+
+	api.setReadBlob("mismatched-channel-status");
+	api.setReadMetadata(*target, *wrongUserName);
+	const auto status = store.status(scope);
+	CHECK(status.state == easy_multistream::CredentialState::NeedsReauthorization);
+	CHECK(status.result.error == easy_multistream::CredentialError::ScopeMismatch);
+	CHECK(std::all_of(api.readBlob.begin(), api.readBlob.end(), [](BYTE value) { return value == 0; }));
+
+	api.setReadBlob("mismatched-channel-erase");
+	api.setReadMetadata(*target, *wrongUserName);
+	const auto erase = store.erase(scope);
+	CHECK(erase.error == easy_multistream::CredentialError::ScopeMismatch);
+	CHECK(api.eraseCalls == 0);
+	CHECK(std::all_of(api.readBlob.begin(), api.readBlob.end(), [](BYTE value) { return value == 0; }));
+}
+
+void testAccountCredentialInvalidScopeNeverCallsApi()
+{
+	const auto valid = accountCredentialScope(R"(C:\Users\devkey\OBS Profiles\Gaming)");
+	std::vector<easy_multistream::YouTubeAccountCredentialScope> invalidScopes;
+	invalidScopes.push_back({"", valid.channelId});
+	std::string bindingWithNull(64, 'a');
+	bindingWithNull[17] = '\0';
+	invalidScopes.push_back({bindingWithNull, valid.channelId});
+	invalidScopes.push_back({std::string(65, 'a'), valid.channelId});
+	invalidScopes.push_back({valid.profileBinding, ""});
+	invalidScopes.push_back({valid.profileBinding, std::string("UC\0channel", 10)});
+	invalidScopes.push_back(
+		{valid.profileBinding, std::string(easy_multistream::kYouTubeAccountMaxIdentifierBytes + 1, 'U')});
+
+	FakeWinCredentialApi api;
+	easy_multistream::WindowsYouTubeAccountRefreshTokenStore store(api);
+	for (const auto &scope : invalidScopes) {
+		CHECK(store.write(scope, "invalid-scope-secret").error ==
+		      easy_multistream::CredentialError::InvalidInput);
+		CHECK(store.read(scope).result.error == easy_multistream::CredentialError::InvalidInput);
+		CHECK(store.erase(scope).error == easy_multistream::CredentialError::InvalidInput);
+		const auto status = store.status(scope);
+		CHECK(status.state == easy_multistream::CredentialState::Unavailable);
+		CHECK(status.result.error == easy_multistream::CredentialError::InvalidInput);
+	}
+	CHECK(api.writeCalls == 0);
+	CHECK(api.readCalls == 0);
+	CHECK(api.eraseCalls == 0);
+}
+
+void testAccountCredentialErrorsCorruptionAndScrubbing()
+{
+	const auto scope = accountCredentialScope(R"(C:\Users\devkey\OBS Profiles\Gaming)");
+	const auto target = easy_multistream::makeYouTubeAccountCredentialTarget(scope.profileBinding);
+	const auto userName = easy_multistream::makeYouTubeAccountCredentialUserName(scope.channelId);
+	CHECK(target.has_value());
+	CHECK(userName.has_value());
+	if (!target.has_value() || !userName.has_value()) {
+		return;
+	}
+
+	FakeWinCredentialApi api;
+	easy_multistream::WindowsYouTubeAccountRefreshTokenStore store(api);
+	api.readSucceeds = false;
+	api.readError = ERROR_ACCESS_DENIED;
+	const auto denied = store.read(scope);
+	CHECK(denied.result.error == easy_multistream::CredentialError::AccessDenied);
+	CHECK(api.freeCalls == 0);
+
+	api.setReadBlob("wrong-type-secret");
+	api.setReadMetadata(*target, *userName);
+	api.credentialType = CRED_TYPE_DOMAIN_PASSWORD;
+	const auto wrongType = store.read(scope);
+	CHECK(wrongType.result.error == easy_multistream::CredentialError::CorruptData);
+	CHECK(api.freeCalls == 1);
+	CHECK(std::all_of(api.readBlob.begin(), api.readBlob.end(), [](BYTE value) { return value == 0; }));
+
+	api.setReadBlob("");
+	api.setReadMetadata(*target, *userName);
+	const auto empty = store.read(scope);
+	CHECK(empty.result.error == easy_multistream::CredentialError::CorruptData);
+	CHECK(api.freeCalls == 2);
+	api.setReadBlob("");
+	api.setReadMetadata(*target, *userName);
+	const auto corruptErase = store.erase(scope);
+	CHECK(corruptErase.succeeded());
+	CHECK(api.eraseCalls == 1);
+	CHECK(api.freeCalls == 3);
+
+	api.setReadBlob("oversized-secret");
+	api.setReadMetadata(*target, *userName);
+	api.credentialBlobSizeOverride = CRED_MAX_CREDENTIAL_BLOB_SIZE + 1;
+	const auto oversized = store.read(scope);
+	CHECK(oversized.result.error == easy_multistream::CredentialError::CorruptData);
+	CHECK(api.freeCalls == 4);
+
+	api.setReadBlob("write-failure-secret");
+	api.writeSucceeds = false;
+	api.writeError = ERROR_ACCESS_DENIED;
+	CHECK(store.write(scope, "write-failure-secret").error == easy_multistream::CredentialError::AccessDenied);
+	CHECK(api.writeCalls == 1);
+	CHECK(api.writeUserNames.front() == *userName);
 }
 
 void testCredentialInputValidation()
@@ -997,7 +1319,13 @@ int main()
 	testYouTubeServerUrlValidation();
 	testSettingsInvalidServerUrlIsRejectedBeforeSave();
 	testCredentialWriteContract();
-	testAccountCredentialTargetIsIsolated();
+	testAccountCredentialNamespaceDerivation();
+	testAccountCredentialScopedWrite();
+	testAccountCredentialScopedReadAndStatus();
+	testAccountCredentialProfilesAreSeparated();
+	testAccountCredentialMismatchNeedsReauthorization();
+	testAccountCredentialInvalidScopeNeverCallsApi();
+	testAccountCredentialErrorsCorruptionAndScrubbing();
 	testCredentialInputValidation();
 	testCredentialWriteFailureMapping();
 	testCredentialReadAndFree();

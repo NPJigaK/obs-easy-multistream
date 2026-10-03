@@ -213,7 +213,7 @@ public:
 		if (!isValidGoogleOAuthClientId(clientId_)) {
 			return YouTubeDestinationPrepareStartStatus::InvalidClientId;
 		}
-		if (!isValidYouTubeAccountIdentifier(request.profileBinding)) {
+		if (!isValidYouTubeAccountProfileBinding(request.profileBinding)) {
 			return YouTubeDestinationPrepareStartStatus::InvalidProfileBinding;
 		}
 		if (validateYouTubeAccountSelection(request.selection) !=
@@ -228,7 +228,7 @@ public:
 			advanceEpoch();
 			activeAttempt_ = request.attempt;
 			credentialScope_.emplace(YouTubeAccountCredentialScope{std::move(request.profileBinding),
-										 request.selection.channelId});
+									       request.selection.channelId});
 			selection_.emplace(std::move(request.selection));
 			completionHandler_ = std::move(completionHandler);
 			state_ = YouTubeDestinationPreparerState::ReadingCredential;
@@ -412,7 +412,7 @@ private:
 					writeResult.error = CredentialError::OperatingSystemError;
 				} else {
 					writeResult = refreshTokenStore_.write(*credentialScope_,
-											 completion.tokens.refreshToken.view());
+									       completion.tokens.refreshToken.view());
 				}
 			} catch (...) {
 				writeResult.error = CredentialError::OperatingSystemError;
@@ -574,7 +574,7 @@ YouTubeAccountDestinationPreparer::YouTubeAccountDestinationPreparer(QString cli
 								     YouTubeAccountRefreshTokenStore &refreshTokenStore,
 								     QObject *parent)
 	: YouTubeAccountDestinationPreparer(std::move(clientId), std::make_unique<RefreshAdapter>(),
-								    std::make_unique<ResolverAdapter>(), refreshTokenStore, parent)
+					    std::make_unique<ResolverAdapter>(), refreshTokenStore, parent)
 {
 }
 
@@ -584,7 +584,7 @@ YouTubeAccountDestinationPreparer::YouTubeAccountDestinationPreparer(
 	YouTubeAccountRefreshTokenStore &refreshTokenStore, QObject *parent)
 	: QObject(parent),
 	  impl_(std::make_unique<Impl>(this, std::move(clientId), std::move(refreshPort), std::move(resolverPort),
-					       refreshTokenStore))
+				       refreshTokenStore))
 {
 }
 
