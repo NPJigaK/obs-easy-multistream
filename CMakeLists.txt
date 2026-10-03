@@ -28,6 +28,9 @@ add_library(${CMAKE_PROJECT_NAME}-oauth-token-transport STATIC)
 add_library(${CMAKE_PROJECT_NAME}-youtube-discovery STATIC)
 add_library(${CMAKE_PROJECT_NAME}-youtube-discovery-pager STATIC)
 add_library(${CMAKE_PROJECT_NAME}-youtube-stream-resolver STATIC)
+add_library(${CMAKE_PROJECT_NAME}-youtube-account-profile-lock STATIC)
+# Keep this implementation in one final module. Its in-process registry is
+# intentionally module-local and complements the cross-process named mutex.
 add_library(${CMAKE_PROJECT_NAME}-youtube-account-provider STATIC)
 add_library(${CMAKE_PROJECT_NAME}-youtube-account-destination-preparer STATIC)
 
@@ -178,6 +181,17 @@ target_include_directories(
 target_link_libraries(
   ${CMAKE_PROJECT_NAME}-youtube-stream-resolver
   PUBLIC ${CMAKE_PROJECT_NAME}-secure-core ${CMAKE_PROJECT_NAME}-youtube-destination Qt6::Core Qt6::Network
+)
+
+target_sources(
+  ${CMAKE_PROJECT_NAME}-youtube-account-profile-lock
+  PRIVATE
+    src/youtube-account-profile-operation-lock.cpp
+    src/youtube-account-profile-operation-lock.hpp
+)
+target_include_directories(
+  ${CMAKE_PROJECT_NAME}-youtube-account-profile-lock
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
 
 target_sources(
@@ -553,6 +567,21 @@ if(BUILD_TESTING)
     NAME ${CMAKE_PROJECT_NAME}-youtube-account-profile-context
     COMMAND ${CMAKE_PROJECT_NAME}-youtube-account-profile-context-tests
   )
+
+  add_executable(${CMAKE_PROJECT_NAME}-youtube-account-profile-lock-tests)
+  target_sources(
+    ${CMAKE_PROJECT_NAME}-youtube-account-profile-lock-tests
+    PRIVATE tests/youtube-account-profile-operation-lock-tests.cpp
+  )
+  target_link_libraries(
+    ${CMAKE_PROJECT_NAME}-youtube-account-profile-lock-tests
+    PRIVATE ${CMAKE_PROJECT_NAME}-youtube-account-profile-lock
+  )
+  add_test(
+    NAME ${CMAKE_PROJECT_NAME}-youtube-account-profile-lock
+    COMMAND ${CMAKE_PROJECT_NAME}-youtube-account-profile-lock-tests
+  )
+  set_tests_properties(${CMAKE_PROJECT_NAME}-youtube-account-profile-lock PROPERTIES TIMEOUT 30)
 
   add_executable(${CMAKE_PROJECT_NAME}-runtime-tests)
   target_sources(
