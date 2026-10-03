@@ -47,6 +47,19 @@ PKCE, state validation, and exclusive binding prevent an unrelated local process
 
 The repository also contains a separate token-transport library that is linked only to a standalone development test. It posts form data only to Google's fixed HTTPS token and revocation endpoints, never accepts an endpoint from settings, never sends a client secret, requires peer-verified TLS 1.2 or later, rejects redirects and missing encryption proof, disables credential and cookie reuse, and applies independent time and 64 KiB response limits. Responses are type-checked, known security fields cannot be duplicated, raw provider descriptions are not returned, and operation generations prevent a cancelled or replaced request from completing newer work. Authorization codes, PKCE verifiers, response bodies, and parsed token staging buffers are explicitly cleared where the involved API permits it. Qt and operating-system internals may still make transient copies under the in-memory limitations documented above.
 
+The repository also builds a separate read-only YouTube discovery transport only for its standalone development test.
+It sends a move-only access-token buffer solely as a Bearer header to the fixed `channels.list` and
+`liveStreams.list` HTTPS endpoints. It requests one bounded page at a time, uses `mine=true`, strictly validates IDs,
+labels, page tokens, headers, JSON, TLS, and final URLs, and returns stable error enums rather than provider text. Its
+fixed partial-response fields request only IDs and display labels; CDN ingestion data and `streamName` are not requested
+or returned by this layer. A later provider must impose total page and cycle limits before following the opaque
+continuation value. The selected-stream resolver remains a separate, secret-bearing boundary and is not present yet.
+
 The YouTube output owns a private RTMP service and output while retaining explicit references to the native H.264 and main AAC encoders. It never starts or stops the native OBS stream. A YouTube error closes only the YouTube output, leaves Twitch running, and exposes a separate retry action after teardown completes.
 
-The accepted browser-based account connection will add the listener and token transport to the product only after the complete flow is ready, together with outbound HTTPS requests to fixed YouTube API origins and the existing outbound YouTube RTMPS connection. It will not add a cloud relay, local background service, telemetry, embedded login webview, or long-running listening port. Refresh tokens use a credential target separate from the manual stream key; access tokens, authorization codes, PKCE verifiers, and resolved stream keys are never written to profile settings or logs. See [the account-connection design](youtube-account-connection.md).
+The accepted browser-based account connection will add the listener, token transport, discovery transport, and later
+selected-stream resolver to the product only after the complete flow is ready, together with outbound HTTPS requests
+to fixed YouTube API origins and the existing outbound YouTube RTMPS connection. It will not add a cloud relay, local
+background service, telemetry, embedded login webview, or long-running listening port. Refresh tokens use a credential
+target separate from the manual stream key; access tokens, authorization codes, PKCE verifiers, and resolved stream keys
+are never written to profile settings or logs. See [the account-connection design](youtube-account-connection.md).
