@@ -249,6 +249,8 @@ target_sources(
     src/settings.hpp
     src/windows-credential-vault.cpp
     src/windows-credential-vault.hpp
+    src/youtube-account-profile-context.cpp
+    src/youtube-account-profile-context.hpp
 )
 
 set_target_properties(
@@ -524,6 +526,32 @@ if(BUILD_TESTING)
   add_test(
     NAME ${CMAKE_PROJECT_NAME}-youtube-account-destination-preparer
     COMMAND ${CMAKE_PROJECT_NAME}-youtube-account-destination-preparer-tests
+  )
+
+  add_executable(${CMAKE_PROJECT_NAME}-youtube-account-profile-context-tests)
+  target_sources(
+    ${CMAKE_PROJECT_NAME}-youtube-account-profile-context-tests
+    PRIVATE tests/youtube-account-profile-context-tests.cpp
+  )
+  target_link_libraries(
+    ${CMAKE_PROJECT_NAME}-youtube-account-profile-context-tests
+    PRIVATE ${CMAKE_PROJECT_NAME}-core
+  )
+
+  add_custom_command(
+    TARGET ${CMAKE_PROJECT_NAME}-youtube-account-profile-context-tests
+    POST_BUILD
+    COMMAND
+      "${CMAKE_COMMAND}" -E copy_if_different $<TARGET_RUNTIME_DLLS:${CMAKE_PROJECT_NAME}-youtube-account-profile-context-tests>
+      $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}-youtube-account-profile-context-tests>
+    COMMAND_EXPAND_LISTS
+    COMMENT "Copy YouTube account profile context test runtime dependencies"
+    VERBATIM
+  )
+
+  add_test(
+    NAME ${CMAKE_PROJECT_NAME}-youtube-account-profile-context
+    COMMAND ${CMAKE_PROJECT_NAME}-youtube-account-profile-context-tests
   )
 
   add_executable(${CMAKE_PROJECT_NAME}-runtime-tests)
