@@ -15,6 +15,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <string>
 
 namespace easy_multistream {
 
@@ -31,6 +32,10 @@ struct YouTubeDestinationPrepareAttempt final {
 
 struct YouTubeDestinationPrepareRequest final {
 	YouTubeDestinationPrepareAttempt attempt;
+	// Non-secret binding supplied by the active OBS profile. It is copied into
+	// the attempt scope before the credential store is touched and is never
+	// read again from profile/config state while the operation is in flight.
+	std::string profileBinding;
 	YouTubeAccountSelection selection;
 };
 
@@ -53,6 +58,7 @@ enum class YouTubeDestinationPrepareStartStatus {
 	Closed,
 	InvalidAttempt,
 	InvalidClientId,
+	InvalidProfileBinding,
 	InvalidSelection,
 	InvalidCompletionHandler,
 	OperationFailed,
@@ -125,7 +131,7 @@ class YouTubeAccountDestinationPreparer final : public QObject {
 public:
 	using CompletionHandler = std::function<void(YouTubeDestinationPrepareCompletion)>;
 
-	YouTubeAccountDestinationPreparer(QString clientId, YouTubeAccountRefreshTokenVault &refreshTokenVault,
+	YouTubeAccountDestinationPreparer(QString clientId, YouTubeAccountRefreshTokenStore &refreshTokenStore,
 					  QObject *parent = nullptr);
 	~YouTubeAccountDestinationPreparer() override;
 
@@ -149,7 +155,7 @@ private:
 
 	YouTubeAccountDestinationPreparer(QString clientId, std::unique_ptr<YouTubeDestinationRefreshPort> refreshPort,
 					  std::unique_ptr<YouTubeDestinationResolverPort> resolverPort,
-					  YouTubeAccountRefreshTokenVault &refreshTokenVault, QObject *parent);
+					  YouTubeAccountRefreshTokenStore &refreshTokenStore, QObject *parent);
 
 	class Impl;
 	std::unique_ptr<Impl> impl_;

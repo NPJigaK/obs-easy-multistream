@@ -51,7 +51,7 @@ PluginState
   │   ├─ loopback authorization
   │   ├─ Google token exchange/refresh/revoke
   │   ├─ YouTube channel/stream discovery
-  │   └─ refresh-token credential vault
+  │   └─ profile/channel-scoped refresh-token store
   ├─ RuntimeController               OBS event serialization
   └─ YouTubeOutputAdapter            validated RTMPS URL + ephemeral key only
 ```
@@ -63,8 +63,9 @@ The output adapter never receives an OAuth access or refresh token. The account 
 Account connection and output delivery are separate states. A channel may be connected while YouTube is not streaming, and a YouTube output may fail without disconnecting the account.
 
 The detached `YouTubeAccountDestinationPreparer` is the boundary immediately before future output integration. For one
-selected channel/stream it reads the saved refresh credential, refreshes an access token, persists a provider-rotated
-refresh token before resolving the selected stream, and completes with only a validated RTMPS URL plus a move-only
+selected channel/stream it captures an immutable profile/channel scope, reads the saved refresh credential for that
+scope, refreshes an access token, persists a provider-rotated refresh token in the same scope before resolving the
+selected stream, and completes with only a validated RTMPS URL plus a move-only
 stream-key buffer. A failed rotation write returns a credential-unavailable result and does not start resolution. A
 rotation that was written successfully is retained even if resolution later fails or the preparation is cancelled; it is
 not rolled back to an older token. The preparer is owner-thread-only, uses an independent epoch and attempt, and
@@ -102,16 +103,25 @@ Profile settings may contain only non-secret selection data such as the connecti
 The profile codec now implements this non-secret boundary. Older manual profiles load as manual mode; account mode
 accepts either a complete, strictly validated channel/stream selection or an explicit setup-required state with no
 selection, and does not require a saved ingestion URL. Saving the latter removes stale selection fields without changing
-the mode or touching the shared refresh-token credential. The current runtime deliberately treats account mode as
+the mode or touching any refresh-token credential. The current runtime deliberately treats account mode as
 unavailable until the headless provider is wired through the plugin lifecycle and output preparation, so a partially
 implemented or imported account profile cannot silently use the manual URL/key instead.
 
-Windows Credential Manager uses separate targets for:
+Windows Credential Manager uses separate boundaries for:
 
 - the existing manual YouTube stream key;
-- the Google refresh token.
+- the Google refresh token, scoped to a SHA-256 binding of the exact active OBS profile path and a SHA-256 binding of
+  the selected channel in `CREDENTIALW.UserName`.
 
-Access tokens, authorization codes, PKCE values, token endpoint responses, and resolved stream keys remain in wipeable process buffers for the shortest practical lifetime. None is displayed or logged. The detached destination preparer reads the refresh token only for a current preparation, and writes a provider-rotated refresh token to Credential Manager before resolving the selected stream. The current OBS plugin does not instantiate that preparer. Disconnect revokes the Google grant when possible and removes the local refresh token and account selection. A revoked or `invalid_grant` token becomes **Reconnect YouTube**, not an automatic fallback.
+The manual stream key remains shared across OBS profiles. The refresh-token store is not shared: duplicate/import/rename
+operations and portable-profile path moves create a different profile binding and require reconnecting. No credential is
+transferred automatically. Raw profile paths and tokens never enter the refresh-token target, profile export, logs, or
+UI. A profile may retain only bounded non-secret channel/stream selection data; the raw channel ID is not copied into
+Credential Manager metadata, logs, or UI. Each profile owns one current selected channel credential; reconnecting that
+profile replaces that record rather than retaining a collection of channel credentials. The old fixed refresh-token
+target is never read, migrated, or deleted.
+
+Access tokens, authorization codes, PKCE values, token endpoint responses, and resolved stream keys remain in wipeable process buffers for the shortest practical lifetime. None is displayed or logged. The detached destination preparer reads the refresh token only for a current preparation, and writes a provider-rotated refresh token to the immutable scope before resolving the selected stream. The current OBS plugin does not instantiate that preparer. A future disconnect must remove the selected profile's account selection and its scoped local credential; any remote revoke must be an explicit account action. A revoked or `invalid_grant` token becomes **Reconnect YouTube**, not an automatic fallback.
 
 As with the existing stream key, this design does not claim resistance to malware running as the same Windows user, live process inspection, or copies made internally by Qt, Windows, or libobs.
 
@@ -120,9 +130,13 @@ As with the existing stream key, this design does not claim resistance to malwar
 Every asynchronous browser, token, and API result carries the account generation and attempt that created it. Results are ignored after cancellation, a new attempt, profile transition, disconnect, or shutdown.
 
 Credential replacement is serialized with the account state. After discovery, the provider revalidates the active
-attempt, performs the synchronous Credential Manager write on the owner thread, and commits the account state before
-yielding to Qt's event loop. If credential storage ever becomes asynchronous, it must use an attempt-scoped staging
-target with explicit rollback so cancellation, profile change, or shutdown cannot leave an orphaned replacement token.
+attempt, persists the non-secret profile selection first, then performs the synchronous scoped Credential Manager write
+on the owner thread before yielding to Qt's event loop. If the credential write fails, the exact prior selection is
+restored. If a later commit invariant fails, both durable stores are restored where possible and failure is reported
+closed. The provider and preparer retain the immutable scope captured for the operation; stale callbacks cannot read or
+write another profile's credential. If credential storage ever becomes asynchronous, it must use an attempt-scoped
+staging target with explicit rollback so cancellation, profile change, or shutdown cannot leave an orphaned replacement
+token.
 
 Destination preparation has a separate ordering rule: a rotated refresh token is written synchronously before the
 selected-stream resolver is started. A write failure returns a credential-unavailable result and does not resolve or
@@ -138,8 +152,8 @@ The provider:
 - never touches widgets from a network callback;
 - never blocks the OBS UI thread waiting for network or output teardown;
 - does not automatically reopen the browser at startup;
-- restores a saved selection by checking only credential presence, without starting a listener, HTTP request, discovery, or output;
-- does not inspect or delete the shared credential when the current profile has no saved selection;
+- restores a saved selection by checking only scoped credential status, without copying the secret or starting a listener, HTTP request, discovery, or output;
+- does not inspect or delete any credential when the current profile has no saved selection;
 - does not automatically loop after an authorization or API failure;
 - cannot request that OBS stop its native stream.
 
@@ -173,7 +187,7 @@ References:
 
 The internal implementation order is intentionally not shown in the user interface:
 
-1. add a separate refresh-token credential target and a testable, headless account state/provider boundary;
+1. add a typed, profile/channel-scoped refresh-token store and a testable, headless account state/provider boundary;
 2. implement and test PKCE/state generation, the authorization URL, and exact loopback-callback validation;
 3. implement the loopback listener, system-browser launch, and fixed-origin HTTPS transport using Qt Network;
 4. implement token exchange, refresh/revoke, and YouTube channel/stream discovery;
@@ -200,25 +214,30 @@ candidate set, and fails closed on page/item limits, token cycles, cross-page du
 any page failure. It deliberately requests no CDN ingestion fields or stream keys. The resolver separately
 fetches one selected stream and returns its validated RTMPS destination and current key through a move-only result,
 without adding the key to discovery data or persistent settings. The destination preparer reads the saved refresh
-credential immediately before resolving, persists any rotated token before starting the resolver, refuses to resolve
-when that write fails, and retains a successful rotation if a later resolve fails or is cancelled. Its epoch, attempt,
+credential immediately before resolving, persists any rotated token in the immutable operation scope before starting the
+resolver, refuses to resolve when that write fails, and retains a successful rotation if a later resolve fails or is
+cancelled. Its epoch, attempt,
 owner-thread, cancellation, context-invalidation, shutdown, and queued-completion tests reject stale work and keep
 secrets out of public state. The headless provider automatically advances a
 single channel/stream candidate, requires exact-ID selection for multiple candidates, rejects stale work by epoch and
-lease, and commits the refresh token plus non-secret selection transactionally enough to restore the previous token
-when profile persistence fails. It can also restore a persisted selection from credential status alone: present is
+lease, and persists the non-secret selection before the scoped refresh token, restoring the previous selection if the
+token write fails. It can also restore a persisted selection from credential status alone: present is
 only locally configured and remains unverified against Google, while missing and unavailable remain distinct. Every
-restore creates a new generation, and a profile without a selection remains setup-required without touching the shared
+restore creates a new generation, and a profile without a selection remains setup-required without touching any
 credential. None of these libraries is linked into the OBS plugin, so the product still does not open a browser, listen
 on a port, make an OAuth/API network request, or read an account credential. The profile format and runtime fail-closed
 boundary are present, but the dock continues to expose only the working manual setup. Production browser-opener and
 active-profile adapters, refresh/revoke, runtime handoff, and all later items stay gated, so a partial connection path
 cannot appear in the user interface.
 
-The current fixed refresh-token credential is shared across OBS profiles, whereas each profile stores its own channel
-and stream selection. Restoration therefore never labels credential presence as a verified connection. Before this path
-is connected to runtime or UI, multiple-profile/multiple-Google-account behavior, profile duplication/import, and token
-ownership must have an explicit policy and tests. In all cases, the start-time destination preparer must successfully
-refresh and resolve the exact saved channel and stream before an output can be created.
+The manual stream-key credential remains shared across OBS profiles. The refresh-token credential is scoped to the SHA-256
+binding of the exact active profile path and to the selected channel's SHA-256 `UserName` binding. Restoration therefore
+never labels credential presence as a verified connection. A profile duplicate, import, rename, or portable path move has
+a different binding and must reconnect; no automatic transfer or cleanup is attempted, and the old fixed target is never
+read, migrated, or deleted. Before this path is connected to runtime or UI, these profile lifecycle rules and exact
+scope tests must remain covered. The future disconnect adapter must also preserve the provider's single-owner
+serialization rule: the Windows API cannot conditionally delete a credential by its channel metadata, so two OBS
+processes must not mutate the same profile binding concurrently. In all cases, the start-time destination preparer must
+successfully refresh and resolve the exact saved channel and stream before an output can be created.
 
 No account UI is added merely to advertise unfinished functionality. A build without a complete configured provider continues to show only the working manual setup.

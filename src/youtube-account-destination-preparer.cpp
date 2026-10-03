@@ -183,12 +183,12 @@ public:
 	Impl(YouTubeAccountDestinationPreparer *owner, QString clientId,
 	     std::unique_ptr<YouTubeDestinationRefreshPort> refreshPort,
 	     std::unique_ptr<YouTubeDestinationResolverPort> resolverPort,
-	     YouTubeAccountRefreshTokenVault &refreshTokenVault)
+	     YouTubeAccountRefreshTokenStore &refreshTokenStore)
 		: owner_(owner),
 		  clientId_(std::move(clientId)),
 		  refreshPort_(std::move(refreshPort)),
 		  resolverPort_(std::move(resolverPort)),
-		  refreshTokenVault_(refreshTokenVault)
+		  refreshTokenStore_(refreshTokenStore)
 	{
 	}
 
@@ -213,6 +213,9 @@ public:
 		if (!isValidGoogleOAuthClientId(clientId_)) {
 			return YouTubeDestinationPrepareStartStatus::InvalidClientId;
 		}
+		if (!isValidYouTubeAccountProfileBinding(request.profileBinding)) {
+			return YouTubeDestinationPrepareStartStatus::InvalidProfileBinding;
+		}
 		if (validateYouTubeAccountSelection(request.selection) !=
 		    YouTubeAccountSelectionValidationError::None) {
 			return YouTubeDestinationPrepareStartStatus::InvalidSelection;
@@ -224,13 +227,19 @@ public:
 		try {
 			advanceEpoch();
 			activeAttempt_ = request.attempt;
+			credentialScope_.emplace(YouTubeAccountCredentialScope{std::move(request.profileBinding),
+									       request.selection.channelId});
 			selection_.emplace(std::move(request.selection));
 			completionHandler_ = std::move(completionHandler);
 			state_ = YouTubeDestinationPreparerState::ReadingCredential;
 
 			CredentialReadResult credential;
 			try {
-				credential = refreshTokenVault_.read();
+				if (!credentialScope_.has_value()) {
+					credential.result.error = CredentialError::OperatingSystemError;
+				} else {
+					credential = refreshTokenStore_.read(*credentialScope_);
+				}
 			} catch (...) {
 				credential.result.error = CredentialError::OperatingSystemError;
 			}
@@ -242,6 +251,7 @@ public:
 			}
 			if (credential.result.error == CredentialError::NotFound ||
 			    credential.result.error == CredentialError::CorruptData ||
+			    credential.result.error == CredentialError::ScopeMismatch ||
 			    (credential.result.succeeded() && credential.secret.empty())) {
 				credential.secret.clear();
 				finish(YouTubeDestinationPrepareStatus::ReauthorizationRequired);
@@ -364,6 +374,7 @@ private:
 
 	void clearOperation() noexcept
 	{
+		credentialScope_.reset();
 		selection_.reset();
 		pendingCompletion_.reset();
 		completionHandler_ = {};
@@ -397,7 +408,12 @@ private:
 			state_ = YouTubeDestinationPreparerState::PersistingRefreshToken;
 			CredentialResult writeResult;
 			try {
-				writeResult = refreshTokenVault_.write(completion.tokens.refreshToken.view());
+				if (!credentialScope_.has_value()) {
+					writeResult.error = CredentialError::OperatingSystemError;
+				} else {
+					writeResult = refreshTokenStore_.write(*credentialScope_,
+									       completion.tokens.refreshToken.view());
+				}
 			} catch (...) {
 				writeResult.error = CredentialError::OperatingSystemError;
 			}
@@ -481,6 +497,7 @@ private:
 			completion.ingestion = std::move(ingestion);
 			pendingCompletion_.emplace(std::move(completion));
 			selection_.reset();
+			credentialScope_.reset();
 			state_ = YouTubeDestinationPreparerState::DeliveringCompletion;
 			queueCompletion(operationEpoch_);
 		} catch (...) {
@@ -541,9 +558,10 @@ private:
 	QString clientId_;
 	std::unique_ptr<YouTubeDestinationRefreshPort> refreshPort_;
 	std::unique_ptr<YouTubeDestinationResolverPort> resolverPort_;
-	YouTubeAccountRefreshTokenVault &refreshTokenVault_;
+	YouTubeAccountRefreshTokenStore &refreshTokenStore_;
 	YouTubeDestinationPreparerState state_ = YouTubeDestinationPreparerState::Idle;
 	std::optional<YouTubeDestinationPrepareAttempt> activeAttempt_;
+	std::optional<YouTubeAccountCredentialScope> credentialScope_;
 	std::optional<YouTubeAccountSelection> selection_;
 	CompletionHandler completionHandler_;
 	std::optional<YouTubeDestinationPrepareCompletion> pendingCompletion_;
@@ -553,20 +571,20 @@ private:
 };
 
 YouTubeAccountDestinationPreparer::YouTubeAccountDestinationPreparer(QString clientId,
-								     YouTubeAccountRefreshTokenVault &refreshTokenVault,
+								     YouTubeAccountRefreshTokenStore &refreshTokenStore,
 								     QObject *parent)
 	: YouTubeAccountDestinationPreparer(std::move(clientId), std::make_unique<RefreshAdapter>(),
-					    std::make_unique<ResolverAdapter>(), refreshTokenVault, parent)
+					    std::make_unique<ResolverAdapter>(), refreshTokenStore, parent)
 {
 }
 
 YouTubeAccountDestinationPreparer::YouTubeAccountDestinationPreparer(
 	QString clientId, std::unique_ptr<YouTubeDestinationRefreshPort> refreshPort,
 	std::unique_ptr<YouTubeDestinationResolverPort> resolverPort,
-	YouTubeAccountRefreshTokenVault &refreshTokenVault, QObject *parent)
+	YouTubeAccountRefreshTokenStore &refreshTokenStore, QObject *parent)
 	: QObject(parent),
 	  impl_(std::make_unique<Impl>(this, std::move(clientId), std::move(refreshPort), std::move(resolverPort),
-				       refreshTokenVault))
+				       refreshTokenStore))
 {
 }
 

@@ -32,13 +32,15 @@ injected browser opener, preserves the PKCE verifier until a validated callback 
 replaced, or shutdown work by attempt and internal epoch. The HTTPS layer accepts only Google's fixed
 token and revocation endpoints, requires verified TLS, rejects redirects, bounds and strictly parses replies, and does
 not send a client secret. The provider serializes authorization, token exchange, complete channel/stream discovery,
-exact-ID selection, refresh-token storage, and non-secret profile-selection commit. A single candidate advances
-automatically; multiple candidates wait for an explicit ID. Credential replacement is rolled back if the profile
-selection cannot be committed, and a failed rollback clears the visible connection instead of restoring uncertain
+exact-ID selection, scoped refresh-token storage, and non-secret profile-selection commit. A single candidate advances
+automatically; multiple candidates wait for an explicit ID. The non-secret profile selection is persisted before the
+scoped credential write; if that write fails, the selection is restored. If a later commit invariant fails, both durable
+stores are restored where possible and a failed rollback clears the visible connection instead of restoring uncertain
 state. The resolver fetches only the explicitly selected stream ID immediately before a future
 start, revalidates its channel, state, RTMPS host, and stream key, and returns the key in a move-only buffer rather than
-any discovery or settings type. The destination preparer reads the saved refresh credential just before preparation,
-refreshes the access token, durably stores a rotated refresh token before starting the selected-stream resolver, and
+any discovery or settings type. The destination preparer captures an immutable profile/channel credential scope for
+each preparation, reads the saved refresh credential just before preparation, refreshes the access token, durably stores
+a rotated refresh token in that same scope before starting the selected-stream resolver, and
 returns only a validated RTMPS URL plus a move-only key. A refresh-token write failure stops preparation before any
 resolver request; a rotation that has been written is not rolled back when a later resolver request fails or is cancelled.
 Its completions are guarded by an owner-thread epoch and attempt, and cancellation, context invalidation, shutdown, and
@@ -47,18 +49,25 @@ so the product opens no listener or browser, makes no OAuth request, and leaves 
 workflow unchanged. The profile codec now distinguishes manual and account modes and can preserve a bounded,
 non-secret channel/stream selection. Account mode without a selection is also a valid persisted setup-required state,
 so clearing or importing a profile never silently changes it to the manual-key path. The detached provider can restore
-a saved selection by checking only the dedicated Credential Manager entry: present becomes locally configured but not
+a saved selection by checking only the scoped Credential Manager entry: present becomes locally configured but not
 Google-validated, missing becomes reauthorization-required, and credential-service errors remain unavailable. A profile
-with no selection does not inspect or delete the shared account credential. Restoration advances the account generation
+with no selection does not inspect or delete any account credential. Restoration advances the account generation
 and starts no browser, listener, HTTP request, discovery operation, or output. Until the complete account provider is
 integrated, account mode fails closed and cannot consume the manual URL/key destination. Production browser-opener,
 active-profile wiring, refresh/revoke, runtime integration, and user-facing account controls remain release-gated.
 
-The refresh-token target is currently shared by all OBS profiles, while the non-secret channel/stream selection is
-profile-scoped. Credential presence therefore never proves that the saved selection and Google account match. A saved
-profile is only `Configured` internally; destination preparation must refresh the token and successfully resolve the exact
-saved channel and stream before any output can start. Runtime/UI integration is blocked until the shared-credential policy
-for profile duplication, import, rename, and multiple Google accounts is finalized and covered by cross-profile tests.
+The manual YouTube stream key remains intentionally shared by all OBS profiles, but the Google refresh token uses a
+separate typed store scoped to the exact active OBS profile path and selected YouTube channel. The profile path is
+represented only by a SHA-256 binding in the Credential Manager target, and the channel is represented only by its
+SHA-256 binding in `CREDENTIALW.UserName`. Raw profile paths and tokens never enter the target, profile, logs, or UI;
+the profile may retain only bounded non-secret channel/stream selection data, and the raw channel ID is never copied into
+Credential Manager metadata, logs, or UI. Duplicate/import/rename operations and portable-profile path moves produce a different profile binding and therefore
+require a new account connection; no credential is transferred automatically. The old fixed refresh-token target is
+never read, migrated, or deleted. Credential presence is still only local configuration, not proof of Google validity.
+The provider and destination preparer retain the immutable scope captured for each operation, so delayed work from an old
+profile cannot read or write another profile's credential. Before any output can start, preparation must refresh the token
+and resolve the exact saved channel and stream. If profile selection is persisted before a new token is written and that
+write fails, the selection is rolled back. Account libraries remain detached from the production plugin, dock, and runtime.
 
 The recommended Dual stream mode is a YouTube-side feature. Easy Multistream sends one 16:9 H.264/AAC stream to the user-provided RTMPS URL; YouTube creates the 9:16 feed, normally as a centre crop. This keeps the local OBS pipeline to one YouTube output and one shared video encode. The vertical mode must be enabled in YouTube Studio before the stream starts. A separately composed 9:16 stream sent by the encoder would require a second video pipeline and is intentionally deferred.
 
@@ -72,7 +81,7 @@ OBS's internal YouTube account object is not a public plugin API and is tied to 
 
 Implementation is deliberately gated in this order:
 
-1. separate credential targets and a headless, cancellable account-connection provider;
+1. a scoped credential store and a headless, cancellable account-connection provider;
 2. browser authorization, refresh/revocation, and YouTube channel/stream discovery;
 3. authenticated endpoint resolution into the existing output boundary;
 4. profile-change, shutdown, stale-callback, and failure-isolation tests;
@@ -100,7 +109,7 @@ OBS dock wrapper (OBS-owned)
 
 Windows Credential Manager
   ├─ one Easy Multistream YouTube key for the current Windows account
-  └─ a separate plugin-owned target for the future Google refresh token
+  └─ profile/channel-scoped plugin-owned entries for the future Google refresh token
      (used only by detached account libraries until integration)
 
 Current OBS profile/basic.ini
@@ -132,7 +141,8 @@ User-visible text follows OBS and platform terminology. Internal milestone names
 ## Configuration and credential invariants
 
 1. `basic.ini` contains only the schema and enable value, an explicit connection mode, the non-secret manual `YouTubeServerUrl`, and optional non-secret account-selection IDs/labels under `[EasyMultistream]`.
-2. The stream key is written only to Windows Credential Manager and is never read back into the editor.
+2. The stream key is written only to Windows Credential Manager and is never read back into the editor. This manual key
+   remains shared across OBS profiles; account refresh credentials are separate and profile/channel-scoped.
 3. Saving a key and changing a profile's enabled flag are independent operations; there is no cross-store transaction to partially commit.
 4. An explicit Save Key action requires a non-empty, valid key. Deleting the shared key requires confirmation and does not rewrite any profile setting.
 5. An enabled profile without a stored key is treated as incomplete and cannot stream until a new key is saved. A profile cannot be newly enabled while the key is missing.
