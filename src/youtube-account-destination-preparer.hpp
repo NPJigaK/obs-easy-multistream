@@ -6,6 +6,7 @@
 #include "credential-vault.hpp"
 #include "google-oauth-token-transport.hpp"
 #include "youtube-account-selection.hpp"
+#include "youtube-account-profile-operation-lock.hpp"
 #include "youtube-api-stream-resolver.hpp"
 
 #include <QObject>
@@ -132,6 +133,7 @@ public:
 	using CompletionHandler = std::function<void(YouTubeDestinationPrepareCompletion)>;
 
 	YouTubeAccountDestinationPreparer(QString clientId, YouTubeAccountRefreshTokenStore &refreshTokenStore,
+					  YouTubeAccountProfileOperationLockProvider &operationLockProvider,
 					  QObject *parent = nullptr);
 	~YouTubeAccountDestinationPreparer() override;
 
@@ -155,7 +157,9 @@ private:
 
 	YouTubeAccountDestinationPreparer(QString clientId, std::unique_ptr<YouTubeDestinationRefreshPort> refreshPort,
 					  std::unique_ptr<YouTubeDestinationResolverPort> resolverPort,
-					  YouTubeAccountRefreshTokenStore &refreshTokenStore, QObject *parent);
+					  YouTubeAccountRefreshTokenStore &refreshTokenStore,
+					  YouTubeAccountProfileOperationLockProvider &operationLockProvider,
+					  QObject *parent);
 
 	class Impl;
 	std::unique_ptr<Impl> impl_;
