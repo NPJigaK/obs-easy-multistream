@@ -45,10 +45,20 @@ Its completions are guarded by an owner-thread epoch and attempt, and cancellati
 late callbacks fail closed. None of these account/network libraries is linked into or instantiated by the OBS plugin yet,
 so the product opens no listener or browser, makes no OAuth request, and leaves the current dock and manual RTMPS
 workflow unchanged. The profile codec now distinguishes manual and account modes and can preserve a bounded,
-non-secret channel/stream selection. Until the complete account provider is integrated, account mode fails closed and
-cannot consume the manual URL/key destination. Production browser-opener and active-profile wiring, refresh/revoke,
-runtime integration, and user-facing
-account controls remain release-gated.
+non-secret channel/stream selection. Account mode without a selection is also a valid persisted setup-required state,
+so clearing or importing a profile never silently changes it to the manual-key path. The detached provider can restore
+a saved selection by checking only the dedicated Credential Manager entry: present becomes locally configured but not
+Google-validated, missing becomes reauthorization-required, and credential-service errors remain unavailable. A profile
+with no selection does not inspect or delete the shared account credential. Restoration advances the account generation
+and starts no browser, listener, HTTP request, discovery operation, or output. Until the complete account provider is
+integrated, account mode fails closed and cannot consume the manual URL/key destination. Production browser-opener,
+active-profile wiring, refresh/revoke, runtime integration, and user-facing account controls remain release-gated.
+
+The refresh-token target is currently shared by all OBS profiles, while the non-secret channel/stream selection is
+profile-scoped. Credential presence therefore never proves that the saved selection and Google account match. A saved
+profile is only `Configured` internally; destination preparation must refresh the token and successfully resolve the exact
+saved channel and stream before any output can start. Runtime/UI integration is blocked until the shared-credential policy
+for profile duplication, import, rename, and multiple Google accounts is finalized and covered by cross-profile tests.
 
 The recommended Dual stream mode is a YouTube-side feature. Easy Multistream sends one 16:9 H.264/AAC stream to the user-provided RTMPS URL; YouTube creates the 9:16 feed, normally as a centre crop. This keeps the local OBS pipeline to one YouTube output and one shared video encode. The vertical mode must be enabled in YouTube Studio before the stream starts. A separately composed 9:16 stream sent by the encoder would require a second video pipeline and is intentionally deferred.
 

@@ -15,6 +15,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -45,6 +46,10 @@ public:
 	YouTubeAccountProviderSelectionStatus selectStream(YouTubeAccountLease lease, std::string_view id)
 	{
 		return provider_->selectStream(lease, id);
+	}
+	YouTubeAccountProviderRestoreStatus restoreSavedState(std::optional<YouTubeAccountSelection> selection) noexcept
+	{
+		return provider_->restoreSavedState(std::move(selection));
 	}
 	bool cancel(YouTubeAccountLease lease) noexcept { return provider_->cancel(lease); }
 	bool invalidateContext() noexcept { return provider_->invalidateContext(); }
@@ -92,10 +97,12 @@ using easy_multistream::SecureBuffer;
 using easy_multistream::YouTubeAccountDiscoveryPort;
 using easy_multistream::YouTubeAccountLease;
 using easy_multistream::YouTubeAccountProviderSelectionStatus;
+using easy_multistream::YouTubeAccountProviderRestoreStatus;
 using easy_multistream::YouTubeAccountProviderSnapshot;
 using easy_multistream::YouTubeAccountProviderStage;
 using easy_multistream::YouTubeAccountProviderStartStatus;
 using easy_multistream::YouTubeAccountRefreshTokenVault;
+using easy_multistream::YouTubeAccountSelection;
 using easy_multistream::YouTubeApiPagedCompletion;
 using easy_multistream::YouTubeApiPagerStartStatus;
 using easy_multistream::YouTubeApiPagingFailure;
@@ -114,6 +121,12 @@ constexpr char kAccessToken[] = "access-token-sentinel";
 constexpr char kRefreshToken[] = "refresh-token-sentinel";
 constexpr char kAuthorizationCode[] = "authorization-code-sentinel";
 constexpr char kVerifier[] = "verifier-sentinel-012345678901234567890123456789012345";
+
+YouTubeAccountSelection savedSelection(const char *suffix)
+{
+	return {std::string("channel-") + suffix, std::string("Channel ") + suffix, std::string("stream-") + suffix,
+		std::string("Stream ") + suffix};
+}
 
 bool waitUntil(const std::function<bool()> &predicate, int timeoutMilliseconds = 1000)
 {
@@ -233,6 +246,9 @@ public:
 		++cancelCount;
 		lastCancelled = attempt;
 		handler = {};
+		if (onCancel) {
+			onCancel();
+		}
 		return true;
 	}
 
@@ -261,6 +277,7 @@ public:
 	GoogleOAuthConsentMode lastConsentMode = GoogleOAuthConsentMode::Standard;
 	std::optional<GoogleOAuthAuthorizationStartStatus> forcedStartStatus;
 	CompletionHandler handler;
+	std::function<void()> onCancel;
 };
 
 class FakeTokenPort final : public YouTubeAccountTokenPort {
@@ -443,6 +460,13 @@ public:
 
 	CredentialStatus status() noexcept override
 	{
+		++statusCount;
+		if (onStatus) {
+			onStatus();
+		}
+		if (forcedStatus.has_value()) {
+			return *forcedStatus;
+		}
 		if (statusState == CredentialState::Present) {
 			return {CredentialState::Present, {}};
 		}
@@ -455,6 +479,7 @@ public:
 	int writeCount = 0;
 	int readCount = 0;
 	int eraseCount = 0;
+	int statusCount = 0;
 	SecureBuffer stored;
 	SecureBuffer lastWritten;
 	CredentialError writeError = CredentialError::None;
@@ -462,6 +487,8 @@ public:
 	CredentialError readError = CredentialError::None;
 	CredentialError eraseError = CredentialError::None;
 	CredentialState statusState = CredentialState::Missing;
+	std::optional<CredentialStatus> forcedStatus;
+	std::function<void()> onStatus;
 };
 
 struct Fixture final {
@@ -1012,6 +1039,280 @@ void testInvalidSelectionLeaseAndShutdownAreSafe()
 	QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
 }
 
+void checkNoConnectionPortsStarted(const Fixture &fixture)
+{
+	CHECK(fixture.authorizationPointer->startCount == 0);
+	CHECK(fixture.tokenPointer->startCount == 0);
+	CHECK(fixture.discoveryPointer->channelStartCount == 0);
+	CHECK(fixture.discoveryPointer->streamStartCount == 0);
+	CHECK(fixture.commitCount == 0);
+}
+
+void testSavedStateRestoreUsesOnlyCredentialStatus()
+{
+	{
+		Fixture fixture;
+		fixture.vault.statusState = CredentialState::Present;
+		const YouTubeAccountSelection selection = savedSelection("saved");
+		CHECK(fixture.provider->restoreSavedState(selection) ==
+		      YouTubeAccountProviderRestoreStatus::Configured);
+		const auto snapshot = fixture.provider->snapshot();
+		CHECK(snapshot.stage == YouTubeAccountProviderStage::Configured);
+		CHECK(snapshot.account.state == easy_multistream::YouTubeAccountState::Configured);
+		CHECK(snapshot.account.channelId == selection.channelId);
+		CHECK(snapshot.account.channelLabel == selection.channelLabel);
+		CHECK(snapshot.account.streamId == selection.streamId);
+		CHECK(snapshot.account.streamLabel == selection.streamLabel);
+		CHECK(snapshot.account.connectionLease.has_value());
+		CHECK(fixture.vault.statusCount == 1);
+		CHECK(fixture.vault.readCount == 0);
+		CHECK(fixture.vault.writeCount == 0);
+		CHECK(fixture.vault.eraseCount == 0);
+		checkNoConnectionPortsStarted(fixture);
+	}
+
+	{
+		Fixture fixture;
+		fixture.vault.statusState = CredentialState::Present;
+		CHECK(fixture.provider->restoreSavedState(std::nullopt) ==
+		      YouTubeAccountProviderRestoreStatus::SetupRequired);
+		const auto snapshot = fixture.provider->snapshot();
+		CHECK(snapshot.stage == YouTubeAccountProviderStage::Idle);
+		CHECK(snapshot.account.state == easy_multistream::YouTubeAccountState::Disconnected);
+		CHECK(!snapshot.account.connectionLease.has_value());
+		CHECK(fixture.vault.statusCount == 0);
+		CHECK(fixture.vault.eraseCount == 0);
+		checkNoConnectionPortsStarted(fixture);
+	}
+
+	{
+		Fixture fixture;
+		fixture.vault.statusState = CredentialState::Missing;
+		const YouTubeAccountSelection selection = savedSelection("missing");
+		CHECK(fixture.provider->restoreSavedState(selection) ==
+		      YouTubeAccountProviderRestoreStatus::ReauthorizationRequired);
+		const auto snapshot = fixture.provider->snapshot();
+		CHECK(snapshot.stage == YouTubeAccountProviderStage::NeedsReauthorization);
+		CHECK(snapshot.account.state == easy_multistream::YouTubeAccountState::NeedsReauthorization);
+		CHECK(snapshot.account.failure == easy_multistream::YouTubeAccountFailure::ReauthorizationRequired);
+		CHECK(snapshot.account.channelId == selection.channelId);
+		CHECK(snapshot.account.streamId == selection.streamId);
+		CHECK(!snapshot.account.connectionLease.has_value());
+		CHECK(fixture.vault.statusCount == 1);
+		checkNoConnectionPortsStarted(fixture);
+	}
+
+	{
+		Fixture fixture;
+		fixture.vault.statusState = CredentialState::Unavailable;
+		const YouTubeAccountSelection selection = savedSelection("unavailable");
+		CHECK(fixture.provider->restoreSavedState(selection) ==
+		      YouTubeAccountProviderRestoreStatus::CredentialUnavailable);
+		const auto snapshot = fixture.provider->snapshot();
+		CHECK(snapshot.stage == YouTubeAccountProviderStage::Unavailable);
+		CHECK(snapshot.account.state == easy_multistream::YouTubeAccountState::Unavailable);
+		CHECK(snapshot.account.failure == easy_multistream::YouTubeAccountFailure::CredentialUnavailable);
+		CHECK(snapshot.account.channelId == selection.channelId);
+		CHECK(snapshot.account.streamId == selection.streamId);
+		CHECK(!snapshot.account.connectionLease.has_value());
+		CHECK(fixture.vault.statusCount == 1);
+		checkNoConnectionPortsStarted(fixture);
+	}
+}
+
+void testSavedStateRestoreRejectsInvalidInputsAndStatusCombinations()
+{
+	{
+		Fixture fixture;
+		YouTubeAccountSelection invalid = savedSelection("invalid");
+		invalid.streamId.clear();
+		CHECK(fixture.provider->restoreSavedState(invalid) ==
+		      YouTubeAccountProviderRestoreStatus::InvalidSelection);
+		CHECK(fixture.provider->snapshot().stage == YouTubeAccountProviderStage::Failed);
+		CHECK(fixture.provider->snapshot().account.state == easy_multistream::YouTubeAccountState::Failed);
+		CHECK(fixture.vault.statusCount == 0);
+		checkNoConnectionPortsStarted(fixture);
+	}
+
+	for (const CredentialStatus inconsistent : {
+		     CredentialStatus{CredentialState::Present, {CredentialError::AccessDenied, 1}},
+		     CredentialStatus{CredentialState::Missing, {CredentialError::None, 0}},
+		     CredentialStatus{CredentialState::Unavailable, {CredentialError::None, 0}},
+		     CredentialStatus{CredentialState::Missing, {CredentialError::Unavailable, 1}},
+	     }) {
+		Fixture fixture;
+		fixture.vault.forcedStatus = inconsistent;
+		CHECK(fixture.provider->restoreSavedState(savedSelection("inconsistent")) ==
+		      YouTubeAccountProviderRestoreStatus::CredentialUnavailable);
+		CHECK(fixture.provider->snapshot().stage == YouTubeAccountProviderStage::Unavailable);
+		CHECK(fixture.provider->snapshot().account.state == easy_multistream::YouTubeAccountState::Unavailable);
+		CHECK(fixture.vault.statusCount == 1);
+		checkNoConnectionPortsStarted(fixture);
+	}
+}
+
+void testSavedStateRestoreInvalidatesOldProfileWork()
+{
+	Fixture fixture;
+	CHECK(fixture.provider->startConnection() == YouTubeAccountProviderStartStatus::Started);
+	const YouTubeAccountLease oldLease = activeLease(fixture);
+	const auto oldHandler = fixture.authorizationPointer->handler;
+	CHECK(fixture.provider->restoreSavedState(savedSelection("busy")) == YouTubeAccountProviderRestoreStatus::Busy);
+	CHECK(fixture.vault.statusCount == 0);
+	CHECK(fixture.provider->invalidateContext());
+
+	fixture.vault.statusState = CredentialState::Present;
+	const auto restoredSelection = savedSelection("new-profile");
+	CHECK(fixture.provider->restoreSavedState(restoredSelection) ==
+	      YouTubeAccountProviderRestoreStatus::Configured);
+	const auto restored = fixture.provider->snapshot();
+	CHECK(restored.account.connectionLease.has_value());
+	CHECK(restored.account.connectionLease->generation != oldLease.generation);
+
+	if (oldHandler) {
+		oldHandler(authorizationSuccess({oldLease.generation, oldLease.attempt}));
+	}
+	CHECK(fixture.tokenPointer->startCount == 0);
+	CHECK(fixture.provider->snapshot().stage == YouTubeAccountProviderStage::Configured);
+	CHECK(fixture.provider->snapshot().account.channelId == restoredSelection.channelId);
+	CHECK(fixture.provider->snapshot().account.connectionLease == restored.account.connectionLease);
+}
+
+void testConfiguredReauthorizationPreservesSavedConnectionUntilSuccess()
+{
+	Fixture fixture;
+	fixture.vault.statusState = CredentialState::Present;
+	const YouTubeAccountSelection saved = savedSelection("saved");
+	CHECK(fixture.provider->restoreSavedState(saved) == YouTubeAccountProviderRestoreStatus::Configured);
+	const YouTubeAccountLease savedLease =
+		fixture.provider->snapshot().account.connectionLease.value_or(YouTubeAccountLease{});
+
+	CHECK(fixture.provider->startConnection() == YouTubeAccountProviderStartStatus::Started);
+	CHECK(fixture.provider->cancel(activeLease(fixture)));
+	auto snapshot = fixture.provider->snapshot();
+	CHECK(snapshot.stage == YouTubeAccountProviderStage::Configured);
+	CHECK(snapshot.account.state == easy_multistream::YouTubeAccountState::Configured);
+	CHECK(snapshot.account.channelId == saved.channelId);
+	CHECK(snapshot.account.streamId == saved.streamId);
+	CHECK(snapshot.account.connectionLease == savedLease);
+
+	CHECK(fixture.provider->startConnection() == YouTubeAccountProviderStartStatus::Started);
+	const YouTubeAccountLease failedLease = activeLease(fixture);
+	fixture.authorizationPointer->complete(authorizationFailure({failedLease.generation, failedLease.attempt},
+								    GoogleOAuthProviderError::AccessDenied));
+	snapshot = fixture.provider->snapshot();
+	CHECK(snapshot.stage == YouTubeAccountProviderStage::Configured);
+	CHECK(snapshot.account.state == easy_multistream::YouTubeAccountState::Configured);
+	CHECK(snapshot.account.channelId == saved.channelId);
+	CHECK(snapshot.account.streamId == saved.streamId);
+	CHECK(snapshot.account.connectionLease == savedLease);
+
+	startAndReachChannelListing(fixture);
+	const YouTubeAccountLease replacement = activeLease(fixture);
+	fixture.discoveryPointer->completeChannels(channelPage({{"new-channel", "New channel"}}));
+	fixture.discoveryPointer->completeStreams(streamPage({{"new-stream", "new-channel", "New stream"}}));
+	snapshot = fixture.provider->snapshot();
+	CHECK(snapshot.stage == YouTubeAccountProviderStage::Connected);
+	CHECK(snapshot.account.state == easy_multistream::YouTubeAccountState::Connected);
+	CHECK(snapshot.account.channelId == "new-channel");
+	CHECK(snapshot.account.streamId == "new-stream");
+	CHECK(snapshot.account.connectionLease == replacement);
+}
+
+void testSavedStateRestoreReevaluatesCredentialPresence()
+{
+	Fixture fixture;
+	const YouTubeAccountSelection selection = savedSelection("repeat");
+	fixture.vault.statusState = CredentialState::Missing;
+	CHECK(fixture.provider->restoreSavedState(selection) ==
+	      YouTubeAccountProviderRestoreStatus::ReauthorizationRequired);
+	const std::uint64_t missingGeneration = fixture.provider->snapshot().account.generation;
+
+	fixture.vault.statusState = CredentialState::Present;
+	CHECK(fixture.provider->restoreSavedState(selection) == YouTubeAccountProviderRestoreStatus::Configured);
+	const auto connected = fixture.provider->snapshot();
+	CHECK(connected.account.generation != missingGeneration);
+	CHECK(connected.account.connectionLease.has_value());
+	const YouTubeAccountLease connectedLease = connected.account.connectionLease.value_or(YouTubeAccountLease{});
+
+	fixture.vault.statusState = CredentialState::Missing;
+	CHECK(fixture.provider->restoreSavedState(selection) ==
+	      YouTubeAccountProviderRestoreStatus::ReauthorizationRequired);
+	const auto missingAgain = fixture.provider->snapshot();
+	CHECK(missingAgain.account.generation != connected.account.generation);
+	CHECK(!missingAgain.account.connectionLease.has_value());
+	CHECK(!fixture.provider->snapshot().account.lease.has_value());
+	CHECK(fixture.vault.statusCount == 3);
+	CHECK(fixture.provider->snapshot().account.channelId == selection.channelId);
+
+	CHECK(fixture.provider->restoreSavedState(std::nullopt) == YouTubeAccountProviderRestoreStatus::SetupRequired);
+	const auto unconfigured = fixture.provider->snapshot();
+	CHECK(unconfigured.account.generation != missingAgain.account.generation);
+	CHECK(unconfigured.account.state == easy_multistream::YouTubeAccountState::Disconnected);
+	CHECK(unconfigured.account.channelId.empty());
+	CHECK(unconfigured.account.streamId.empty());
+	CHECK(fixture.vault.statusCount == 3);
+	CHECK(fixture.vault.eraseCount == 0);
+	CHECK(!fixture.provider->snapshot().account.connectionLease.has_value());
+	CHECK(connectedLease.generation != 0 && connectedLease.attempt != 0);
+	checkNoConnectionPortsStarted(fixture);
+}
+
+void testSavedStateRestoreIsThreadBoundAndReentrySafe()
+{
+	Fixture fixture;
+	std::optional<YouTubeAccountProviderRestoreStatus> wrongThreadResult;
+	std::thread worker(
+		[&]() { wrongThreadResult = fixture.provider->restoreSavedState(savedSelection("thread")); });
+	worker.join();
+	CHECK(wrongThreadResult == YouTubeAccountProviderRestoreStatus::WrongThread);
+	CHECK(fixture.vault.statusCount == 0);
+	CHECK(fixture.provider->snapshot().stage == YouTubeAccountProviderStage::Idle);
+
+	std::optional<YouTubeAccountProviderStartStatus> nestedStart;
+	std::optional<YouTubeAccountProviderRestoreStatus> nestedRestore;
+	std::optional<bool> nestedShutdown;
+	fixture.vault.statusState = CredentialState::Present;
+	fixture.vault.onStatus = [&]() {
+		nestedStart = fixture.provider->startConnection();
+		nestedRestore = fixture.provider->restoreSavedState(savedSelection("nested"));
+		nestedShutdown = fixture.provider->shutdown();
+	};
+	CHECK(fixture.provider->restoreSavedState(savedSelection("outer")) ==
+	      YouTubeAccountProviderRestoreStatus::Configured);
+	CHECK(nestedStart == YouTubeAccountProviderStartStatus::Busy);
+	CHECK(nestedRestore == YouTubeAccountProviderRestoreStatus::Busy);
+	CHECK(nestedShutdown.has_value() && !*nestedShutdown);
+	CHECK(fixture.provider->snapshot().account.channelId == "channel-outer");
+
+	fixture.vault.onStatus = {};
+	CHECK(fixture.provider->shutdown());
+	CHECK(fixture.provider->restoreSavedState(savedSelection("closed")) ==
+	      YouTubeAccountProviderRestoreStatus::Closed);
+	CHECK(fixture.vault.statusCount == 1);
+}
+
+void testFailureCleanupRejectsSynchronousLifecycleReentry()
+{
+	Fixture fixture;
+	CHECK(fixture.provider->startConnection() == YouTubeAccountProviderStartStatus::Started);
+	const YouTubeAccountLease lease = activeLease(fixture);
+	std::optional<bool> nestedInvalidate;
+	std::optional<bool> nestedShutdown;
+	fixture.authorizationPointer->onCancel = [&]() {
+		nestedInvalidate = fixture.provider->invalidateContext();
+		nestedShutdown = fixture.provider->shutdown();
+	};
+
+	fixture.authorizationPointer->complete(
+		authorizationFailure({lease.generation, lease.attempt}, GoogleOAuthProviderError::AccessDenied));
+
+	CHECK(nestedInvalidate.has_value() && !*nestedInvalidate);
+	CHECK(nestedShutdown.has_value() && !*nestedShutdown);
+	CHECK(fixture.provider->snapshot().stage == YouTubeAccountProviderStage::Failed);
+	CHECK(fixture.provider->snapshot().account.state == easy_multistream::YouTubeAccountState::Failed);
+}
+
 void testInvalidStartAndCommitterFailureDoNotMutateState()
 {
 	FakeCredentialVault vault;
@@ -1047,6 +1348,13 @@ int main(int argc, char **argv)
 	testCancelAtEachActiveStageSuppressesLateCallbacks();
 	testStaleOldAttemptCannotReplaceNewAttempt();
 	testInvalidSelectionLeaseAndShutdownAreSafe();
+	testSavedStateRestoreUsesOnlyCredentialStatus();
+	testSavedStateRestoreRejectsInvalidInputsAndStatusCombinations();
+	testSavedStateRestoreInvalidatesOldProfileWork();
+	testConfiguredReauthorizationPreservesSavedConnectionUntilSuccess();
+	testSavedStateRestoreReevaluatesCredentialPresence();
+	testSavedStateRestoreIsThreadBoundAndReentrySafe();
+	testFailureCleanupRejectsSynchronousLifecycleReentry();
 	testInvalidStartAndCommitterFailureDoNotMutateState();
 
 	if (failures != 0) {

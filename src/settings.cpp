@@ -212,8 +212,10 @@ bool canSave(const Settings &settings) noexcept
 		    YouTubeAccountSelectionValidationError::None) {
 		return false;
 	}
-	return settings.youtubeConnectionMode != YouTubeConnectionMode::Account ||
-	       settings.youtubeAccountSelection.has_value();
+	// Account mode without a selection is a valid, durable setup-required
+	// state. Disconnecting or importing a profile must not silently switch it
+	// back to the manual-key path.
+	return true;
 }
 
 const char *serializedMode(YouTubeConnectionMode mode) noexcept
