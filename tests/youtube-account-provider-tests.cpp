@@ -9,6 +9,7 @@
 #include <QUrl>
 
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <iostream>
 #include <memory>
@@ -16,22 +17,104 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
 namespace easy_multistream {
+
+class FakeYouTubeAccountProfileOperationLockApi final : public YouTubeAccountProfileOperationLockApi {
+public:
+	HANDLE createMutex(LPCWSTR, DWORD &error) noexcept override
+	{
+		++createCount;
+		if (nextCreateError.has_value()) {
+			error = *nextCreateError;
+			nextCreateError.reset();
+			return nullptr;
+		}
+		const HANDLE handle = reinterpret_cast<HANDLE>(nextHandle++);
+		openHandles.insert(handle);
+		error = ERROR_SUCCESS;
+		return handle;
+	}
+
+	DWORD wait(HANDLE handle, DWORD, DWORD &error) noexcept override
+	{
+		++waitCount;
+		lastWaitHandle = handle;
+		if (onWait) {
+			onWait();
+		}
+		const DWORD result = nextWaitResult.value_or(WAIT_OBJECT_0);
+		nextWaitResult.reset();
+		error = nextWaitError.value_or(result == WAIT_FAILED ? ERROR_GEN_FAILURE : ERROR_SUCCESS);
+		nextWaitError.reset();
+		return result;
+	}
+
+	bool releaseMutex(HANDLE handle, DWORD &error) noexcept override
+	{
+		++releaseCount;
+		lastReleaseHandle = handle;
+		if (onRelease) {
+			onRelease();
+		}
+		if (!releaseResult) {
+			error = releaseError;
+			return false;
+		}
+		error = ERROR_SUCCESS;
+		return true;
+	}
+
+	bool closeHandle(HANDLE handle, DWORD &error) noexcept override
+	{
+		++closeCount;
+		lastCloseHandle = handle;
+		openHandles.erase(handle);
+		if (!closeResult) {
+			error = closeError;
+			return false;
+		}
+		error = ERROR_SUCCESS;
+		return true;
+	}
+
+	std::optional<DWORD> nextCreateError;
+	std::optional<DWORD> nextWaitResult;
+	std::optional<DWORD> nextWaitError;
+	std::function<void()> onWait;
+	std::function<void()> onRelease;
+	bool releaseResult = true;
+	DWORD releaseError = ERROR_ACCESS_DENIED;
+	bool closeResult = true;
+	DWORD closeError = ERROR_INVALID_HANDLE;
+	int createCount = 0;
+	int waitCount = 0;
+	int releaseCount = 0;
+	int closeCount = 0;
+	HANDLE lastWaitHandle = nullptr;
+	HANDLE lastReleaseHandle = nullptr;
+	HANDLE lastCloseHandle = nullptr;
+	std::unordered_set<HANDLE> openHandles;
+
+private:
+	std::uintptr_t nextHandle = 1;
+};
 
 class YouTubeAccountProviderTestAccess final {
 public:
 	YouTubeAccountProviderTestAccess(std::unique_ptr<YouTubeAccountAuthorizationPort> authorization,
 					 std::unique_ptr<YouTubeAccountTokenPort> token,
 					 std::unique_ptr<YouTubeAccountDiscoveryPort> discovery,
-					 YouTubeAccountRefreshTokenStore &store, std::string profileBinding,
-					 YouTubeAccountSelectionCommitter committer,
+					 YouTubeAccountRefreshTokenStore &store,
+					 YouTubeAccountProfileOperationLockProvider &profileOperationLockProvider,
+					 std::string profileBinding, YouTubeAccountSelectionCommitter committer,
 					 QString clientId = QStringLiteral("test-client-id"))
 		: provider_(new YouTubeAccountProvider(std::move(clientId), std::move(authorization), std::move(token),
-						       std::move(discovery), store, profileBinding,
-						       std::move(committer), nullptr)),
+						       std::move(discovery), store, profileOperationLockProvider,
+						       profileBinding, std::move(committer), nullptr)),
 		  profileBinding_(std::move(profileBinding))
 	{
 	}
@@ -124,6 +207,8 @@ using easy_multistream::YouTubeReusableStream;
 using easy_multistream::YouTubeAccountAuthorizationPort;
 using easy_multistream::YouTubeAccountTokenPort;
 using easy_multistream::YouTubeAccountProviderTestAccess;
+using easy_multistream::FakeYouTubeAccountProfileOperationLockApi;
+using easy_multistream::YouTubeAccountProfileOperationLockProvider;
 
 constexpr char kAccessToken[] = "access-token-sentinel";
 constexpr char kRefreshToken[] = "refresh-token-sentinel";
@@ -266,7 +351,7 @@ public:
 	{
 		++shutdownCount;
 		handler = {};
-		return true;
+		return shutdownResult;
 	}
 
 	void complete(GoogleOAuthAuthorizationCompletion completion)
@@ -281,6 +366,7 @@ public:
 	int startCount = 0;
 	int cancelCount = 0;
 	int shutdownCount = 0;
+	bool shutdownResult = true;
 	std::optional<GoogleOAuthLoopbackAttempt> lastAttempt;
 	std::optional<GoogleOAuthLoopbackAttempt> lastCancelled;
 	QString lastClientId;
@@ -322,7 +408,7 @@ public:
 	{
 		++shutdownCount;
 		handler = {};
-		return true;
+		return shutdownResult;
 	}
 
 	void complete(GoogleOAuthTokenCompletion completion)
@@ -337,6 +423,7 @@ public:
 	int startCount = 0;
 	int cancelCount = 0;
 	int shutdownCount = 0;
+	bool shutdownResult = true;
 	std::optional<GoogleOAuthTokenAttempt> lastAttempt;
 	std::optional<GoogleOAuthTokenAttempt> lastCancelled;
 	QString lastClientId;
@@ -389,7 +476,7 @@ public:
 		++shutdownCount;
 		channelHandler = {};
 		streamHandler = {};
-		return true;
+		return shutdownResult;
 	}
 
 	void completeChannels(YouTubeApiPagedCompletion completion)
@@ -420,6 +507,7 @@ public:
 	int streamStartCount = 0;
 	int cancelCount = 0;
 	int shutdownCount = 0;
+	bool shutdownResult = true;
 	std::optional<YouTubeApiAttempt> lastChannelAttempt;
 	std::optional<YouTubeApiAttempt> lastStreamAttempt;
 	std::optional<YouTubeApiAttempt> lastCancelled;
@@ -522,10 +610,11 @@ public:
 		} else if (state == CredentialState::Missing) {
 			forcedStatus = CredentialStatus{CredentialState::Missing, {CredentialError::NotFound, 0}};
 		} else if (state == CredentialState::NeedsReauthorization) {
-			forcedStatus =
-				CredentialStatus{CredentialState::NeedsReauthorization, {CredentialError::ScopeMismatch, 1}};
+			forcedStatus = CredentialStatus{CredentialState::NeedsReauthorization,
+							{CredentialError::ScopeMismatch, 1}};
 		} else {
-			forcedStatus = CredentialStatus{CredentialState::Unavailable, {CredentialError::Unavailable, 1}};
+			forcedStatus =
+				CredentialStatus{CredentialState::Unavailable, {CredentialError::Unavailable, 1}};
 		}
 	}
 
@@ -577,6 +666,8 @@ struct Fixture final {
 	std::unique_ptr<FakeTokenPort> token;
 	std::unique_ptr<FakeDiscoveryPort> discovery;
 	FakeCredentialStore vault;
+	FakeYouTubeAccountProfileOperationLockApi operationLockApi;
+	std::unique_ptr<YouTubeAccountProfileOperationLockProvider> operationLockProvider;
 	std::string profileBinding = kProfileA;
 	bool commitResult = true;
 	int commitCount = 0;
@@ -587,6 +678,7 @@ struct Fixture final {
 
 	Fixture()
 	{
+		operationLockProvider = std::make_unique<YouTubeAccountProfileOperationLockProvider>(operationLockApi);
 		authorization = std::make_unique<FakeAuthorizationPort>();
 		token = std::make_unique<FakeTokenPort>();
 		discovery = std::make_unique<FakeDiscoveryPort>();
@@ -594,7 +686,8 @@ struct Fixture final {
 		FakeTokenPort *tokenPointer = token.get();
 		FakeDiscoveryPort *discoveryPointer = discovery.get();
 		provider = std::make_unique<YouTubeAccountProviderTestAccess>(
-			std::move(authorization), std::move(token), std::move(discovery), vault, profileBinding,
+			std::move(authorization), std::move(token), std::move(discovery), vault, *operationLockProvider,
+			profileBinding,
 			[this](const std::optional<easy_multistream::YouTubeAccountSelection> &selection) {
 				++commitCount;
 				commitHistory.push_back(selection);
@@ -1473,9 +1566,12 @@ void testInvalidProfileBindingFailsClosedWithoutCredentialAccess()
 	checkNoConnectionPortsStarted(fixture);
 
 	FakeCredentialStore store;
+	FakeYouTubeAccountProfileOperationLockApi operationLockApi;
+	YouTubeAccountProfileOperationLockProvider operationLockProvider(operationLockApi);
 	YouTubeAccountProviderTestAccess provider(std::make_unique<FakeAuthorizationPort>(),
 						  std::make_unique<FakeTokenPort>(),
-						  std::make_unique<FakeDiscoveryPort>(), store, invalid,
+						  std::make_unique<FakeDiscoveryPort>(), store, operationLockProvider,
+						  invalid,
 						  [](const std::optional<YouTubeAccountSelection> &) { return true; });
 	CHECK(provider.startConnection() == YouTubeAccountProviderStartStatus::InvalidProfileBinding);
 	CHECK(store.statusCount == 0);
@@ -1505,10 +1601,12 @@ void testFailureCleanupRejectsSynchronousLifecycleReentry()
 void testInvalidStartAndCommitterFailureDoNotMutateState()
 {
 	FakeCredentialStore vault;
+	FakeYouTubeAccountProfileOperationLockApi operationLockApi;
+	YouTubeAccountProfileOperationLockProvider operationLockProvider(operationLockApi);
 	int commits = 0;
 	YouTubeAccountProviderTestAccess provider(
 		std::make_unique<FakeAuthorizationPort>(), std::make_unique<FakeTokenPort>(),
-		std::make_unique<FakeDiscoveryPort>(), vault, kProfileA,
+		std::make_unique<FakeDiscoveryPort>(), vault, operationLockProvider, kProfileA,
 		[&](const std::optional<easy_multistream::YouTubeAccountSelection> &) {
 			++commits;
 			return true;
@@ -1517,6 +1615,242 @@ void testInvalidStartAndCommitterFailureDoNotMutateState()
 	CHECK(provider.startConnection() == YouTubeAccountProviderStartStatus::InvalidClientId);
 	CHECK(provider.snapshot().stage == YouTubeAccountProviderStage::Idle);
 	(void)commits;
+}
+
+void testProfileOperationLockSpansInteractiveTransaction()
+{
+	Fixture fixture;
+	CHECK(fixture.provider->startConnection() == YouTubeAccountProviderStartStatus::Started);
+	CHECK(fixture.operationLockApi.createCount == 1);
+	CHECK(fixture.operationLockApi.waitCount == 1);
+	CHECK(fixture.operationLockApi.releaseCount == 0);
+	CHECK(fixture.operationLockApi.closeCount == 0);
+
+	completeAuthorization(fixture);
+	CHECK(fixture.operationLockApi.releaseCount == 0);
+	completeToken(fixture);
+	CHECK(fixture.operationLockApi.releaseCount == 0);
+	fixture.discoveryPointer->completeChannels(channelPage({{"channel-one", "Channel One"}}));
+	CHECK(fixture.operationLockApi.releaseCount == 0);
+	fixture.discoveryPointer->completeStreams(streamPage({{"stream-one", "channel-one", "Everyday"}}));
+	CHECK(fixture.provider->snapshot().stage == YouTubeAccountProviderStage::Connected);
+	CHECK(fixture.vault.writeCount == 1);
+	CHECK(fixture.commitCount == 1);
+	CHECK(fixture.operationLockApi.releaseCount == 1);
+	CHECK(fixture.operationLockApi.closeCount == 1);
+	CHECK(fixture.operationLockApi.openHandles.empty());
+}
+
+void testProfileOperationLockFailureDoesNotMutateStart()
+{
+	Fixture fixture;
+	const auto before = fixture.provider->snapshot();
+	fixture.operationLockApi.nextWaitResult = WAIT_TIMEOUT;
+	CHECK(fixture.provider->startConnection() == YouTubeAccountProviderStartStatus::Busy);
+	CHECK(fixture.provider->snapshot().stage == before.stage);
+	CHECK(fixture.provider->snapshot().revision == before.revision);
+	CHECK(fixture.provider->snapshot().account.state == before.account.state);
+	CHECK(fixture.authorizationPointer->startCount == 0);
+	CHECK(fixture.operationLockApi.releaseCount == 0);
+	CHECK(fixture.operationLockApi.closeCount == 1);
+
+	fixture.operationLockApi.nextCreateError = ERROR_ACCESS_DENIED;
+	CHECK(fixture.provider->startConnection() == YouTubeAccountProviderStartStatus::OperationFailed);
+	CHECK(fixture.provider->snapshot().stage == before.stage);
+	CHECK(fixture.provider->snapshot().revision == before.revision);
+	CHECK(fixture.authorizationPointer->startCount == 0);
+	CHECK(fixture.operationLockApi.releaseCount == 0);
+}
+
+void testRecoveredProfileOperationLockContinuesNormally()
+{
+	Fixture fixture;
+	fixture.operationLockApi.nextWaitResult = WAIT_ABANDONED;
+	CHECK(fixture.provider->startConnection() == YouTubeAccountProviderStartStatus::Started);
+	CHECK(fixture.provider->snapshot().stage == YouTubeAccountProviderStage::Authorizing);
+	CHECK(fixture.operationLockApi.releaseCount == 0);
+	CHECK(fixture.provider->cancel(activeLease(fixture)));
+	CHECK(fixture.operationLockApi.releaseCount == 1);
+}
+
+void testProfileOperationLockSpansRestoreStatusAndPreservesRejectedRestore()
+{
+	Fixture fixture;
+	const YouTubeAccountSelection selection = savedSelection("restore-lock");
+	fixture.vault.forcedStatus = CredentialStatus{CredentialState::Present, {CredentialError::None, 0}};
+	bool lockHeldDuringStatus = false;
+	fixture.vault.onStatus = [&]() {
+		lockHeldDuringStatus = fixture.operationLockApi.releaseCount == 0;
+	};
+	CHECK(fixture.provider->restoreSavedState(kProfileA, selection) ==
+	      YouTubeAccountProviderRestoreStatus::Configured);
+	CHECK(lockHeldDuringStatus);
+	CHECK(fixture.operationLockApi.createCount == 1);
+	CHECK(fixture.operationLockApi.waitCount == 1);
+	CHECK(fixture.operationLockApi.releaseCount == 1);
+	CHECK(fixture.operationLockApi.closeCount == 1);
+
+	const auto beforeBusy = fixture.provider->snapshot();
+	fixture.operationLockApi.nextWaitResult = WAIT_TIMEOUT;
+	CHECK(fixture.provider->restoreSavedState(kProfileB, savedSelection("other")) ==
+	      YouTubeAccountProviderRestoreStatus::Busy);
+	const auto afterBusy = fixture.provider->snapshot();
+	CHECK(afterBusy.revision == beforeBusy.revision);
+	CHECK(afterBusy.stage == beforeBusy.stage);
+	CHECK(afterBusy.account.state == beforeBusy.account.state);
+	CHECK(afterBusy.account.channelId == beforeBusy.account.channelId);
+	CHECK(afterBusy.account.streamId == beforeBusy.account.streamId);
+	CHECK(fixture.vault.statusScopes.size() == 1);
+
+	fixture.operationLockApi.nextCreateError = ERROR_ACCESS_DENIED;
+	CHECK(fixture.provider->restoreSavedState(kProfileB, savedSelection("unavailable")) ==
+	      YouTubeAccountProviderRestoreStatus::OperationFailed);
+	const auto afterUnavailable = fixture.provider->snapshot();
+	CHECK(afterUnavailable.revision == beforeBusy.revision);
+	CHECK(afterUnavailable.stage == beforeBusy.stage);
+	CHECK(afterUnavailable.account.state == beforeBusy.account.state);
+	CHECK(afterUnavailable.account.channelId == beforeBusy.account.channelId);
+	CHECK(afterUnavailable.account.streamId == beforeBusy.account.streamId);
+	CHECK(fixture.vault.statusScopes.size() == 1);
+
+	fixture.vault.forcedStatus = CredentialStatus{CredentialState::Present, {CredentialError::None, 0}};
+	CHECK(fixture.provider->restoreSavedState(kProfileA, savedSelection("current")) ==
+	      YouTubeAccountProviderRestoreStatus::Configured);
+	CHECK(fixture.vault.statusScopes.back().profileBinding == kProfileA);
+}
+
+void testProfileOperationLockIsNotNeededForNonCredentialRestore()
+{
+	Fixture fixture;
+	CHECK(fixture.provider->restoreSavedState(kProfileA, std::nullopt) ==
+	      YouTubeAccountProviderRestoreStatus::SetupRequired);
+	CHECK(fixture.operationLockApi.createCount == 0);
+	CHECK(fixture.operationLockApi.waitCount == 0);
+	CHECK(fixture.vault.statusCount == 0);
+
+	CHECK(fixture.provider->restoreSavedState(kProfileA, YouTubeAccountSelection{"", "bad", "stream", "label"}) ==
+	      YouTubeAccountProviderRestoreStatus::InvalidSelection);
+	CHECK(fixture.operationLockApi.createCount == 0);
+	CHECK(fixture.operationLockApi.waitCount == 0);
+	CHECK(fixture.vault.statusCount == 0);
+}
+
+void testProfileOperationLockReleasesOnLifecycleTermination()
+{
+	{
+		Fixture fixture;
+		CHECK(fixture.provider->startConnection() == YouTubeAccountProviderStartStatus::Started);
+		CHECK(fixture.provider->cancel(activeLease(fixture)));
+		CHECK(fixture.operationLockApi.releaseCount == 1);
+	}
+	{
+		Fixture fixture;
+		CHECK(fixture.provider->startConnection() == YouTubeAccountProviderStartStatus::Started);
+		CHECK(fixture.provider->invalidateContext());
+		CHECK(fixture.operationLockApi.releaseCount == 1);
+	}
+	{
+		Fixture fixture;
+		CHECK(fixture.provider->startConnection() == YouTubeAccountProviderStartStatus::Started);
+		CHECK(fixture.provider->shutdown());
+		CHECK(fixture.operationLockApi.releaseCount == 1);
+	}
+	FakeYouTubeAccountProfileOperationLockApi operationLockApi;
+	YouTubeAccountProfileOperationLockProvider operationLockProvider(operationLockApi);
+	FakeCredentialStore vault;
+	{
+		YouTubeAccountProviderTestAccess provider(
+			std::make_unique<FakeAuthorizationPort>(), std::make_unique<FakeTokenPort>(),
+			std::make_unique<FakeDiscoveryPort>(), vault, operationLockProvider, kProfileA,
+			[](const std::optional<YouTubeAccountSelection> &) { return true; });
+		CHECK(provider.startConnection() == YouTubeAccountProviderStartStatus::Started);
+		CHECK(operationLockApi.releaseCount == 0);
+	}
+	CHECK(operationLockApi.releaseCount == 1);
+	CHECK(operationLockApi.closeCount == 1);
+}
+
+void testProfileOperationLockReleaseFailuresFailClosedAndRetry()
+{
+	{
+		Fixture fixture;
+		fixture.operationLockApi.releaseResult = false;
+		CHECK(fixture.provider->startConnection() == YouTubeAccountProviderStartStatus::Started);
+		completeAuthorization(fixture);
+		completeToken(fixture);
+		fixture.discoveryPointer->completeChannels(channelPage({{"channel-one", "Channel One"}}));
+		fixture.discoveryPointer->completeStreams(streamPage({{"stream-one", "channel-one", "Everyday"}}));
+
+		const auto failedRelease = fixture.provider->snapshot();
+		CHECK(failedRelease.stage == YouTubeAccountProviderStage::Unavailable);
+		CHECK(failedRelease.account.state == easy_multistream::YouTubeAccountState::Unavailable);
+		CHECK(!failedRelease.account.connectionLease.has_value());
+		CHECK(failedRelease.account.failure == easy_multistream::YouTubeAccountFailure::CredentialUnavailable);
+		CHECK(fixture.operationLockApi.releaseCount == 1);
+		CHECK(fixture.operationLockApi.closeCount == 0);
+		CHECK(fixture.provider->startConnection() == YouTubeAccountProviderStartStatus::Busy);
+
+		fixture.operationLockApi.releaseResult = true;
+		CHECK(fixture.provider->shutdown());
+		CHECK(fixture.operationLockApi.releaseCount == 2);
+		CHECK(fixture.operationLockApi.closeCount == 1);
+	}
+
+	{
+		Fixture fixture;
+		fixture.vault.forcedStatus = CredentialStatus{CredentialState::Present, {CredentialError::None, 0}};
+		fixture.operationLockApi.releaseResult = false;
+		CHECK(fixture.provider->restoreSavedState(kProfileA, savedSelection("release-failure")) ==
+		      YouTubeAccountProviderRestoreStatus::OperationFailed);
+		CHECK(fixture.provider->snapshot().stage == YouTubeAccountProviderStage::Unavailable);
+		CHECK(fixture.operationLockApi.releaseCount == 1);
+		const auto beforeRejectedRestore = fixture.provider->snapshot();
+		CHECK(fixture.provider->restoreSavedState(kProfileB, std::nullopt) ==
+		      YouTubeAccountProviderRestoreStatus::Busy);
+		const auto afterRejectedRestore = fixture.provider->snapshot();
+		CHECK(afterRejectedRestore.revision == beforeRejectedRestore.revision);
+		CHECK(afterRejectedRestore.stage == beforeRejectedRestore.stage);
+		CHECK(afterRejectedRestore.account.state == beforeRejectedRestore.account.state);
+
+		fixture.operationLockApi.releaseResult = true;
+		CHECK(fixture.provider->invalidateContext());
+		CHECK(fixture.operationLockApi.releaseCount == 2);
+		CHECK(fixture.operationLockApi.closeCount == 1);
+	}
+
+	{
+		Fixture fixture;
+		CHECK(fixture.provider->startConnection() == YouTubeAccountProviderStartStatus::Started);
+		fixture.operationLockApi.releaseResult = false;
+		CHECK(!fixture.provider->shutdown());
+		CHECK(fixture.provider->snapshot().stage == YouTubeAccountProviderStage::Closed);
+		CHECK(fixture.operationLockApi.releaseCount == 1);
+		fixture.operationLockApi.releaseResult = true;
+		CHECK(fixture.provider->shutdown());
+		CHECK(fixture.operationLockApi.releaseCount == 2);
+		CHECK(fixture.operationLockApi.closeCount == 1);
+	}
+
+	{
+		Fixture fixture;
+		CHECK(fixture.provider->startConnection() == YouTubeAccountProviderStartStatus::Started);
+		fixture.authorizationPointer->shutdownResult = false;
+		fixture.tokenPointer->shutdownResult = false;
+		fixture.discoveryPointer->shutdownResult = false;
+		CHECK(!fixture.provider->shutdown());
+		CHECK(fixture.provider->snapshot().stage == YouTubeAccountProviderStage::Closed);
+		CHECK(fixture.authorizationPointer->shutdownCount == 1);
+		CHECK(fixture.tokenPointer->shutdownCount == 1);
+		CHECK(fixture.discoveryPointer->shutdownCount == 1);
+
+		fixture.authorizationPointer->shutdownResult = true;
+		fixture.tokenPointer->shutdownResult = true;
+		fixture.discoveryPointer->shutdownResult = true;
+		CHECK(fixture.provider->shutdown());
+		CHECK(fixture.authorizationPointer->shutdownCount == 2);
+		CHECK(fixture.tokenPointer->shutdownCount == 2);
+		CHECK(fixture.discoveryPointer->shutdownCount == 2);
+	}
 }
 
 } // namespace
@@ -1548,6 +1882,13 @@ int main(int argc, char **argv)
 	testInvalidProfileBindingFailsClosedWithoutCredentialAccess();
 	testFailureCleanupRejectsSynchronousLifecycleReentry();
 	testInvalidStartAndCommitterFailureDoNotMutateState();
+	testProfileOperationLockSpansInteractiveTransaction();
+	testProfileOperationLockFailureDoesNotMutateStart();
+	testRecoveredProfileOperationLockContinuesNormally();
+	testProfileOperationLockSpansRestoreStatusAndPreservesRejectedRestore();
+	testProfileOperationLockIsNotNeededForNonCredentialRestore();
+	testProfileOperationLockReleasesOnLifecycleTermination();
+	testProfileOperationLockReleaseFailuresFailClosedAndRetry();
 
 	if (failures != 0) {
 		std::cerr << failures << " YouTube account provider test(s) failed\n";

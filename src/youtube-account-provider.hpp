@@ -8,6 +8,7 @@
 #include "google-oauth-token-transport.hpp"
 #include "youtube-account-coordinator.hpp"
 #include "youtube-api-discovery-pager.hpp"
+#include "youtube-account-profile-operation-lock.hpp"
 
 #include <QObject>
 #include <QString>
@@ -140,8 +141,10 @@ public:
 	// profile. It is kept in memory only and combined with the selected channel
 	// for every credential-store operation.
 	YouTubeAccountProvider(QString clientId, GoogleOAuthAuthorizationSession::BrowserOpener browserOpener,
-			       YouTubeAccountRefreshTokenStore &refreshTokenStore, std::string profileBinding,
-			       YouTubeAccountSelectionCommitter selectionCommitter, QObject *parent = nullptr);
+			       YouTubeAccountRefreshTokenStore &refreshTokenStore,
+			       YouTubeAccountProfileOperationLockProvider &profileOperationLockProvider,
+			       std::string profileBinding, YouTubeAccountSelectionCommitter selectionCommitter,
+			       QObject *parent = nullptr);
 	~YouTubeAccountProvider() override;
 
 	YouTubeAccountProvider(const YouTubeAccountProvider &) = delete;
@@ -178,8 +181,10 @@ private:
 	YouTubeAccountProvider(QString clientId, std::unique_ptr<YouTubeAccountAuthorizationPort> authorizationPort,
 			       std::unique_ptr<YouTubeAccountTokenPort> tokenPort,
 			       std::unique_ptr<YouTubeAccountDiscoveryPort> discoveryPort,
-			       YouTubeAccountRefreshTokenStore &refreshTokenStore, std::string profileBinding,
-			       YouTubeAccountSelectionCommitter selectionCommitter, QObject *parent);
+			       YouTubeAccountRefreshTokenStore &refreshTokenStore,
+			       YouTubeAccountProfileOperationLockProvider &profileOperationLockProvider,
+			       std::string profileBinding, YouTubeAccountSelectionCommitter selectionCommitter,
+			       QObject *parent);
 
 	class Impl;
 	std::unique_ptr<Impl> impl_;
