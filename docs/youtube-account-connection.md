@@ -162,11 +162,13 @@ The internal implementation order is intentionally not shown in the user interfa
 7. add the account UI and keep manual configuration under advanced settings;
 8. complete Google policy, verification, privacy, quota, and signed-release gates before recommending it to general users.
 
-The first two items, the isolated loopback-listener portion of item three, the token exchange/refresh/revocation plus
+The first two items, the loopback listener and injected browser-opener authorization-session portions of item three, the token exchange/refresh/revocation plus
 one-page channel/reusable-stream discovery portions of item four, and the selected-stream resolver in item five are now
-present as non-instantiated libraries with standalone tests. The listener test uses real
+present as non-instantiated libraries with standalone tests. The listener and authorization-session tests use real
 local sockets to verify exclusive `127.0.0.1` binding, bounded HTTP parsing, state rejection, one-shot completion,
-timeout, request limits, and cancellation. The token test uses an injected network double to verify exact fixed HTTPS
+timeout, request limits, cancellation, bind-and-arm-before-open ordering, browser-open failure, re-entrant completion,
+attempt replacement, shutdown, and move-only code/verifier handoff. The browser opener is a fake; the OBS plugin does
+not yet wire `QDesktopServices::openUrl`. The token test uses an injected network double to verify exact fixed HTTPS
 endpoints, form encoding, no client secret, verified TLS requirements, redirect rejection, bounded strict parsing,
 provider-error classification, cancellation, stale-reply rejection, shutdown, and secret-size boundaries. The
 discovery test verifies fixed read-only endpoints and query fields, Bearer-header isolation, strict bounded page
@@ -176,7 +178,7 @@ fetches one selected stream and returns its validated RTMPS destination and curr
 without adding the key to discovery data or persistent settings. None of these libraries is
 linked into the OBS plugin, so the product still does not open a browser, listen on a port, make an OAuth/API network
 request, or read an account credential. The profile format and runtime fail-closed boundary are present, but the dock
-continues to expose only the working manual setup. System-browser launch, bounded multi-page
+continues to expose only the working manual setup. Production browser-opener/provider integration, bounded multi-page
 orchestration, refresh-token vault integration, runtime handoff, and all later items stay gated, so a partial
 connection path cannot appear in the user interface.
 
