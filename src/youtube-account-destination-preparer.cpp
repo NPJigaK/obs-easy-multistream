@@ -573,7 +573,14 @@ private:
 		state_ = completion.status == YouTubeDestinationPrepareStatus::Cancelled
 				 ? YouTubeDestinationPreparerState::Cancelled
 				 : YouTubeDestinationPreparerState::Completed;
-		releaseOperationLock();
+		const bool lockReleased = releaseOperationLock();
+		if (!lockReleased) {
+			// The operation cannot be reported as usable while its profile lease is
+			// still held. Discard the destination even when preparation succeeded;
+			// shutdown() can retry the release on the owner thread.
+			completion.status = YouTubeDestinationPrepareStatus::ServiceUnavailable;
+			completion.ingestion.reset();
+		}
 		if (!handler) {
 			return;
 		}

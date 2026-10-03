@@ -562,6 +562,72 @@ void testOperationLockSpansPreparationAndReleasesBeforeHandler()
 	CHECK(fixture.lockApi.releaseCount == 2);
 }
 
+void testCompletionReleaseFailureFailsClosedAndRetries()
+{
+	{
+		Fixture fixture;
+		fixture.vault.seed({kProfileBindingA, "channel-1"}, kOldRefreshToken);
+		fixture.lockApi.releaseSucceeds = false;
+		YouTubeDestinationPrepareStatus deliveredStatus = YouTubeDestinationPrepareStatus::InvalidResponse;
+		bool deliveredIngestion = true;
+		YouTubeDestinationPrepareStartStatus nestedStartStatus =
+			YouTubeDestinationPrepareStartStatus::OperationFailed;
+		const auto first = YouTubeDestinationPrepareAttempt{2, 1};
+		CHECK(fixture.preparer->start(requestFor(first), [&](YouTubeDestinationPrepareCompletion completion) {
+			deliveredStatus = completion.status;
+			deliveredIngestion = completion.ingestion.has_value();
+			nestedStartStatus =
+				fixture.preparer->start(requestFor({2, 2}), [](YouTubeDestinationPrepareCompletion) {});
+		}) == YouTubeDestinationPrepareStartStatus::Started);
+		CHECK(fixture.refreshState->lastAttempt.has_value());
+		if (fixture.refreshState->lastAttempt.has_value()) {
+			fixture.refreshState->handlers.front()(refreshSuccess(*fixture.refreshState->lastAttempt));
+		}
+		CHECK(fixture.resolverState->lastAttempt.has_value());
+		if (fixture.resolverState->lastAttempt.has_value()) {
+			fixture.resolverState->handlers.front()(resolveSuccess(*fixture.resolverState->lastAttempt));
+		}
+		processQueuedEvents();
+		CHECK(deliveredStatus == YouTubeDestinationPrepareStatus::ServiceUnavailable);
+		CHECK(!deliveredIngestion);
+		CHECK(nestedStartStatus == YouTubeDestinationPrepareStartStatus::Busy);
+		CHECK(fixture.lockApi.releaseCount == 1);
+		CHECK(!fixture.preparer->activeAttempt().has_value());
+		fixture.lockApi.releaseSucceeds = true;
+		CHECK(fixture.preparer->shutdown());
+		CHECK(fixture.lockApi.releaseCount == 2);
+		CHECK(fixture.lockApi.closeCount == 1);
+	}
+
+	{
+		Fixture fixture;
+		fixture.vault.seed({kProfileBindingA, "channel-1"}, kOldRefreshToken);
+		fixture.lockApi.releaseSucceeds = false;
+		YouTubeDestinationPrepareStatus deliveredStatus = YouTubeDestinationPrepareStatus::InvalidResponse;
+		bool deliveredIngestion = true;
+		const auto attempt = YouTubeDestinationPrepareAttempt{2, 3};
+		CHECK(fixture.preparer->start(requestFor(attempt), [&](YouTubeDestinationPrepareCompletion completion) {
+			deliveredStatus = completion.status;
+			deliveredIngestion = completion.ingestion.has_value();
+		}) == YouTubeDestinationPrepareStartStatus::Started);
+		CHECK(fixture.refreshState->lastAttempt.has_value());
+		if (fixture.refreshState->lastAttempt.has_value()) {
+			fixture.refreshState->handlers.front()(refreshSuccess(*fixture.refreshState->lastAttempt));
+		}
+		CHECK(fixture.resolverState->lastAttempt.has_value());
+		if (fixture.resolverState->lastAttempt.has_value()) {
+			fixture.resolverState->handlers.front()(
+				resolveFailure(*fixture.resolverState->lastAttempt,
+					       YouTubeStreamResolverCompletionStatus::StreamNotReady));
+		}
+		processQueuedEvents();
+		CHECK(deliveredStatus == YouTubeDestinationPrepareStatus::ServiceUnavailable);
+		CHECK(!deliveredIngestion);
+		fixture.lockApi.releaseSucceeds = true;
+		CHECK(fixture.preparer->shutdown());
+	}
+}
+
 void testOperationLockReleaseForCancellationInvalidationAndShutdownFailure()
 {
 	{
@@ -1298,6 +1364,7 @@ int main(int argc, char **argv)
 	QCoreApplication application(argc, argv);
 	testOperationLockRejectionsDoNotTouchOperation();
 	testOperationLockSpansPreparationAndReleasesBeforeHandler();
+	testCompletionReleaseFailureFailsClosedAndRetries();
 	testOperationLockReleaseForCancellationInvalidationAndShutdownFailure();
 	testSuccessAndExistingRefreshTokenIsRetained();
 	testRefreshTokenRotationIsPersistedBeforeResolve();
