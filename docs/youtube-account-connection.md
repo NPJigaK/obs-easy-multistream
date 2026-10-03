@@ -244,4 +244,12 @@ serialization rule: the Windows API cannot conditionally delete a credential by 
 processes must not mutate the same profile binding concurrently. In all cases, the start-time destination preparer must
 successfully refresh and resolve the exact saved channel and stream before an output can be created.
 
+The repository now contains a detached Windows operation-lock foundation for that rule. It derives a `Local\\` named
+mutex only from the validated SHA-256 profile binding, never from a raw path, channel ID, or token. Acquisition is
+non-blocking, an abandoned mutex is reported as a recovered acquisition so the caller can re-read durable state, and a
+process-wide claim registry prevents Windows' same-thread recursive mutex behavior from admitting two local operations.
+The lock is owner-thread-bound, non-copyable, non-movable, and releases both the native handle and the local claim on every terminal
+path. It is still test-only and is not linked into the OBS plugin or exposed in the dock; the provider and destination
+preparer must hold it across their complete asynchronous transactions before either component can be integrated.
+
 No account UI is added merely to advertise unfinished functionality. A build without a complete configured provider continues to show only the working manual setup.

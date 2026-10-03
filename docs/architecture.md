@@ -21,7 +21,8 @@ Browser-based YouTube account connection is the accepted next setup path, but it
 The current source tree includes a non-instantiated account state machine, Google desktop-authorization protocol core,
 a separate loopback-listener library, a browser-opener authorization-session layer, a fixed-origin HTTPS token
 transport, a read-only YouTube discovery transport with bounded pagination, a headless interactive account provider,
-a separate secret-bearing selected-stream resolver, and a detached headless destination preparer. They
+a separate secret-bearing selected-stream resolver, a detached headless destination preparer, and a Windows
+profile-operation lock. They
 generate PKCE/state values, build and validate the authorization exchange, reject old account-operation leases, test a
 short-lived `127.0.0.1` callback listener on real local sockets, guarantee bind-and-arm-before-browser ordering, and
 test authorization-code exchange, refresh, and revocation against injected local doubles. The discovery transport obtains exactly one bounded page of owned channels or
@@ -67,7 +68,10 @@ never read, migrated, or deleted. Credential presence is still only local config
 The provider and destination preparer retain the immutable scope captured for each operation, so delayed work from an old
 profile cannot read or write another profile's credential. Before any output can start, preparation must refresh the token
 and resolve the exact saved channel and stream. If profile selection is persisted before a new token is written and that
-write fails, the selection is rolled back. Account libraries remain detached from the production plugin, dock, and runtime.
+write fails, the selection is rolled back. The profile-operation lock derives a non-secret `Local\\` mutex name from the
+same validated binding, rejects both other-process ownership and same-process recursive acquisition without waiting, and
+reports abandoned ownership so durable state can be re-read. Account libraries remain detached from the production plugin,
+dock, and runtime.
 
 The recommended Dual stream mode is a YouTube-side feature. Easy Multistream sends one 16:9 H.264/AAC stream to the user-provided RTMPS URL; YouTube creates the 9:16 feed, normally as a centre crop. This keeps the local OBS pipeline to one YouTube output and one shared video encode. The vertical mode must be enabled in YouTube Studio before the stream starts. A separately composed 9:16 stream sent by the encoder would require a second video pipeline and is intentionally deferred.
 

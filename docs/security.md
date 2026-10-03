@@ -88,6 +88,15 @@ started until the refresh-token rotation (when present) has been durably stored,
 refresh token to the YouTube API. A failed preparation cannot alter the native OBS output; this remains a future
 runtime-integration rule, because neither the preparer nor the resolver is currently instantiated by the plugin.
 
+A detached Windows profile-operation lock provides the cross-process serialization primitive required by those account
+transactions. Its `Local\\` named-mutex identity contains only the validated SHA-256 profile binding. A separate
+process-wide claim registry rejects a second local acquisition because Windows mutexes are otherwise recursive for the
+owning thread. Acquisition never waits, access or operating-system failures fail closed, and abandoned ownership is
+distinguished so a future caller can re-read the profile selection and credential metadata before continuing. The lock
+does not authenticate another process or grant credential access, and the current OBS module does not instantiate it.
+Support is limited to the current interactive Windows session; cross-session use of one OBS profile remains unsupported
+unless a later design adds a user-scoped `Global\\` object with an explicitly reviewed security descriptor.
+
 The YouTube output owns a private RTMP service and output while retaining explicit references to the native H.264 and main AAC encoders. It never starts or stops the native OBS stream. A YouTube error closes only the YouTube output, leaves Twitch running, and exposes a separate retry action after teardown completes.
 
 The accepted browser-based account connection will add the listener, token transport, discovery transport, and
