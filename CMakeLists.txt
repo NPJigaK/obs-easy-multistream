@@ -22,6 +22,7 @@ add_library(${CMAKE_PROJECT_NAME}-session-core STATIC)
 add_library(${CMAKE_PROJECT_NAME}-oauth-core STATIC)
 add_library(${CMAKE_PROJECT_NAME}-oauth-loopback STATIC)
 add_library(${CMAKE_PROJECT_NAME}-oauth-token-transport STATIC)
+add_library(${CMAKE_PROJECT_NAME}-youtube-discovery STATIC)
 
 find_package(libobs REQUIRED)
 find_package(obs-frontend-api REQUIRED)
@@ -96,6 +97,19 @@ target_include_directories(
 target_link_libraries(
   ${CMAKE_PROJECT_NAME}-oauth-token-transport
   PUBLIC ${CMAKE_PROJECT_NAME}-oauth-core Qt6::Core Qt6::Network
+)
+
+target_sources(
+  ${CMAKE_PROJECT_NAME}-youtube-discovery
+  PRIVATE src/youtube-api-discovery.cpp src/youtube-api-discovery.hpp
+)
+target_include_directories(
+  ${CMAKE_PROJECT_NAME}-youtube-discovery
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+target_link_libraries(
+  ${CMAKE_PROJECT_NAME}-youtube-discovery
+  PUBLIC ${CMAKE_PROJECT_NAME}-secure-core Qt6::Core Qt6::Network
 )
 
 configure_file(src/version.hpp.in generated/version.hpp @ONLY)
@@ -244,6 +258,33 @@ if(BUILD_TESTING)
     COMMAND ${CMAKE_PROJECT_NAME}-google-oauth-token-tests
   )
 
+  add_executable(${CMAKE_PROJECT_NAME}-youtube-discovery-tests)
+  target_sources(
+    ${CMAKE_PROJECT_NAME}-youtube-discovery-tests
+    PRIVATE tests/youtube-api-discovery-tests.cpp
+  )
+  target_link_libraries(
+    ${CMAKE_PROJECT_NAME}-youtube-discovery-tests
+    PRIVATE ${CMAKE_PROJECT_NAME}-youtube-discovery
+  )
+
+  add_custom_command(
+    TARGET ${CMAKE_PROJECT_NAME}-youtube-discovery-tests
+    POST_BUILD
+    COMMAND
+      "${CMAKE_COMMAND}" -E copy_if_different
+      $<TARGET_RUNTIME_DLLS:${CMAKE_PROJECT_NAME}-youtube-discovery-tests>
+      $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}-youtube-discovery-tests>
+    COMMAND_EXPAND_LISTS
+    COMMENT "Copy YouTube discovery test runtime dependencies"
+    VERBATIM
+  )
+
+  add_test(
+    NAME ${CMAKE_PROJECT_NAME}-youtube-discovery
+    COMMAND ${CMAKE_PROJECT_NAME}-youtube-discovery-tests
+  )
+
   add_executable(${CMAKE_PROJECT_NAME}-runtime-tests)
   target_sources(
     ${CMAKE_PROJECT_NAME}-runtime-tests
@@ -333,6 +374,7 @@ if(BUILD_TESTING)
     ${CMAKE_PROJECT_NAME}-google-oauth-protocol
     ${CMAKE_PROJECT_NAME}-google-oauth-loopback
     ${CMAKE_PROJECT_NAME}-google-oauth-token
+    ${CMAKE_PROJECT_NAME}-youtube-discovery
     PROPERTIES ENVIRONMENT_MODIFICATION "${test_runtime_environment}"
   )
 endif()
