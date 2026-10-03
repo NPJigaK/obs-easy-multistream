@@ -272,6 +272,24 @@ void testSettingsConnectionModesAndMigration()
 	const auto setupRequired = easy_multistream::loadProfileSettings(incompleteAccount.get());
 	CHECK(setupRequired.status == easy_multistream::SettingsLoadStatus::SetupRequired);
 	CHECK(setupRequired.settings.youtubeConnectionMode == easy_multistream::YouTubeConnectionMode::Account);
+	CHECK(!setupRequired.settings.youtubeAccountSelection.has_value());
+	config_set_string(incompleteAccount.get(), "EasyMultistream", "ConnectionMode", "manual");
+	config_set_string(incompleteAccount.get(), "EasyMultistream", "YouTubeServerUrl",
+			  kValidYouTubeServerUrl.data());
+	easy_multistream::writeProfileSettings(incompleteAccount.get(), setupRequired.settings);
+	const auto setupRequiredRoundTrip = easy_multistream::loadProfileSettings(incompleteAccount.get());
+	CHECK(setupRequiredRoundTrip.status == easy_multistream::SettingsLoadStatus::SetupRequired);
+	CHECK(setupRequiredRoundTrip.settings.youtubeConnectionMode ==
+	      easy_multistream::YouTubeConnectionMode::Account);
+	CHECK(!setupRequiredRoundTrip.settings.youtubeAccountSelection.has_value());
+
+	Config accountWithoutSelectionWithManualUrl(
+		"[EasyMultistream]\nSchemaVersion=3\nYouTubeEnabled=true\nConnectionMode=account\n"
+		"YouTubeServerUrl=rtmps://a.rtmps.youtube.com/live2\n");
+	const auto noManualFallback = easy_multistream::loadProfileSettings(accountWithoutSelectionWithManualUrl.get());
+	CHECK(noManualFallback.status == easy_multistream::SettingsLoadStatus::SetupRequired);
+	CHECK(noManualFallback.settings.youtubeConnectionMode == easy_multistream::YouTubeConnectionMode::Account);
+	CHECK(!noManualFallback.settings.youtubeAccountSelection.has_value());
 
 	Config unknownMode("[EasyMultistream]\nSchemaVersion=3\nYouTubeEnabled=true\nConnectionMode=automatic\n");
 	CHECK(easy_multistream::loadProfileSettings(unknownMode.get()).status ==
@@ -396,6 +414,20 @@ void testAccountSettingsSafeSaveAndReload()
 			CHECK(loaded.settings.youtubeAccountSelection->channelLabel == u8"配信チャンネル");
 			CHECK(loaded.settings.youtubeAccountSelection->streamLabel == u8"いつもの配信");
 		}
+		easy_multistream::Settings setupRequired = loaded.settings;
+		setupRequired.youtubeAccountSelection.reset();
+		CHECK(easy_multistream::saveProfileSettings(config, setupRequired) == CONFIG_SUCCESS);
+		config_close(config);
+	}
+
+	config = nullptr;
+	CHECK(config_open(&config, utf8Path.c_str(), CONFIG_OPEN_EXISTING) == CONFIG_SUCCESS);
+	CHECK(config != nullptr);
+	if (config != nullptr) {
+		const auto setupRequired = easy_multistream::loadProfileSettings(config);
+		CHECK(setupRequired.status == easy_multistream::SettingsLoadStatus::SetupRequired);
+		CHECK(setupRequired.settings.youtubeConnectionMode == easy_multistream::YouTubeConnectionMode::Account);
+		CHECK(!setupRequired.settings.youtubeAccountSelection.has_value());
 		config_close(config);
 	}
 
@@ -403,6 +435,10 @@ void testAccountSettingsSafeSaveAndReload()
 	const std::string contents{std::istreambuf_iterator<char>(savedFile), std::istreambuf_iterator<char>()};
 	savedFile.close();
 	CHECK(contents.find("ConnectionMode=account") != std::string::npos);
+	CHECK(contents.find("YouTubeChannelId") == std::string::npos);
+	CHECK(contents.find("YouTubeChannelLabel") == std::string::npos);
+	CHECK(contents.find("YouTubeStreamId") == std::string::npos);
+	CHECK(contents.find("YouTubeStreamLabel") == std::string::npos);
 	CHECK(contents.find("RefreshToken") == std::string::npos);
 	CHECK(contents.find("AccessToken") == std::string::npos);
 	CHECK(contents.find("StreamKey") == std::string::npos);
@@ -434,7 +470,7 @@ void testInvalidSettingsStillScrubPlaintextSecretsFromDisk()
 	CHECK(config_save_safe(config, "tmp", nullptr) == CONFIG_SUCCESS);
 
 	easy_multistream::Settings invalid;
-	invalid.youtubeConnectionMode = easy_multistream::YouTubeConnectionMode::Account;
+	invalid.youtubeConnectionMode = static_cast<easy_multistream::YouTubeConnectionMode>(99);
 	CHECK(easy_multistream::saveProfileSettings(config, invalid) == CONFIG_ERROR);
 	CHECK(!config_has_user_value(config, "EasyMultistream", "RefreshToken"));
 	config_close(config);
@@ -480,7 +516,7 @@ void testPlaintextScrubSaveFailureIsRecoverable()
 	CHECK(!filesystemError);
 
 	easy_multistream::Settings invalid;
-	invalid.youtubeConnectionMode = easy_multistream::YouTubeConnectionMode::Account;
+	invalid.youtubeConnectionMode = static_cast<easy_multistream::YouTubeConnectionMode>(99);
 	CHECK(easy_multistream::saveProfileSettings(config, invalid) != CONFIG_SUCCESS);
 	CHECK(!config_has_user_value(config, "EasyMultistream", "RefreshToken"));
 

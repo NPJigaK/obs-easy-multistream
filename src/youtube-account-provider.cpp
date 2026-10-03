@@ -199,6 +199,18 @@ bool validStream(const YouTubeReusableStream &stream, std::string_view channelId
 	       isValidYouTubeAccountIdentifier(stream.channelId) && isValidYouTubeAccountLabel(stream.label);
 }
 
+YouTubeAccountProviderStage providerStageForRetainedConnection(YouTubeAccountState state,
+							       YouTubeAccountProviderStage fallback) noexcept
+{
+	if (state == YouTubeAccountState::Connected) {
+		return YouTubeAccountProviderStage::Connected;
+	}
+	if (state == YouTubeAccountState::Configured) {
+		return YouTubeAccountProviderStage::Configured;
+	}
+	return fallback;
+}
+
 } // namespace
 
 class YouTubeAccountProvider::Impl final {
@@ -226,7 +238,7 @@ public:
 		if (stage_ == YouTubeAccountProviderStage::Closed) {
 			return YouTubeAccountProviderStartStatus::Closed;
 		}
-		if (commitInProgress_ || activeLease().has_value()) {
+		if (commitInProgress_ || lifecycleMutationInProgress_ || activeLease().has_value()) {
 			return YouTubeAccountProviderStartStatus::Busy;
 		}
 		if (!isValidGoogleOAuthClientId(clientId_)) {
@@ -286,6 +298,9 @@ public:
 		if (stage_ == YouTubeAccountProviderStage::Closed) {
 			return YouTubeAccountProviderSelectionStatus::Closed;
 		}
+		if (lifecycleMutationInProgress_) {
+			return YouTubeAccountProviderSelectionStatus::WrongStage;
+		}
 		if (!leaseIsActive(lease)) {
 			return YouTubeAccountProviderSelectionStatus::StaleLease;
 		}
@@ -304,6 +319,9 @@ public:
 		if (stage_ == YouTubeAccountProviderStage::Closed) {
 			return YouTubeAccountProviderSelectionStatus::Closed;
 		}
+		if (lifecycleMutationInProgress_) {
+			return YouTubeAccountProviderSelectionStatus::WrongStage;
+		}
 		if (!leaseIsActive(lease)) {
 			return YouTubeAccountProviderSelectionStatus::StaleLease;
 		}
@@ -313,35 +331,110 @@ public:
 		return selectStreamCandidate(lease, streamId);
 	}
 
+	YouTubeAccountProviderRestoreStatus restoreSavedState(std::optional<YouTubeAccountSelection> selection) noexcept
+	{
+		if (!onOwnerThread()) {
+			return YouTubeAccountProviderRestoreStatus::WrongThread;
+		}
+		if (stage_ == YouTubeAccountProviderStage::Closed) {
+			return YouTubeAccountProviderRestoreStatus::Closed;
+		}
+		if (commitInProgress_ || lifecycleMutationInProgress_ || activeLease().has_value()) {
+			return YouTubeAccountProviderRestoreStatus::Busy;
+		}
+
+		lifecycleMutationInProgress_ = true;
+		operationEpoch_ = nextNonZero(operationEpoch_);
+		clearEphemeral();
+		try {
+			if (!selection.has_value()) {
+				coordinator_.invalidateContext();
+				stage_ = YouTubeAccountProviderStage::Idle;
+				touch();
+				lifecycleMutationInProgress_ = false;
+				return YouTubeAccountProviderRestoreStatus::SetupRequired;
+			}
+
+			const bool validSelection = validateYouTubeAccountSelection(*selection) ==
+						    YouTubeAccountSelectionValidationError::None;
+			if (!validSelection) {
+				coordinator_.restoreSavedConnection(*selection,
+								    YouTubeAccountSavedCredentialState::Present);
+				stage_ = YouTubeAccountProviderStage::Failed;
+				touch();
+				lifecycleMutationInProgress_ = false;
+				return YouTubeAccountProviderRestoreStatus::InvalidSelection;
+			}
+
+			const CredentialStatus credential = refreshTokenVault_.status();
+			YouTubeAccountSavedCredentialState savedCredential =
+				YouTubeAccountSavedCredentialState::Unavailable;
+			YouTubeAccountProviderRestoreStatus restoreStatus =
+				YouTubeAccountProviderRestoreStatus::CredentialUnavailable;
+			YouTubeAccountProviderStage restoredStage = YouTubeAccountProviderStage::Unavailable;
+
+			if (credential.state == CredentialState::Present && credential.result.succeeded()) {
+				savedCredential = YouTubeAccountSavedCredentialState::Present;
+				restoreStatus = YouTubeAccountProviderRestoreStatus::Configured;
+				restoredStage = YouTubeAccountProviderStage::Configured;
+			} else if (credential.state == CredentialState::Missing &&
+				   credential.result.error == CredentialError::NotFound) {
+				savedCredential = YouTubeAccountSavedCredentialState::Missing;
+				restoreStatus = YouTubeAccountProviderRestoreStatus::ReauthorizationRequired;
+				restoredStage = YouTubeAccountProviderStage::NeedsReauthorization;
+			}
+
+			coordinator_.restoreSavedConnection(*selection, savedCredential);
+			stage_ = restoredStage;
+			touch();
+			lifecycleMutationInProgress_ = false;
+			return restoreStatus;
+		} catch (...) {
+			try {
+				coordinator_.invalidateContext();
+			} catch (...) {
+			}
+			stage_ = YouTubeAccountProviderStage::Failed;
+			touch();
+			lifecycleMutationInProgress_ = false;
+			return YouTubeAccountProviderRestoreStatus::OperationFailed;
+		}
+	}
+
 	bool cancel(YouTubeAccountLease lease) noexcept
 	{
 		if (!onOwnerThread() || stage_ == YouTubeAccountProviderStage::Closed || commitInProgress_ ||
-		    !leaseIsActive(lease)) {
+		    lifecycleMutationInProgress_ || !leaseIsActive(lease)) {
 			return false;
 		}
 		operationEpoch_ = nextNonZero(operationEpoch_);
+		lifecycleMutationInProgress_ = true;
 		cancelPorts(lease);
 		clearEphemeral();
 		try {
 			const auto transition = coordinator_.cancel(lease);
 			if (!transition.changed) {
+				lifecycleMutationInProgress_ = false;
 				return false;
 			}
-			setStage(transition.snapshot.state == YouTubeAccountState::Connected
-					 ? YouTubeAccountProviderStage::Connected
-					 : YouTubeAccountProviderStage::Idle);
+			setStage(providerStageForRetainedConnection(transition.snapshot.state,
+								    YouTubeAccountProviderStage::Idle));
+			lifecycleMutationInProgress_ = false;
 			return true;
 		} catch (...) {
 			setStage(YouTubeAccountProviderStage::Failed);
+			lifecycleMutationInProgress_ = false;
 			return false;
 		}
 	}
 
 	bool invalidateContext() noexcept
 	{
-		if (!onOwnerThread() || stage_ == YouTubeAccountProviderStage::Closed || commitInProgress_) {
+		if (!onOwnerThread() || stage_ == YouTubeAccountProviderStage::Closed || commitInProgress_ ||
+		    lifecycleMutationInProgress_) {
 			return false;
 		}
+		lifecycleMutationInProgress_ = true;
 		operationEpoch_ = nextNonZero(operationEpoch_);
 		if (const auto lease = activeLease(); lease.has_value()) {
 			cancelPorts(*lease);
@@ -350,9 +443,11 @@ public:
 		try {
 			coordinator_.invalidateContext();
 			setStage(YouTubeAccountProviderStage::Idle);
+			lifecycleMutationInProgress_ = false;
 			return true;
 		} catch (...) {
 			setStage(YouTubeAccountProviderStage::Failed);
+			lifecycleMutationInProgress_ = false;
 			return false;
 		}
 	}
@@ -365,8 +460,20 @@ public:
 		if (stage_ == YouTubeAccountProviderStage::Closed) {
 			return true;
 		}
+		if (lifecycleMutationInProgress_) {
+			return false;
+		}
+		lifecycleMutationInProgress_ = true;
+		const auto lease = activeLease();
+		setStage(YouTubeAccountProviderStage::Closed);
 		operationEpoch_ = nextNonZero(operationEpoch_);
-		if (const auto lease = activeLease(); lease.has_value()) {
+		bool coordinatorClosed = true;
+		try {
+			coordinator_.shutdown();
+		} catch (...) {
+			coordinatorClosed = false;
+		}
+		if (lease.has_value()) {
 			cancelPorts(*lease);
 		}
 		clearEphemeral();
@@ -374,14 +481,8 @@ public:
 		const bool tokenClosed = tokenPort_->shutdown();
 		const bool discoveryClosed = discoveryPort_->shutdown();
 		const bool portsClosed = authorizationClosed && tokenClosed && discoveryClosed;
-		try {
-			coordinator_.shutdown();
-		} catch (...) {
-			setStage(YouTubeAccountProviderStage::Closed);
-			return false;
-		}
-		setStage(YouTubeAccountProviderStage::Closed);
-		return portsClosed;
+		lifecycleMutationInProgress_ = false;
+		return coordinatorClosed && portsClosed;
 	}
 
 	YouTubeAccountProviderSnapshot snapshot() const
@@ -455,17 +556,19 @@ private:
 
 	void failAttempt(YouTubeAccountLease lease, YouTubeAccountFailure failure) noexcept
 	{
+		const bool priorLifecycleMutation = lifecycleMutationInProgress_;
+		lifecycleMutationInProgress_ = true;
 		operationEpoch_ = nextNonZero(operationEpoch_);
 		cancelPorts(lease);
 		clearEphemeral();
 		try {
 			const auto transition = coordinator_.attemptFailed(lease, failure);
-			setStage(transition.snapshot.state == YouTubeAccountState::Connected
-					 ? YouTubeAccountProviderStage::Connected
-					 : YouTubeAccountProviderStage::Failed);
+			setStage(providerStageForRetainedConnection(transition.snapshot.state,
+								    YouTubeAccountProviderStage::Failed));
 		} catch (...) {
 			setStage(YouTubeAccountProviderStage::Failed);
 		}
+		lifecycleMutationInProgress_ = priorLifecycleMutation;
 	}
 
 	void handleAuthorization(std::uint64_t epoch, YouTubeAccountLease lease,
@@ -808,6 +911,8 @@ private:
 
 	void failCredentialStateUncertain(YouTubeAccountLease lease) noexcept
 	{
+		const bool priorLifecycleMutation = lifecycleMutationInProgress_;
+		lifecycleMutationInProgress_ = true;
 		operationEpoch_ = nextNonZero(operationEpoch_);
 		cancelPorts(lease);
 		clearEphemeral();
@@ -816,6 +921,7 @@ private:
 		} catch (...) {
 		}
 		setStage(YouTubeAccountProviderStage::Failed);
+		lifecycleMutationInProgress_ = priorLifecycleMutation;
 	}
 
 	YouTubeAccountProvider *owner_ = nullptr;
@@ -836,6 +942,7 @@ private:
 	std::optional<YouTubeOwnedChannel> selectedChannel_;
 	std::optional<YouTubeReusableStream> selectedStream_;
 	bool commitInProgress_ = false;
+	bool lifecycleMutationInProgress_ = false;
 };
 
 YouTubeAccountProvider::YouTubeAccountProvider(QString clientId,
@@ -881,6 +988,12 @@ YouTubeAccountProviderSelectionStatus YouTubeAccountProvider::selectStream(YouTu
 									   std::string_view streamId) noexcept
 {
 	return impl_->selectStream(lease, streamId);
+}
+
+YouTubeAccountProviderRestoreStatus
+YouTubeAccountProvider::restoreSavedState(std::optional<YouTubeAccountSelection> selection) noexcept
+{
+	return impl_->restoreSavedState(std::move(selection));
 }
 
 bool YouTubeAccountProvider::cancel(YouTubeAccountLease lease) noexcept

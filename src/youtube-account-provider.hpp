@@ -24,8 +24,10 @@ namespace easy_multistream {
 // These narrow ports keep orchestration independently testable. Production
 // adapters wrap the fixed-origin OAuth/API implementations; only the private
 // test constructor can replace them. Every completion must run on the
-// provider's owner thread. The production adapters satisfy this with their
-// queued QObject delivery.
+// provider's owner thread and must not be invoked synchronously from start,
+// cancel, or shutdown. The production adapters satisfy this with queued
+// QObject delivery. This non-reentrant contract is part of the port boundary,
+// not merely an implementation detail.
 class YouTubeAccountAuthorizationPort {
 public:
 	using CompletionHandler = std::function<void(GoogleOAuthAuthorizationCompletion)>;
@@ -68,7 +70,12 @@ enum class YouTubeAccountProviderStage {
 	ListingStreams,
 	AwaitingStreamSelection,
 	PersistingCredential,
+	// Local selection and credential are present but have not been validated
+	// together with Google during this process lifetime.
+	Configured,
 	Connected,
+	NeedsReauthorization,
+	Unavailable,
 	Failed,
 	Closed,
 };
@@ -80,6 +87,18 @@ enum class YouTubeAccountProviderStartStatus {
 	Closed,
 	InvalidClientId,
 	InvalidSelectionCommitter,
+	OperationFailed,
+};
+
+enum class YouTubeAccountProviderRestoreStatus {
+	Configured,
+	SetupRequired,
+	ReauthorizationRequired,
+	CredentialUnavailable,
+	WrongThread,
+	Busy,
+	Closed,
+	InvalidSelection,
 	OperationFailed,
 };
 
@@ -131,6 +150,15 @@ public:
 							    std::string_view channelId) noexcept;
 	YouTubeAccountProviderSelectionStatus selectStream(YouTubeAccountLease lease,
 							   std::string_view streamId) noexcept;
+	// Restore profile-scoped, non-secret selection state without opening a
+	// browser or starting any network port. A missing selection is a valid
+	// setup-required account state and does not inspect or delete the shared
+	// Windows credential. Credential presence produces only Configured state;
+	// it does not prove that the token belongs to the saved channel. Call
+	// invalidateContext() during PROFILE_CHANGING so an interactive attempt
+	// cannot cross into the newly loaded profile.
+	YouTubeAccountProviderRestoreStatus
+	restoreSavedState(std::optional<YouTubeAccountSelection> selection) noexcept;
 
 	bool cancel(YouTubeAccountLease lease) noexcept;
 	bool invalidateContext() noexcept;

@@ -100,10 +100,11 @@ The browser completion page contains no token or code and only tells the user th
 Profile settings may contain only non-secret selection data such as the connection mode, channel ID, stream ID, and display labels. They never contain an authorization code, access token, refresh token, PKCE verifier, or stream key.
 
 The profile codec now implements this non-secret boundary. Older manual profiles load as manual mode; account mode
-requires a complete, strictly validated channel/stream selection and does not require a saved ingestion URL. The
-current runtime deliberately treats account mode as unavailable until the headless provider is wired through the
-plugin lifecycle and output preparation,
-so a partially implemented or imported account profile cannot silently use the manual URL/key instead.
+accepts either a complete, strictly validated channel/stream selection or an explicit setup-required state with no
+selection, and does not require a saved ingestion URL. Saving the latter removes stale selection fields without changing
+the mode or touching the shared refresh-token credential. The current runtime deliberately treats account mode as
+unavailable until the headless provider is wired through the plugin lifecycle and output preparation, so a partially
+implemented or imported account profile cannot silently use the manual URL/key instead.
 
 Windows Credential Manager uses separate targets for:
 
@@ -137,6 +138,8 @@ The provider:
 - never touches widgets from a network callback;
 - never blocks the OBS UI thread waiting for network or output teardown;
 - does not automatically reopen the browser at startup;
+- restores a saved selection by checking only credential presence, without starting a listener, HTTP request, discovery, or output;
+- does not inspect or delete the shared credential when the current profile has no saved selection;
 - does not automatically loop after an authorization or API failure;
 - cannot request that OBS stop its native stream.
 
@@ -203,11 +206,19 @@ owner-thread, cancellation, context-invalidation, shutdown, and queued-completio
 secrets out of public state. The headless provider automatically advances a
 single channel/stream candidate, requires exact-ID selection for multiple candidates, rejects stale work by epoch and
 lease, and commits the refresh token plus non-secret selection transactionally enough to restore the previous token
-when profile persistence fails. None of these libraries is
-linked into the OBS plugin, so the product still does not open a browser, listen on a port, make an OAuth/API network
-request, or read an account credential. The profile format and runtime fail-closed boundary are present, but the dock
-continues to expose only the working manual setup. Production browser-opener and active-profile adapters,
-refresh/revoke and startup hydration, runtime handoff, and all later items stay gated, so a partial
-connection path cannot appear in the user interface.
+when profile persistence fails. It can also restore a persisted selection from credential status alone: present is
+only locally configured and remains unverified against Google, while missing and unavailable remain distinct. Every
+restore creates a new generation, and a profile without a selection remains setup-required without touching the shared
+credential. None of these libraries is linked into the OBS plugin, so the product still does not open a browser, listen
+on a port, make an OAuth/API network request, or read an account credential. The profile format and runtime fail-closed
+boundary are present, but the dock continues to expose only the working manual setup. Production browser-opener and
+active-profile adapters, refresh/revoke, runtime handoff, and all later items stay gated, so a partial connection path
+cannot appear in the user interface.
+
+The current fixed refresh-token credential is shared across OBS profiles, whereas each profile stores its own channel
+and stream selection. Restoration therefore never labels credential presence as a verified connection. Before this path
+is connected to runtime or UI, multiple-profile/multiple-Google-account behavior, profile duplication/import, and token
+ownership must have an explicit policy and tests. In all cases, the start-time destination preparer must successfully
+refresh and resolve the exact saved channel and stream before an output can be created.
 
 No account UI is added merely to advertise unfinished functionality. A build without a complete configured provider continues to show only the working manual setup.

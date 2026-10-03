@@ -21,6 +21,11 @@ enum class YouTubeAccountState {
 	ExchangingCode,
 	Discovering,
 	PersistingCredential,
+	// A saved selection and credential exist locally, but the credential has
+	// not yet been refreshed and checked against that selection in this
+	// process. Never map this state directly to a user-facing "connected"
+	// label or start an output without destination preparation succeeding.
+	Configured,
 	Connected,
 	NeedsReauthorization,
 	Failed,
@@ -43,6 +48,15 @@ enum class YouTubeAccountFailure {
 	InvalidResponse,
 	DiscoveryFailed,
 	Cancelled,
+};
+
+// Startup/profile restoration checks only whether the plugin-owned refresh
+// credential is available. It deliberately does not validate the token with
+// Google or start any browser/network operation.
+enum class YouTubeAccountSavedCredentialState {
+	Present,
+	Missing,
+	Unavailable,
 };
 
 struct YouTubeAccountLease {
@@ -69,9 +83,10 @@ struct YouTubeAccountSnapshot {
 	std::uint64_t generation = 1;
 	std::uint64_t revision = 0;
 	YouTubeAccountState state = YouTubeAccountState::Disconnected;
-	// `lease` identifies the interactive attempt in progress. A connected
-	// account retains its originating `connectionLease` so delayed refresh or
-	// API failures from a replaced account cannot invalidate the new account.
+	// `lease` identifies the interactive attempt in progress. A connected or
+	// locally configured account retains its originating `connectionLease` so
+	// delayed refresh or API failures from a replaced account cannot invalidate
+	// the new account.
 	std::optional<YouTubeAccountLease> lease;
 	std::optional<YouTubeAccountLease> connectionLease;
 	std::string channelId;
@@ -120,6 +135,15 @@ public:
 	// of restoring a formerly connected snapshot.
 	YouTubeAccountTransition credentialStateUncertain(YouTubeAccountLease lease);
 
+	// Replace the current context with one saved, non-secret selection. A
+	// present credential creates a fresh connection lease in Configured state;
+	// it does not prove that the credential belongs to the saved channel. Missing
+	// or unavailable credentials retain the labels for status display but are
+	// not usable connections. Every restore advances the generation so results
+	// from a previous profile cannot affect the restored state.
+	YouTubeAccountTransition restoreSavedConnection(const YouTubeAccountDiscovery &discovery,
+							YouTubeAccountSavedCredentialState credentialState);
+
 	// Context invalidation discards the committed selection and invalidates all
 	// outstanding work. Closed is terminal.
 	YouTubeAccountTransition invalidateContext();
@@ -152,7 +176,8 @@ private:
 	std::optional<CommittedConnection> committedConnection_;
 	std::optional<PendingConnectionCommit> pendingCommit_;
 	std::optional<YouTubeAccountFailure> committedConnectionFailure_;
-	bool replacingConnected_ = false;
+	bool replacingCommittedConnection_ = false;
+	YouTubeAccountState replacedConnectionState_ = YouTubeAccountState::Disconnected;
 };
 
 } // namespace easy_multistream
