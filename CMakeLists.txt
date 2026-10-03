@@ -24,6 +24,7 @@ add_library(${CMAKE_PROJECT_NAME}-oauth-core STATIC)
 add_library(${CMAKE_PROJECT_NAME}-oauth-loopback STATIC)
 add_library(${CMAKE_PROJECT_NAME}-oauth-token-transport STATIC)
 add_library(${CMAKE_PROJECT_NAME}-youtube-discovery STATIC)
+add_library(${CMAKE_PROJECT_NAME}-youtube-stream-resolver STATIC)
 
 find_package(libobs REQUIRED)
 find_package(obs-frontend-api REQUIRED)
@@ -117,6 +118,19 @@ target_include_directories(
 target_link_libraries(
   ${CMAKE_PROJECT_NAME}-youtube-discovery
   PUBLIC ${CMAKE_PROJECT_NAME}-secure-core Qt6::Core Qt6::Network
+)
+
+target_sources(
+  ${CMAKE_PROJECT_NAME}-youtube-stream-resolver
+  PRIVATE src/youtube-api-stream-resolver.cpp src/youtube-api-stream-resolver.hpp
+)
+target_include_directories(
+  ${CMAKE_PROJECT_NAME}-youtube-stream-resolver
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+target_link_libraries(
+  ${CMAKE_PROJECT_NAME}-youtube-stream-resolver
+  PUBLIC ${CMAKE_PROJECT_NAME}-secure-core ${CMAKE_PROJECT_NAME}-youtube-destination Qt6::Core Qt6::Network
 )
 
 configure_file(src/version.hpp.in generated/version.hpp @ONLY)
@@ -292,6 +306,33 @@ if(BUILD_TESTING)
     COMMAND ${CMAKE_PROJECT_NAME}-youtube-discovery-tests
   )
 
+  add_executable(${CMAKE_PROJECT_NAME}-youtube-stream-resolver-tests)
+  target_sources(
+    ${CMAKE_PROJECT_NAME}-youtube-stream-resolver-tests
+    PRIVATE tests/youtube-api-stream-resolver-tests.cpp
+  )
+  target_link_libraries(
+    ${CMAKE_PROJECT_NAME}-youtube-stream-resolver-tests
+    PRIVATE ${CMAKE_PROJECT_NAME}-youtube-stream-resolver
+  )
+
+  add_custom_command(
+    TARGET ${CMAKE_PROJECT_NAME}-youtube-stream-resolver-tests
+    POST_BUILD
+    COMMAND
+      "${CMAKE_COMMAND}" -E copy_if_different
+      $<TARGET_RUNTIME_DLLS:${CMAKE_PROJECT_NAME}-youtube-stream-resolver-tests>
+      $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}-youtube-stream-resolver-tests>
+    COMMAND_EXPAND_LISTS
+    COMMENT "Copy YouTube stream resolver test runtime dependencies"
+    VERBATIM
+  )
+
+  add_test(
+    NAME ${CMAKE_PROJECT_NAME}-youtube-stream-resolver
+    COMMAND ${CMAKE_PROJECT_NAME}-youtube-stream-resolver-tests
+  )
+
   add_executable(${CMAKE_PROJECT_NAME}-runtime-tests)
   target_sources(
     ${CMAKE_PROJECT_NAME}-runtime-tests
@@ -382,6 +423,7 @@ if(BUILD_TESTING)
     ${CMAKE_PROJECT_NAME}-google-oauth-loopback
     ${CMAKE_PROJECT_NAME}-google-oauth-token
     ${CMAKE_PROJECT_NAME}-youtube-discovery
+    ${CMAKE_PROJECT_NAME}-youtube-stream-resolver
     PROPERTIES ENVIRONMENT_MODIFICATION "${test_runtime_environment}"
   )
 endif()

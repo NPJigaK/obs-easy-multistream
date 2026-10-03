@@ -53,11 +53,19 @@ It sends a move-only access-token buffer solely as a Bearer header to the fixed 
 labels, page tokens, headers, JSON, TLS, and final URLs, and returns stable error enums rather than provider text. Its
 fixed partial-response fields request only IDs and display labels; CDN ingestion data and `streamName` are not requested
 or returned by this layer. A later provider must impose total page and cycle limits before following the opaque
-continuation value. The selected-stream resolver remains a separate, secret-bearing boundary and is not present yet.
+continuation value.
+
+The repository also contains a separate selected-stream resolver that is built only for its standalone development
+test. It requests one explicitly selected stream ID from the fixed `liveStreams.list` endpoint, rechecks the returned
+stream and channel IDs, accepts only the documented `ready` and `inactive` states, and refuses plain RTMP or an
+unexpected YouTube ingestion host. Its successful result contains only a validated RTMPS URL and a move-only
+`SecureBuffer` holding the current `streamName`. The key is not added to discovery results, settings, snapshots, logs,
+diagnostics, or Credential Manager. Response bytes and directly controlled staging buffers are wiped after use;
+short-lived copies made internally by Qt remain subject to the in-memory limitation documented above.
 
 The YouTube output owns a private RTMP service and output while retaining explicit references to the native H.264 and main AAC encoders. It never starts or stops the native OBS stream. A YouTube error closes only the YouTube output, leaves Twitch running, and exposes a separate retry action after teardown completes.
 
-The accepted browser-based account connection will add the listener, token transport, discovery transport, and later
+The accepted browser-based account connection will add the listener, token transport, discovery transport, and
 selected-stream resolver to the product only after the complete flow is ready, together with outbound HTTPS requests
 to fixed YouTube API origins and the existing outbound YouTube RTMPS connection. It will not add a cloud relay, local
 background service, telemetry, embedded login webview, or long-running listening port. Refresh tokens use a credential
