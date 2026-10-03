@@ -17,6 +17,7 @@ include(CTest)
 
 add_library(${CMAKE_PROJECT_NAME} MODULE)
 add_library(${CMAKE_PROJECT_NAME}-secure-core STATIC)
+add_library(${CMAKE_PROJECT_NAME}-youtube-destination STATIC)
 add_library(${CMAKE_PROJECT_NAME}-core STATIC)
 add_library(${CMAKE_PROJECT_NAME}-session-core STATIC)
 add_library(${CMAKE_PROJECT_NAME}-oauth-core STATIC)
@@ -46,9 +47,15 @@ target_sources(
 )
 target_include_directories(${CMAKE_PROJECT_NAME}-secure-core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
 
+target_sources(
+  ${CMAKE_PROJECT_NAME}-youtube-destination
+  PRIVATE src/youtube-destination.cpp src/youtube-destination.hpp
+)
+target_include_directories(${CMAKE_PROJECT_NAME}-youtube-destination PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+
 target_link_libraries(
   ${CMAKE_PROJECT_NAME}-core
-  PUBLIC OBS::libobs ${CMAKE_PROJECT_NAME}-secure-core
+  PUBLIC OBS::libobs ${CMAKE_PROJECT_NAME}-secure-core ${CMAKE_PROJECT_NAME}-youtube-destination
   PRIVATE Advapi32
 )
 
