@@ -205,6 +205,7 @@ target_include_directories(
 target_link_libraries(
   ${CMAKE_PROJECT_NAME}-youtube-account-provider
   PUBLIC
+    ${CMAKE_PROJECT_NAME}-youtube-account-profile-lock
     ${CMAKE_PROJECT_NAME}-session-core
     ${CMAKE_PROJECT_NAME}-oauth-authorization-session
     ${CMAKE_PROJECT_NAME}-oauth-token-transport
@@ -226,6 +227,7 @@ target_include_directories(
 target_link_libraries(
   ${CMAKE_PROJECT_NAME}-youtube-account-destination-preparer
   PUBLIC
+    ${CMAKE_PROJECT_NAME}-youtube-account-profile-lock
     ${CMAKE_PROJECT_NAME}-oauth-token-transport
     ${CMAKE_PROJECT_NAME}-youtube-stream-resolver
     ${CMAKE_PROJECT_NAME}-youtube-account-model

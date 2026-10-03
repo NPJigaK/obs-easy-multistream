@@ -219,7 +219,8 @@ public:
 	     std::unique_ptr<YouTubeAccountAuthorizationPort> authorizationPort,
 	     std::unique_ptr<YouTubeAccountTokenPort> tokenPort,
 	     std::unique_ptr<YouTubeAccountDiscoveryPort> discoveryPort,
-	     YouTubeAccountRefreshTokenStore &refreshTokenStore, std::string profileBinding,
+	     YouTubeAccountRefreshTokenStore &refreshTokenStore,
+	     YouTubeAccountProfileOperationLockProvider &profileOperationLockProvider, std::string profileBinding,
 	     YouTubeAccountSelectionCommitter selectionCommitter)
 		: owner_(owner),
 		  clientId_(std::move(clientId)),
@@ -227,6 +228,7 @@ public:
 		  tokenPort_(std::move(tokenPort)),
 		  discoveryPort_(std::move(discoveryPort)),
 		  refreshTokenStore_(refreshTokenStore),
+		  profileOperationLockProvider_(profileOperationLockProvider),
 		  profileBinding_(std::move(profileBinding)),
 		  selectionCommitter_(std::move(selectionCommitter))
 	{
@@ -254,10 +256,26 @@ public:
 			return YouTubeAccountProviderStartStatus::InvalidSelectionCommitter;
 		}
 
+		const auto lockResult = profileOperationLockProvider_.acquire(profileBinding_, operationLock_);
+		switch (lockResult.status) {
+		case YouTubeAccountProfileOperationLockStatus::Acquired:
+		case YouTubeAccountProfileOperationLockStatus::Recovered:
+			break;
+		case YouTubeAccountProfileOperationLockStatus::Busy:
+			return YouTubeAccountProviderStartStatus::Busy;
+		case YouTubeAccountProfileOperationLockStatus::InvalidProfileBinding:
+			return YouTubeAccountProviderStartStatus::InvalidProfileBinding;
+		case YouTubeAccountProfileOperationLockStatus::Unavailable:
+			return YouTubeAccountProviderStartStatus::OperationFailed;
+		}
+
 		try {
 			clearEphemeral();
 			const auto transition = coordinator_.beginAuthorization();
 			if (!transition.changed || !transition.snapshot.lease.has_value()) {
+				if (!releaseOperationLockOrMarkUnavailable()) {
+					return YouTubeAccountProviderStartStatus::OperationFailed;
+				}
 				return transition.snapshot.state == YouTubeAccountState::Closed
 					       ? YouTubeAccountProviderStartStatus::Closed
 					       : YouTubeAccountProviderStartStatus::Busy;
@@ -291,6 +309,7 @@ public:
 			return YouTubeAccountProviderStartStatus::Started;
 		} catch (...) {
 			failActiveNoThrow(YouTubeAccountFailure::ServiceUnavailable);
+			(void)releaseOperationLockOrMarkUnavailable();
 			return YouTubeAccountProviderStartStatus::OperationFailed;
 		}
 	}
@@ -349,6 +368,13 @@ public:
 		if (commitInProgress_ || lifecycleMutationInProgress_ || activeLease().has_value()) {
 			return YouTubeAccountProviderRestoreStatus::Busy;
 		}
+		// A prior native release failure retains this profile's ownership. Do not
+		// let a credential-free restore path rewrite visible context around that
+		// unfinished transaction; explicit invalidation or shutdown performs the
+		// owner-thread release retry.
+		if (operationLock_.acquired()) {
+			return YouTubeAccountProviderRestoreStatus::Busy;
+		}
 		if (!isValidYouTubeAccountProfileBinding(profileBinding)) {
 			profileBinding_.clear();
 			profileBindingValid_ = false;
@@ -361,6 +387,29 @@ public:
 			}
 			setStage(YouTubeAccountProviderStage::Failed);
 			return YouTubeAccountProviderRestoreStatus::InvalidProfileBinding;
+		}
+
+		// A missing or malformed selection never reads the credential store, so
+		// it does not need to take the cross-process account-operation lease.
+		// For a valid selection, acquire before changing any provider-visible
+		// state. A failed acquisition must leave the current profile context and
+		// snapshot untouched.
+		const bool validSelection = selection.has_value() &&
+					    validateYouTubeAccountSelection(*selection) ==
+						    YouTubeAccountSelectionValidationError::None;
+		if (validSelection) {
+			const auto lockResult = profileOperationLockProvider_.acquire(profileBinding, operationLock_);
+			switch (lockResult.status) {
+			case YouTubeAccountProfileOperationLockStatus::Acquired:
+			case YouTubeAccountProfileOperationLockStatus::Recovered:
+				break;
+			case YouTubeAccountProfileOperationLockStatus::Busy:
+				return YouTubeAccountProviderRestoreStatus::Busy;
+			case YouTubeAccountProfileOperationLockStatus::InvalidProfileBinding:
+				return YouTubeAccountProviderRestoreStatus::InvalidProfileBinding;
+			case YouTubeAccountProfileOperationLockStatus::Unavailable:
+				return YouTubeAccountProviderRestoreStatus::OperationFailed;
+			}
 		}
 
 		lifecycleMutationInProgress_ = true;
@@ -378,8 +427,6 @@ public:
 				return YouTubeAccountProviderRestoreStatus::SetupRequired;
 			}
 
-			const bool validSelection = validateYouTubeAccountSelection(*selection) ==
-						    YouTubeAccountSelectionValidationError::None;
 			if (!validSelection) {
 				savedSelection_.reset();
 				coordinator_.restoreSavedConnection(*selection,
@@ -418,7 +465,9 @@ public:
 			stage_ = restoredStage;
 			touch();
 			lifecycleMutationInProgress_ = false;
-			return restoreStatus;
+			return releaseOperationLockOrMarkUnavailable()
+				       ? restoreStatus
+				       : YouTubeAccountProviderRestoreStatus::OperationFailed;
 		} catch (...) {
 			try {
 				coordinator_.invalidateContext();
@@ -428,6 +477,7 @@ public:
 			stage_ = YouTubeAccountProviderStage::Failed;
 			touch();
 			lifecycleMutationInProgress_ = false;
+			(void)releaseOperationLockOrMarkUnavailable();
 			return YouTubeAccountProviderRestoreStatus::OperationFailed;
 		}
 	}
@@ -446,15 +496,17 @@ public:
 			const auto transition = coordinator_.cancel(lease);
 			if (!transition.changed) {
 				lifecycleMutationInProgress_ = false;
+				failAttempt(lease, YouTubeAccountFailure::ServiceUnavailable);
 				return false;
 			}
 			setStage(providerStageForRetainedConnection(transition.snapshot.state,
 								    YouTubeAccountProviderStage::Idle));
 			lifecycleMutationInProgress_ = false;
-			return true;
+			return releaseOperationLockOrMarkUnavailable();
 		} catch (...) {
 			setStage(YouTubeAccountProviderStage::Failed);
 			lifecycleMutationInProgress_ = false;
+			(void)releaseOperationLockOrMarkUnavailable();
 			return false;
 		}
 	}
@@ -476,10 +528,11 @@ public:
 			coordinator_.invalidateContext();
 			setStage(YouTubeAccountProviderStage::Idle);
 			lifecycleMutationInProgress_ = false;
-			return true;
+			return releaseOperationLockOrMarkUnavailable();
 		} catch (...) {
 			setStage(YouTubeAccountProviderStage::Failed);
 			lifecycleMutationInProgress_ = false;
+			(void)releaseOperationLockOrMarkUnavailable();
 			return false;
 		}
 	}
@@ -489,32 +542,40 @@ public:
 		if (!onOwnerThread() || commitInProgress_) {
 			return false;
 		}
-		if (stage_ == YouTubeAccountProviderStage::Closed) {
-			return true;
-		}
 		if (lifecycleMutationInProgress_) {
 			return false;
 		}
 		lifecycleMutationInProgress_ = true;
-		const auto lease = activeLease();
-		setStage(YouTubeAccountProviderStage::Closed);
-		operationEpoch_ = nextNonZero(operationEpoch_);
-		bool coordinatorClosed = true;
-		try {
-			coordinator_.shutdown();
-		} catch (...) {
-			coordinatorClosed = false;
+		if (stage_ != YouTubeAccountProviderStage::Closed) {
+			const auto lease = activeLease();
+			setStage(YouTubeAccountProviderStage::Closed);
+			operationEpoch_ = nextNonZero(operationEpoch_);
+			if (lease.has_value()) {
+				cancelPorts(*lease);
+			}
+			clearEphemeral();
 		}
-		if (lease.has_value()) {
-			cancelPorts(*lease);
+
+		if (!coordinatorClosed_) {
+			try {
+				coordinator_.shutdown();
+				coordinatorClosed_ = true;
+			} catch (...) {
+			}
 		}
-		clearEphemeral();
-		const bool authorizationClosed = authorizationPort_->shutdown();
-		const bool tokenClosed = tokenPort_->shutdown();
-		const bool discoveryClosed = discoveryPort_->shutdown();
-		const bool portsClosed = authorizationClosed && tokenClosed && discoveryClosed;
+		if (!authorizationPortClosed_) {
+			authorizationPortClosed_ = authorizationPort_->shutdown();
+		}
+		if (!tokenPortClosed_) {
+			tokenPortClosed_ = tokenPort_->shutdown();
+		}
+		if (!discoveryPortClosed_) {
+			discoveryPortClosed_ = discoveryPort_->shutdown();
+		}
+		const bool lockReleased = operationLock_.release();
 		lifecycleMutationInProgress_ = false;
-		return coordinatorClosed && portsClosed;
+		return coordinatorClosed_ && authorizationPortClosed_ && tokenPortClosed_ && discoveryPortClosed_ &&
+		       lockReleased;
 	}
 
 	YouTubeAccountProviderSnapshot snapshot() const
@@ -575,6 +636,37 @@ private:
 		selectedStream_.reset();
 	}
 
+	bool releaseOperationLockOrMarkUnavailable() noexcept
+	{
+		if (operationLock_.release()) {
+			return true;
+		}
+
+		// ReleaseMutex failure leaves the native mutex and process-local claim
+		// held; CloseHandle failure has already relinquished ownership but still
+		// represents incomplete cleanup. Do not expose either case as a usable
+		// account result. Preserve durable state so owner-thread shutdown or
+		// context invalidation can retry whenever ownership remains.
+		try {
+			if (savedSelection_.has_value()) {
+				(void)coordinator_.restoreSavedConnection(
+					*savedSelection_, YouTubeAccountSavedCredentialState::Unavailable);
+			} else {
+				(void)coordinator_.invalidateContext();
+			}
+		} catch (...) {
+			// Both coordinator transitions change the internal snapshot before
+			// returning its potentially allocating value. A fallback invalidation
+			// also covers an allocation failure before restore could commit.
+			try {
+				(void)coordinator_.invalidateContext();
+			} catch (...) {
+			}
+		}
+		setStage(YouTubeAccountProviderStage::Unavailable);
+		return false;
+	}
+
 	void cancelPorts(YouTubeAccountLease lease) noexcept
 	{
 		authorizationPort_->cancel(authorizationAttempt(lease));
@@ -588,6 +680,7 @@ private:
 			failAttempt(*lease, failure);
 		} else if (stage_ != YouTubeAccountProviderStage::Closed) {
 			setStage(YouTubeAccountProviderStage::Failed);
+			(void)releaseOperationLockOrMarkUnavailable();
 		}
 	}
 
@@ -606,6 +699,7 @@ private:
 			setStage(YouTubeAccountProviderStage::Failed);
 		}
 		lifecycleMutationInProgress_ = priorLifecycleMutation;
+		(void)releaseOperationLockOrMarkUnavailable();
 	}
 
 	void handleAuthorization(std::uint64_t epoch, YouTubeAccountLease lease,
@@ -963,7 +1057,7 @@ private:
 		selectedChannel_.reset();
 		selectedStream_.reset();
 		setStage(YouTubeAccountProviderStage::Connected);
-		return true;
+		return releaseOperationLockOrMarkUnavailable();
 	}
 
 	bool rollbackCredential(const YouTubeAccountCredentialScope &newScope,
@@ -1011,6 +1105,7 @@ private:
 		}
 		setStage(YouTubeAccountProviderStage::Failed);
 		lifecycleMutationInProgress_ = priorLifecycleMutation;
+		(void)releaseOperationLockOrMarkUnavailable();
 	}
 
 	YouTubeAccountProvider *owner_ = nullptr;
@@ -1019,6 +1114,8 @@ private:
 	std::unique_ptr<YouTubeAccountTokenPort> tokenPort_;
 	std::unique_ptr<YouTubeAccountDiscoveryPort> discoveryPort_;
 	YouTubeAccountRefreshTokenStore &refreshTokenStore_;
+	YouTubeAccountProfileOperationLockProvider &profileOperationLockProvider_;
+	YouTubeAccountProfileOperationLock operationLock_;
 	std::string profileBinding_;
 	bool profileBindingValid_ = false;
 	YouTubeAccountSelectionCommitter selectionCommitter_;
@@ -1035,16 +1132,22 @@ private:
 	std::optional<YouTubeAccountSelection> savedSelection_;
 	bool commitInProgress_ = false;
 	bool lifecycleMutationInProgress_ = false;
+	bool coordinatorClosed_ = false;
+	bool authorizationPortClosed_ = false;
+	bool tokenPortClosed_ = false;
+	bool discoveryPortClosed_ = false;
 };
 
 YouTubeAccountProvider::YouTubeAccountProvider(QString clientId,
 					       GoogleOAuthAuthorizationSession::BrowserOpener browserOpener,
 					       YouTubeAccountRefreshTokenStore &refreshTokenStore,
+					       YouTubeAccountProfileOperationLockProvider &profileOperationLockProvider,
 					       std::string profileBinding,
 					       YouTubeAccountSelectionCommitter selectionCommitter, QObject *parent)
 	: YouTubeAccountProvider(std::move(clientId), std::make_unique<AuthorizationAdapter>(std::move(browserOpener)),
 				 std::make_unique<TokenAdapter>(), std::make_unique<DiscoveryAdapter>(),
-				 refreshTokenStore, std::move(profileBinding), std::move(selectionCommitter), parent)
+				 refreshTokenStore, profileOperationLockProvider, std::move(profileBinding),
+				 std::move(selectionCommitter), parent)
 {
 }
 
@@ -1053,12 +1156,13 @@ YouTubeAccountProvider::YouTubeAccountProvider(QString clientId,
 					       std::unique_ptr<YouTubeAccountTokenPort> tokenPort,
 					       std::unique_ptr<YouTubeAccountDiscoveryPort> discoveryPort,
 					       YouTubeAccountRefreshTokenStore &refreshTokenStore,
+					       YouTubeAccountProfileOperationLockProvider &profileOperationLockProvider,
 					       std::string profileBinding,
 					       YouTubeAccountSelectionCommitter selectionCommitter, QObject *parent)
 	: QObject(parent),
 	  impl_(std::make_unique<Impl>(this, std::move(clientId), std::move(authorizationPort), std::move(tokenPort),
-				       std::move(discoveryPort), refreshTokenStore, std::move(profileBinding),
-				       std::move(selectionCommitter)))
+				       std::move(discoveryPort), refreshTokenStore, profileOperationLockProvider,
+				       std::move(profileBinding), std::move(selectionCommitter)))
 {
 }
 

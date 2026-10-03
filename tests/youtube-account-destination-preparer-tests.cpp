@@ -6,6 +6,7 @@
 #include <QCoreApplication>
 #include <QEventLoop>
 
+#include <cstdint>
 #include <functional>
 #include <iostream>
 #include <map>
@@ -18,6 +19,60 @@
 
 namespace easy_multistream {
 
+class FakeYouTubeAccountProfileOperationLockApi final : public YouTubeAccountProfileOperationLockApi {
+public:
+	HANDLE createMutex(LPCWSTR, DWORD &error) noexcept override
+	{
+		++createCount;
+		if (createError.has_value()) {
+			error = *createError;
+			return nullptr;
+		}
+		error = ERROR_SUCCESS;
+		return reinterpret_cast<HANDLE>(nextHandle++);
+	}
+
+	DWORD wait(HANDLE, DWORD, DWORD &error) noexcept override
+	{
+		++waitCount;
+		error = waitError;
+		return waitResult;
+	}
+
+	bool releaseMutex(HANDLE, DWORD &error) noexcept override
+	{
+		++releaseCount;
+		if (!releaseSucceeds) {
+			error = releaseError;
+			return false;
+		}
+		error = ERROR_SUCCESS;
+		return true;
+	}
+
+	bool closeHandle(HANDLE, DWORD &error) noexcept override
+	{
+		++closeCount;
+		error = closeSucceeds ? ERROR_SUCCESS : closeError;
+		return closeSucceeds;
+	}
+
+	std::optional<DWORD> createError;
+	DWORD waitResult = WAIT_OBJECT_0;
+	DWORD waitError = ERROR_SUCCESS;
+	bool releaseSucceeds = true;
+	DWORD releaseError = ERROR_ACCESS_DENIED;
+	bool closeSucceeds = true;
+	DWORD closeError = ERROR_ACCESS_DENIED;
+	int createCount = 0;
+	int waitCount = 0;
+	int releaseCount = 0;
+	int closeCount = 0;
+
+private:
+	std::uintptr_t nextHandle = 1;
+};
+
 // The production constructor deliberately accepts only production adapters.
 // This friend keeps this suite detached from network and OBS code while still
 // exercising the real orchestration and lifetime rules.
@@ -26,9 +81,11 @@ public:
 	YouTubeAccountDestinationPreparerTestAccess(std::unique_ptr<YouTubeDestinationRefreshPort> refresh,
 						    std::unique_ptr<YouTubeDestinationResolverPort> resolver,
 						    YouTubeAccountRefreshTokenStore &store,
+						    YouTubeAccountProfileOperationLockProvider &operationLockProvider,
 						    QString clientId = QStringLiteral("test-client-id"))
 		: preparer_(new YouTubeAccountDestinationPreparer(std::move(clientId), std::move(refresh),
-								  std::move(resolver), store, nullptr))
+								  std::move(resolver), store, operationLockProvider,
+								  nullptr))
 	{
 	}
 
@@ -85,7 +142,9 @@ struct RefreshState final {
 	std::optional<GoogleOAuthTokenStartStatus> forcedStartStatus;
 	std::function<void()> onCancel;
 	std::function<void()> onShutdown;
+	std::function<void()> onStart;
 	int shutdownCount = 0;
+	bool shutdownResult = true;
 };
 
 class FakeRefreshPort final : public YouTubeDestinationRefreshPort {
@@ -99,6 +158,9 @@ public:
 		state_->lastRefreshToken = std::string(request.refreshToken.view());
 		state_->lastClientId = request.clientId;
 		state_->handlers.push_back(std::move(completionHandler));
+		if (state_->onStart) {
+			state_->onStart();
+		}
 		if (state_->forcedStartStatus.has_value()) {
 			return *state_->forcedStartStatus;
 		}
@@ -120,7 +182,7 @@ public:
 		if (state_->onShutdown) {
 			state_->onShutdown();
 		}
-		return true;
+		return state_->shutdownResult;
 	}
 
 private:
@@ -137,7 +199,9 @@ struct ResolverState final {
 	std::string lastStreamId;
 	std::optional<YouTubeStreamResolverStartStatus> forcedStartStatus;
 	std::function<void()> onShutdown;
+	std::function<void()> onStart;
 	int shutdownCount = 0;
+	bool shutdownResult = true;
 };
 
 class FakeResolverPort final : public YouTubeDestinationResolverPort {
@@ -152,6 +216,9 @@ public:
 		state_->lastChannelId = std::move(request.channelId);
 		state_->lastStreamId = std::move(request.streamId);
 		state_->handlers.push_back(std::move(completionHandler));
+		if (state_->onStart) {
+			state_->onStart();
+		}
 		if (state_->forcedStartStatus.has_value()) {
 			return *state_->forcedStartStatus;
 		}
@@ -170,7 +237,7 @@ public:
 		if (state_->onShutdown) {
 			state_->onShutdown();
 		}
-		return true;
+		return state_->shutdownResult;
 	}
 
 private:
@@ -187,6 +254,9 @@ public:
 	CredentialResult write(const YouTubeAccountCredentialScope &scope, std::string_view value) noexcept override
 	{
 		++writeCount;
+		if (onWrite) {
+			onWrite();
+		}
 		lastWriteScope = scope;
 		lastWritten = SecureBuffer::copyOf(value);
 		if (writeError != CredentialError::None) {
@@ -200,6 +270,9 @@ public:
 	CredentialReadResult read(const YouTubeAccountCredentialScope &scope) noexcept override
 	{
 		++readCount;
+		if (onRead) {
+			onRead();
+		}
 		lastReadScope = scope;
 		if (readError != CredentialError::None) {
 			return {{readError, 1}, {}};
@@ -258,6 +331,8 @@ public:
 	std::optional<YouTubeAccountCredentialScope> lastStatusScope;
 	int readCount = 0;
 	int writeCount = 0;
+	std::function<void()> onRead;
+	std::function<void()> onWrite;
 
 	void seed(const YouTubeAccountCredentialScope &scope, std::string_view value)
 	{
@@ -282,14 +357,16 @@ struct Result final {
 struct Fixture final {
 	std::shared_ptr<RefreshState> refreshState = std::make_shared<RefreshState>();
 	std::shared_ptr<ResolverState> resolverState = std::make_shared<ResolverState>();
+	FakeYouTubeAccountProfileOperationLockApi lockApi;
+	YouTubeAccountProfileOperationLockProvider lockProvider;
 	FakeCredentialVault vault;
 	std::unique_ptr<YouTubeAccountDestinationPreparerTestAccess> preparer;
 
-	Fixture()
+	Fixture() : lockProvider(lockApi)
 	{
 		preparer = std::make_unique<YouTubeAccountDestinationPreparerTestAccess>(
 			std::make_unique<FakeRefreshPort>(refreshState),
-			std::make_unique<FakeResolverPort>(resolverState), vault);
+			std::make_unique<FakeResolverPort>(resolverState), vault, lockProvider);
 	}
 };
 
@@ -388,6 +465,227 @@ void beginWithStoredCredential(Fixture &fixture, YouTubeDestinationPrepareAttemp
 	      YouTubeDestinationPrepareStartStatus::Started);
 	CHECK(fixture.refreshState->handlers.size() == 1);
 	CHECK(fixture.refreshState->lastRefreshToken == kOldRefreshToken);
+}
+
+void testOperationLockRejectionsDoNotTouchOperation()
+{
+	{
+		Fixture fixture;
+		fixture.vault.seed({kProfileBindingA, "channel-1"}, kOldRefreshToken);
+		fixture.lockApi.waitResult = WAIT_TIMEOUT;
+		std::vector<Result> results;
+		CHECK(fixture.preparer->start(requestFor({1, 90}), recorder(results)) ==
+		      YouTubeDestinationPrepareStartStatus::Busy);
+		CHECK(fixture.preparer->state() == YouTubeDestinationPreparerState::Idle);
+		CHECK(!fixture.preparer->activeAttempt().has_value());
+		CHECK(fixture.vault.readCount == 0);
+		CHECK(fixture.refreshState->handlers.empty());
+		CHECK(results.empty());
+		CHECK(fixture.lockApi.createCount == 1);
+		CHECK(fixture.lockApi.waitCount == 1);
+		CHECK(fixture.lockApi.releaseCount == 0);
+		CHECK(fixture.lockApi.closeCount == 1);
+	}
+
+	{
+		Fixture fixture;
+		fixture.vault.seed({kProfileBindingA, "channel-1"}, kOldRefreshToken);
+		fixture.lockApi.createError = ERROR_ACCESS_DENIED;
+		std::vector<Result> results;
+		CHECK(fixture.preparer->start(requestFor({1, 91}), recorder(results)) ==
+		      YouTubeDestinationPrepareStartStatus::OperationFailed);
+		CHECK(fixture.preparer->state() == YouTubeDestinationPreparerState::Idle);
+		CHECK(!fixture.preparer->activeAttempt().has_value());
+		CHECK(fixture.vault.readCount == 0);
+		CHECK(fixture.refreshState->handlers.empty());
+		CHECK(results.empty());
+		CHECK(fixture.lockApi.createCount == 1);
+		CHECK(fixture.lockApi.waitCount == 0);
+		CHECK(fixture.lockApi.releaseCount == 0);
+		CHECK(fixture.lockApi.closeCount == 0);
+	}
+}
+
+void testOperationLockSpansPreparationAndReleasesBeforeHandler()
+{
+	Fixture fixture;
+	fixture.lockApi.waitResult = WAIT_ABANDONED;
+	fixture.vault.seed({kProfileBindingA, "channel-1"}, kOldRefreshToken);
+	bool readHeld = false;
+	bool refreshHeld = false;
+	bool writeHeld = false;
+	bool resolverHeld = false;
+	bool handlerSawReleasedLock = false;
+	bool nestedStartSucceeded = false;
+	std::vector<Result> nestedResults;
+	fixture.vault.onRead = [&] {
+		readHeld = fixture.lockApi.releaseCount == 0;
+	};
+	fixture.vault.onWrite = [&] {
+		writeHeld = fixture.lockApi.releaseCount == 0;
+	};
+	fixture.refreshState->onStart = [&] {
+		refreshHeld = fixture.lockApi.releaseCount == 0;
+	};
+	fixture.resolverState->onStart = [&] {
+		resolverHeld = fixture.lockApi.releaseCount == 0;
+	};
+
+	const auto first = YouTubeDestinationPrepareAttempt{1, 92};
+	CHECK(fixture.preparer->start(requestFor(first), [&](YouTubeDestinationPrepareCompletion completion) {
+		handlerSawReleasedLock = fixture.lockApi.releaseCount == 1;
+		nestedStartSucceeded = fixture.preparer->start(requestFor({1, 93}), recorder(nestedResults)) ==
+				       YouTubeDestinationPrepareStartStatus::Started;
+		(void)completion;
+	}) == YouTubeDestinationPrepareStartStatus::Started);
+	CHECK(readHeld);
+	CHECK(refreshHeld);
+	CHECK(fixture.lockApi.releaseCount == 0);
+	CHECK(fixture.refreshState->lastAttempt.has_value());
+	if (fixture.refreshState->lastAttempt.has_value()) {
+		fixture.refreshState->handlers.front()(refreshSuccess(*fixture.refreshState->lastAttempt, true));
+	}
+	CHECK(writeHeld);
+	CHECK(resolverHeld);
+	CHECK(fixture.lockApi.releaseCount == 0);
+	CHECK(fixture.resolverState->lastAttempt.has_value());
+	if (fixture.resolverState->lastAttempt.has_value()) {
+		fixture.resolverState->handlers.front()(resolveSuccess(*fixture.resolverState->lastAttempt));
+	}
+	CHECK(fixture.lockApi.releaseCount == 0);
+	processQueuedEvents();
+	CHECK(handlerSawReleasedLock);
+	CHECK(nestedStartSucceeded);
+	CHECK(fixture.lockApi.releaseCount == 1);
+	CHECK(fixture.preparer->activeAttempt().has_value());
+	CHECK(fixture.preparer->shutdown());
+	CHECK(fixture.lockApi.releaseCount == 2);
+}
+
+void testCompletionReleaseFailureFailsClosedAndRetries()
+{
+	{
+		Fixture fixture;
+		fixture.vault.seed({kProfileBindingA, "channel-1"}, kOldRefreshToken);
+		fixture.lockApi.releaseSucceeds = false;
+		YouTubeDestinationPrepareStatus deliveredStatus = YouTubeDestinationPrepareStatus::InvalidResponse;
+		bool deliveredIngestion = true;
+		YouTubeDestinationPrepareStartStatus nestedStartStatus =
+			YouTubeDestinationPrepareStartStatus::OperationFailed;
+		const auto first = YouTubeDestinationPrepareAttempt{2, 1};
+		CHECK(fixture.preparer->start(requestFor(first), [&](YouTubeDestinationPrepareCompletion completion) {
+			deliveredStatus = completion.status;
+			deliveredIngestion = completion.ingestion.has_value();
+			nestedStartStatus =
+				fixture.preparer->start(requestFor({2, 2}), [](YouTubeDestinationPrepareCompletion) {});
+		}) == YouTubeDestinationPrepareStartStatus::Started);
+		CHECK(fixture.refreshState->lastAttempt.has_value());
+		if (fixture.refreshState->lastAttempt.has_value()) {
+			fixture.refreshState->handlers.front()(refreshSuccess(*fixture.refreshState->lastAttempt));
+		}
+		CHECK(fixture.resolverState->lastAttempt.has_value());
+		if (fixture.resolverState->lastAttempt.has_value()) {
+			fixture.resolverState->handlers.front()(resolveSuccess(*fixture.resolverState->lastAttempt));
+		}
+		processQueuedEvents();
+		CHECK(deliveredStatus == YouTubeDestinationPrepareStatus::ServiceUnavailable);
+		CHECK(!deliveredIngestion);
+		CHECK(nestedStartStatus == YouTubeDestinationPrepareStartStatus::Busy);
+		CHECK(fixture.lockApi.releaseCount == 1);
+		CHECK(!fixture.preparer->activeAttempt().has_value());
+		fixture.lockApi.releaseSucceeds = true;
+		CHECK(fixture.preparer->shutdown());
+		CHECK(fixture.lockApi.releaseCount == 2);
+		CHECK(fixture.lockApi.closeCount == 1);
+	}
+
+	{
+		Fixture fixture;
+		fixture.vault.seed({kProfileBindingA, "channel-1"}, kOldRefreshToken);
+		fixture.lockApi.releaseSucceeds = false;
+		YouTubeDestinationPrepareStatus deliveredStatus = YouTubeDestinationPrepareStatus::InvalidResponse;
+		bool deliveredIngestion = true;
+		const auto attempt = YouTubeDestinationPrepareAttempt{2, 3};
+		CHECK(fixture.preparer->start(requestFor(attempt), [&](YouTubeDestinationPrepareCompletion completion) {
+			deliveredStatus = completion.status;
+			deliveredIngestion = completion.ingestion.has_value();
+		}) == YouTubeDestinationPrepareStartStatus::Started);
+		CHECK(fixture.refreshState->lastAttempt.has_value());
+		if (fixture.refreshState->lastAttempt.has_value()) {
+			fixture.refreshState->handlers.front()(refreshSuccess(*fixture.refreshState->lastAttempt));
+		}
+		CHECK(fixture.resolverState->lastAttempt.has_value());
+		if (fixture.resolverState->lastAttempt.has_value()) {
+			fixture.resolverState->handlers.front()(
+				resolveFailure(*fixture.resolverState->lastAttempt,
+					       YouTubeStreamResolverCompletionStatus::StreamNotReady));
+		}
+		processQueuedEvents();
+		CHECK(deliveredStatus == YouTubeDestinationPrepareStatus::ServiceUnavailable);
+		CHECK(!deliveredIngestion);
+		fixture.lockApi.releaseSucceeds = true;
+		CHECK(fixture.preparer->shutdown());
+	}
+}
+
+void testOperationLockReleaseForCancellationInvalidationAndShutdownFailure()
+{
+	{
+		Fixture fixture;
+		std::vector<Result> results;
+		beginWithStoredCredential(fixture, {1, 94}, results);
+		CHECK(fixture.preparer->cancel({1, 94}));
+		CHECK(fixture.lockApi.releaseCount == 0);
+		processQueuedEvents();
+		CHECK(fixture.lockApi.releaseCount == 1);
+		CHECK(fixture.preparer->shutdown());
+		CHECK(fixture.lockApi.releaseCount == 1);
+	}
+
+	{
+		Fixture fixture;
+		std::vector<Result> results;
+		beginWithStoredCredential(fixture, {1, 95}, results);
+		CHECK(fixture.preparer->invalidateContext());
+		CHECK(fixture.lockApi.releaseCount == 1);
+		processQueuedEvents();
+		CHECK(results.empty());
+	}
+
+	{
+		Fixture fixture;
+		fixture.vault.seed({kProfileBindingA, "channel-1"}, kOldRefreshToken);
+		fixture.refreshState->shutdownResult = false;
+		fixture.resolverState->shutdownResult = false;
+		std::vector<Result> results;
+		CHECK(fixture.preparer->start(requestFor({1, 96}), recorder(results)) ==
+		      YouTubeDestinationPrepareStartStatus::Started);
+		CHECK(!fixture.preparer->shutdown());
+		CHECK(fixture.preparer->state() == YouTubeDestinationPreparerState::Closed);
+		CHECK(fixture.lockApi.releaseCount == 1);
+		CHECK(fixture.lockApi.closeCount == 1);
+		CHECK(fixture.refreshState->shutdownCount == 1);
+		CHECK(fixture.resolverState->shutdownCount == 1);
+		fixture.refreshState->shutdownResult = true;
+		fixture.resolverState->shutdownResult = true;
+		CHECK(fixture.preparer->shutdown());
+		CHECK(fixture.refreshState->shutdownCount == 2);
+		CHECK(fixture.resolverState->shutdownCount == 2);
+	}
+
+	{
+		Fixture fixture;
+		fixture.vault.seed({kProfileBindingA, "channel-1"}, kOldRefreshToken);
+		fixture.lockApi.releaseSucceeds = false;
+		std::vector<Result> results;
+		CHECK(fixture.preparer->start(requestFor({1, 97}), recorder(results)) ==
+		      YouTubeDestinationPrepareStartStatus::Started);
+		CHECK(!fixture.preparer->shutdown());
+		CHECK(fixture.lockApi.releaseCount == 1);
+		fixture.lockApi.releaseSucceeds = true;
+		CHECK(fixture.preparer->shutdown());
+		CHECK(fixture.lockApi.releaseCount == 2);
+	}
 }
 
 void completeRefreshAndReachResolver(Fixture &fixture, bool rotate = false)
@@ -953,9 +1251,12 @@ void testInvalidRequestAndBusyState()
 		FakeCredentialVault vault;
 		const auto refreshState = std::make_shared<RefreshState>();
 		const auto resolverState = std::make_shared<ResolverState>();
+		FakeYouTubeAccountProfileOperationLockApi lockApi;
+		YouTubeAccountProfileOperationLockProvider lockProvider(lockApi);
 		YouTubeAccountDestinationPreparerTestAccess invalidClient(
 			std::make_unique<FakeRefreshPort>(refreshState),
-			std::make_unique<FakeResolverPort>(resolverState), vault, QStringLiteral("client id"));
+			std::make_unique<FakeResolverPort>(resolverState), vault, lockProvider,
+			QStringLiteral("client id"));
 		std::vector<Result> ignored;
 		CHECK(invalidClient.start(requestFor({12, 99}), recorder(ignored)) ==
 		      YouTubeDestinationPrepareStartStatus::InvalidClientId);
@@ -1025,10 +1326,12 @@ void testDestructionWithLateCallbacksIsSilent()
 	FakeCredentialVault vault;
 	const auto refreshState = std::make_shared<RefreshState>();
 	const auto resolverState = std::make_shared<ResolverState>();
+	FakeYouTubeAccountProfileOperationLockApi lockApi;
+	YouTubeAccountProfileOperationLockProvider lockProvider(lockApi);
 	{
 		auto preparer = std::make_unique<YouTubeAccountDestinationPreparerTestAccess>(
 			std::make_unique<FakeRefreshPort>(refreshState),
-			std::make_unique<FakeResolverPort>(resolverState), vault);
+			std::make_unique<FakeResolverPort>(resolverState), vault, lockProvider);
 		vault.seed({kProfileBindingA, "channel-1"}, kOldRefreshToken);
 		std::vector<Result> ignored;
 		CHECK(preparer->start(requestFor({15, 1}), recorder(ignored)) ==
@@ -1066,6 +1369,10 @@ void testSecretFreePublicState()
 int main(int argc, char **argv)
 {
 	QCoreApplication application(argc, argv);
+	testOperationLockRejectionsDoNotTouchOperation();
+	testOperationLockSpansPreparationAndReleasesBeforeHandler();
+	testCompletionReleaseFailureFailsClosedAndRetries();
+	testOperationLockReleaseForCancellationInvalidationAndShutdownFailure();
 	testSuccessAndExistingRefreshTokenIsRetained();
 	testRefreshTokenRotationIsPersistedBeforeResolve();
 	testRefreshTokenRotationWriteFailureStopsBeforeResolver();

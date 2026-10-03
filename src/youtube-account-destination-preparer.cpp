@@ -183,12 +183,14 @@ public:
 	Impl(YouTubeAccountDestinationPreparer *owner, QString clientId,
 	     std::unique_ptr<YouTubeDestinationRefreshPort> refreshPort,
 	     std::unique_ptr<YouTubeDestinationResolverPort> resolverPort,
-	     YouTubeAccountRefreshTokenStore &refreshTokenStore)
+	     YouTubeAccountRefreshTokenStore &refreshTokenStore,
+	     YouTubeAccountProfileOperationLockProvider &operationLockProvider)
 		: owner_(owner),
 		  clientId_(std::move(clientId)),
 		  refreshPort_(std::move(refreshPort)),
 		  resolverPort_(std::move(resolverPort)),
-		  refreshTokenStore_(refreshTokenStore)
+		  refreshTokenStore_(refreshTokenStore),
+		  operationLockProvider_(operationLockProvider)
 	{
 	}
 
@@ -222,6 +224,22 @@ public:
 		}
 		if (!completionHandler) {
 			return YouTubeDestinationPrepareStartStatus::InvalidCompletionHandler;
+		}
+
+		const auto lockResult = operationLockProvider_.acquire(request.profileBinding, operationLock_);
+		if (!lockResult.acquired()) {
+			switch (lockResult.status) {
+			case YouTubeAccountProfileOperationLockStatus::Busy:
+				return YouTubeDestinationPrepareStartStatus::Busy;
+			case YouTubeAccountProfileOperationLockStatus::InvalidProfileBinding:
+				return YouTubeDestinationPrepareStartStatus::InvalidProfileBinding;
+			case YouTubeAccountProfileOperationLockStatus::Unavailable:
+				return YouTubeDestinationPrepareStartStatus::OperationFailed;
+			case YouTubeAccountProfileOperationLockStatus::Acquired:
+			case YouTubeAccountProfileOperationLockStatus::Recovered:
+				break;
+			}
+			return YouTubeDestinationPrepareStartStatus::OperationFailed;
 		}
 
 		try {
@@ -286,6 +304,7 @@ public:
 		} catch (...) {
 			clearOperation();
 			state_ = YouTubeDestinationPreparerState::Idle;
+			releaseOperationLock();
 			return YouTubeDestinationPrepareStartStatus::OperationFailed;
 		}
 	}
@@ -320,8 +339,9 @@ public:
 		}
 		clearOperation();
 		state_ = YouTubeDestinationPreparerState::Idle;
+		const bool lockReleased = releaseOperationLock();
 		lifecycleMutationInProgress_ = false;
-		return true;
+		return lockReleased;
 	}
 
 	bool shutdown() noexcept
@@ -329,24 +349,28 @@ public:
 		if (!onOwnerThread()) {
 			return false;
 		}
-		if (state_ == YouTubeDestinationPreparerState::Closed) {
-			return true;
-		}
 		if (lifecycleMutationInProgress_) {
 			return false;
 		}
 
 		lifecycleMutationInProgress_ = true;
-		state_ = YouTubeDestinationPreparerState::Closed;
-		advanceEpoch();
-		if (activeAttempt_.has_value()) {
-			cancelPorts(*activeAttempt_);
+		if (state_ != YouTubeDestinationPreparerState::Closed) {
+			state_ = YouTubeDestinationPreparerState::Closed;
+			advanceEpoch();
+			if (activeAttempt_.has_value()) {
+				cancelPorts(*activeAttempt_);
+			}
+			clearOperation();
 		}
-		clearOperation();
-		const bool refreshClosed = refreshPort_->shutdown();
-		const bool resolverClosed = resolverPort_->shutdown();
+		if (!refreshPortClosed_) {
+			refreshPortClosed_ = refreshPort_->shutdown();
+		}
+		if (!resolverPortClosed_) {
+			resolverPortClosed_ = resolverPort_->shutdown();
+		}
+		const bool lockReleased = releaseOperationLock();
 		lifecycleMutationInProgress_ = false;
-		return refreshClosed && resolverClosed;
+		return refreshPortClosed_ && resolverPortClosed_ && lockReleased;
 	}
 
 	YouTubeDestinationPreparerState state() const noexcept { return state_; }
@@ -381,6 +405,8 @@ private:
 		activeAttempt_.reset();
 		completionDeliveryQueued_ = false;
 	}
+
+	bool releaseOperationLock() noexcept { return operationLock_.release(); }
 
 	void cancelPorts(YouTubeDestinationPrepareAttempt attempt) noexcept
 	{
@@ -488,6 +514,9 @@ private:
 		    std::optional<YouTubeResolvedIngestion> ingestion = std::nullopt) noexcept
 	{
 		if (!activeAttempt_.has_value() || !completionHandler_) {
+			clearOperation();
+			state_ = YouTubeDestinationPreparerState::Completed;
+			releaseOperationLock();
 			return;
 		}
 		try {
@@ -503,6 +532,7 @@ private:
 		} catch (...) {
 			clearOperation();
 			state_ = YouTubeDestinationPreparerState::Completed;
+			releaseOperationLock();
 		}
 	}
 
@@ -526,6 +556,7 @@ private:
 			completionDeliveryQueued_ = false;
 			clearOperation();
 			state_ = YouTubeDestinationPreparerState::Completed;
+			releaseOperationLock();
 		}
 	}
 
@@ -544,6 +575,14 @@ private:
 		state_ = completion.status == YouTubeDestinationPrepareStatus::Cancelled
 				 ? YouTubeDestinationPreparerState::Cancelled
 				 : YouTubeDestinationPreparerState::Completed;
+		const bool lockReleased = releaseOperationLock();
+		if (!lockReleased) {
+			// The operation cannot be reported as usable while its profile lease is
+			// still held. Discard the destination even when preparation succeeded;
+			// shutdown() can retry the release on the owner thread.
+			completion.status = YouTubeDestinationPrepareStatus::ServiceUnavailable;
+			completion.ingestion.reset();
+		}
 		if (!handler) {
 			return;
 		}
@@ -559,6 +598,8 @@ private:
 	std::unique_ptr<YouTubeDestinationRefreshPort> refreshPort_;
 	std::unique_ptr<YouTubeDestinationResolverPort> resolverPort_;
 	YouTubeAccountRefreshTokenStore &refreshTokenStore_;
+	YouTubeAccountProfileOperationLockProvider &operationLockProvider_;
+	YouTubeAccountProfileOperationLock operationLock_;
 	YouTubeDestinationPreparerState state_ = YouTubeDestinationPreparerState::Idle;
 	std::optional<YouTubeDestinationPrepareAttempt> activeAttempt_;
 	std::optional<YouTubeAccountCredentialScope> credentialScope_;
@@ -568,23 +609,27 @@ private:
 	std::uint64_t operationEpoch_ = 0;
 	bool completionDeliveryQueued_ = false;
 	bool lifecycleMutationInProgress_ = false;
+	bool refreshPortClosed_ = false;
+	bool resolverPortClosed_ = false;
 };
 
-YouTubeAccountDestinationPreparer::YouTubeAccountDestinationPreparer(QString clientId,
-								     YouTubeAccountRefreshTokenStore &refreshTokenStore,
-								     QObject *parent)
+YouTubeAccountDestinationPreparer::YouTubeAccountDestinationPreparer(
+	QString clientId, YouTubeAccountRefreshTokenStore &refreshTokenStore,
+	YouTubeAccountProfileOperationLockProvider &operationLockProvider, QObject *parent)
 	: YouTubeAccountDestinationPreparer(std::move(clientId), std::make_unique<RefreshAdapter>(),
-					    std::make_unique<ResolverAdapter>(), refreshTokenStore, parent)
+					    std::make_unique<ResolverAdapter>(), refreshTokenStore,
+					    operationLockProvider, parent)
 {
 }
 
 YouTubeAccountDestinationPreparer::YouTubeAccountDestinationPreparer(
 	QString clientId, std::unique_ptr<YouTubeDestinationRefreshPort> refreshPort,
 	std::unique_ptr<YouTubeDestinationResolverPort> resolverPort,
-	YouTubeAccountRefreshTokenStore &refreshTokenStore, QObject *parent)
+	YouTubeAccountRefreshTokenStore &refreshTokenStore,
+	YouTubeAccountProfileOperationLockProvider &operationLockProvider, QObject *parent)
 	: QObject(parent),
 	  impl_(std::make_unique<Impl>(this, std::move(clientId), std::move(refreshPort), std::move(resolverPort),
-				       refreshTokenStore))
+				       refreshTokenStore, operationLockProvider))
 {
 }
 

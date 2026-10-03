@@ -63,13 +63,15 @@ The output adapter never receives an OAuth access or refresh token. The account 
 Account connection and output delivery are separate states. A channel may be connected while YouTube is not streaming, and a YouTube output may fail without disconnecting the account.
 
 The detached `YouTubeAccountDestinationPreparer` is the boundary immediately before future output integration. For one
-selected channel/stream it captures an immutable profile/channel scope, reads the saved refresh credential for that
-scope, refreshes an access token, persists a provider-rotated refresh token in the same scope before resolving the
-selected stream, and completes with only a validated RTMPS URL plus a move-only
-stream-key buffer. A failed rotation write returns a credential-unavailable result and does not start resolution. A
-rotation that was written successfully is retained even if resolution later fails or the preparation is cancelled; it is
-not rolled back to an older token. The preparer is owner-thread-only, uses an independent epoch and attempt, and
-supports cancellation, context invalidation, shutdown, stale-callback rejection, and queued value-only completion.
+selected channel/stream it captures an immutable profile/channel scope and acquires the injected profile-operation lock
+before reading the saved refresh credential. It retains that owner-thread lock while refreshing an access token, persisting
+a provider-rotated refresh token in the same scope, resolving the selected stream, and finalizing queued completion state.
+It releases the lock immediately before invoking an external completion handler. A failed rotation write returns a
+credential-unavailable result and does not start resolution. A rotation that was written successfully is retained even if
+resolution later fails or the preparation is cancelled; it is not rolled back to an older token. The preparer is
+owner-thread-only, uses an independent epoch and attempt, and supports cancellation, context invalidation, shutdown,
+stale-callback rejection, and queued value-only completion. A busy lock returns without changing preparer state; a
+recovered lock is internal recovery metadata and is not user-facing.
 It is currently a detached/testable library and is not instantiated by `PluginState`, `RuntimeController`, the dock, or
 the output adapter.
 
@@ -129,7 +131,11 @@ As with the existing stream key, this design does not claim resistance to malwar
 
 Every asynchronous browser, token, and API result carries the account generation and attempt that created it. Results are ignored after cancellation, a new attempt, profile transition, disconnect, or shutdown.
 
-Credential replacement is serialized with the account state. After discovery, the provider revalidates the active
+Credential replacement is serialized with the account state. Each provider transaction acquires its injected,
+profile-scoped operation lock before authorization begins and holds it through discovery, selection persistence,
+credential replacement, and any rollback. Acquisition does not wait: a busy profile returns without mutating provider
+state. A recovered mutex is accepted as an internal recovery result, with durable state re-read as required; it is not
+shown in the UI. After discovery, the provider revalidates the active
 attempt, persists the non-secret profile selection first, then performs the synchronous scoped Credential Manager write
 on the owner thread before yielding to Qt's event loop. If the credential write fails, the exact prior selection is
 restored. If a later commit invariant fails, both durable stores are restored where possible and failure is reported
@@ -142,7 +148,12 @@ Destination preparation has a separate ordering rule: a rotated refresh token is
 selected-stream resolver is started. A write failure returns a credential-unavailable result and does not resolve or
 start an output. A successful write is durable and is not rolled back if the subsequent resolver fails or the attempt
 is cancelled. The preparer's epoch and attempt must match at every stage; cancellation, context invalidation, shutdown,
-and destruction suppress stale completions and clear active secret-bearing state.
+and destruction suppress stale completions and clear active secret-bearing state. The preparer releases its
+owner-thread profile lock after rollback/finalization and immediately before the external completion handler runs.
+If release fails, it destroys any successful destination and reports a service failure. When mutex ownership remains, it
+retains the profile claim until owner-thread shutdown retries the unfinished cleanup. Provider shutdown likewise retries
+only the coordinator, ports, or lock steps that did not previously finish.
+Future disconnect and revoke operations must use the same profile-scoped boundary for selection and credential changes.
 
 The provider:
 
@@ -246,10 +257,16 @@ successfully refresh and resolve the exact saved channel and stream before an ou
 
 The repository now contains a detached Windows operation-lock foundation for that rule. It derives a `Local\\` named
 mutex only from the validated SHA-256 profile binding, never from a raw path, channel ID, or token. Acquisition is
-non-blocking, an abandoned mutex is reported as a recovered acquisition so the caller can re-read durable state, and a
+non-blocking, so a busy result leaves provider/preparer state unchanged. A recovered mutex is accepted as an internal
+recovery result so durable state can be re-read before continuing; the recovery condition is not user-facing. A
 process-wide claim registry prevents Windows' same-thread recursive mutex behavior from admitting two local operations.
 The lock is owner-thread-bound, non-copyable, non-movable, and releases both the native handle and the local claim on every terminal
-path. It is still test-only and is not linked into the OBS plugin or exposed in the dock; the provider and destination
-preparer must hold it across their complete asynchronous transactions before either component can be integrated.
+path. Both detached account classes now require the lock provider and hold it across their complete asynchronous
+transactions, including rollback; the preparer releases it before invoking an external completion handler. These
+libraries remain test-linked/detached and are not linked into the OBS plugin or exposed in the dock.
+
+Before active-profile wiring is exposed, the non-secret selection must be re-read after acquiring the lock, or profile
+loading and restoration must run inside one outer locked transaction. A pre-lock selection snapshot can be stale after
+another OBS process changes the same profile, so this remains an integration gate rather than a user-visible behavior.
 
 No account UI is added merely to advertise unfinished functionality. A build without a complete configured provider continues to show only the working manual setup.
