@@ -649,6 +649,7 @@ if(BUILD_TESTING)
     ${CMAKE_PROJECT_NAME}-youtube-account-provider
     ${CMAKE_PROJECT_NAME}-youtube-stream-resolver
     ${CMAKE_PROJECT_NAME}-youtube-account-destination-preparer
+    ${CMAKE_PROJECT_NAME}-youtube-account-profile-context
     PROPERTIES ENVIRONMENT_MODIFICATION "${test_runtime_environment}"
   )
 endif()
