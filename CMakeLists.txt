@@ -26,6 +26,7 @@ add_library(${CMAKE_PROJECT_NAME}-oauth-loopback STATIC)
 add_library(${CMAKE_PROJECT_NAME}-oauth-authorization-session STATIC)
 add_library(${CMAKE_PROJECT_NAME}-oauth-token-transport STATIC)
 add_library(${CMAKE_PROJECT_NAME}-youtube-discovery STATIC)
+add_library(${CMAKE_PROJECT_NAME}-youtube-discovery-pager STATIC)
 add_library(${CMAKE_PROJECT_NAME}-youtube-stream-resolver STATIC)
 
 find_package(libobs REQUIRED)
@@ -149,6 +150,19 @@ target_include_directories(
 target_link_libraries(
   ${CMAKE_PROJECT_NAME}-youtube-discovery
   PUBLIC ${CMAKE_PROJECT_NAME}-secure-core Qt6::Core Qt6::Network
+)
+
+target_sources(
+  ${CMAKE_PROJECT_NAME}-youtube-discovery-pager
+  PRIVATE src/youtube-api-discovery-pager.cpp src/youtube-api-discovery-pager.hpp
+)
+target_include_directories(
+  ${CMAKE_PROJECT_NAME}-youtube-discovery-pager
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+target_link_libraries(
+  ${CMAKE_PROJECT_NAME}-youtube-discovery-pager
+  PUBLIC ${CMAKE_PROJECT_NAME}-youtube-discovery Qt6::Core
 )
 
 target_sources(
@@ -364,6 +378,33 @@ if(BUILD_TESTING)
     COMMAND ${CMAKE_PROJECT_NAME}-youtube-discovery-tests
   )
 
+  add_executable(${CMAKE_PROJECT_NAME}-youtube-discovery-pager-tests)
+  target_sources(
+    ${CMAKE_PROJECT_NAME}-youtube-discovery-pager-tests
+    PRIVATE tests/youtube-api-discovery-pager-tests.cpp
+  )
+  target_link_libraries(
+    ${CMAKE_PROJECT_NAME}-youtube-discovery-pager-tests
+    PRIVATE ${CMAKE_PROJECT_NAME}-youtube-discovery-pager
+  )
+
+  add_custom_command(
+    TARGET ${CMAKE_PROJECT_NAME}-youtube-discovery-pager-tests
+    POST_BUILD
+    COMMAND
+      "${CMAKE_COMMAND}" -E copy_if_different
+      $<TARGET_RUNTIME_DLLS:${CMAKE_PROJECT_NAME}-youtube-discovery-pager-tests>
+      $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}-youtube-discovery-pager-tests>
+    COMMAND_EXPAND_LISTS
+    COMMENT "Copy YouTube discovery pager test runtime dependencies"
+    VERBATIM
+  )
+
+  add_test(
+    NAME ${CMAKE_PROJECT_NAME}-youtube-discovery-pager
+    COMMAND ${CMAKE_PROJECT_NAME}-youtube-discovery-pager-tests
+  )
+
   add_executable(${CMAKE_PROJECT_NAME}-youtube-stream-resolver-tests)
   target_sources(
     ${CMAKE_PROJECT_NAME}-youtube-stream-resolver-tests
@@ -482,6 +523,7 @@ if(BUILD_TESTING)
     ${CMAKE_PROJECT_NAME}-google-oauth-authorization-session
     ${CMAKE_PROJECT_NAME}-google-oauth-token
     ${CMAKE_PROJECT_NAME}-youtube-discovery
+    ${CMAKE_PROJECT_NAME}-youtube-discovery-pager
     ${CMAKE_PROJECT_NAME}-youtube-stream-resolver
     PROPERTIES ENVIRONMENT_MODIFICATION "${test_runtime_environment}"
   )

@@ -57,8 +57,10 @@ It sends a move-only access-token buffer solely as a Bearer header to the fixed 
 `liveStreams.list` HTTPS endpoints. It requests one bounded page at a time, uses `mine=true`, strictly validates IDs,
 labels, page tokens, headers, JSON, TLS, and final URLs, and returns stable error enums rather than provider text. Its
 fixed partial-response fields request only IDs and display labels; CDN ingestion data and `streamName` are not requested
-or returned by this layer. A later provider must impose total page and cycle limits before following the opaque
-continuation value.
+or returned by this layer. A separate, test-only-linked pagination layer follows opaque continuation values serially
+with fixed total-time, page, and item limits. It rejects continuation cycles and cross-page duplicate IDs and returns
+no partial candidates after any page failure, timeout, cancellation, or limit breach. Access tokens are copied only
+into move-only buffers for the active page and are cleared with the aggregate operation state.
 
 The repository also contains a separate selected-stream resolver that is built only for its standalone development
 test. It requests one explicitly selected stream ID from the fixed `liveStreams.list` endpoint, rechecks the returned
