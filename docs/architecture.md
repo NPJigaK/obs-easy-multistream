@@ -32,7 +32,9 @@ not send a client secret. The resolver fetches only the explicitly selected stre
 start, revalidates its channel, state, RTMPS host, and stream key, and returns the key in a move-only buffer rather than
 any discovery or settings type. None of these network libraries is linked into or instantiated by the OBS plugin yet,
 so the product opens no listener or browser, makes no OAuth request, and leaves the current dock and manual RTMPS
-workflow unchanged. System-browser launch, multi-page discovery orchestration,
+workflow unchanged. The profile codec now distinguishes manual and account modes and can preserve a bounded,
+non-secret channel/stream selection. Until the complete account provider is integrated, account mode fails closed and
+cannot consume the manual URL/key destination. System-browser launch, multi-page discovery orchestration,
 account-provider/vault integration, runtime integration, and user-facing
 account controls remain release-gated.
 
@@ -75,10 +77,13 @@ OBS dock wrapper (OBS-owned)
   └─ DockView (QWidget)
 
 Windows Credential Manager
-  └─ one Easy Multistream YouTube key for the current Windows account
+  ├─ one Easy Multistream YouTube key for the current Windows account
+  └─ a separate reserved target for the future Google refresh token
 
 Current OBS profile/basic.ini
-  └─ SchemaVersion + YouTubeEnabled + YouTubeServerUrl
+  ├─ SchemaVersion + YouTubeEnabled + explicit connection mode
+  ├─ YouTubeServerUrl for the manual path
+  └─ optional non-secret channel/stream IDs and display labels
 
 OBS user config/user.ini
   └─ one non-secret first-display marker for the dock
@@ -103,7 +108,7 @@ User-visible text follows OBS and platform terminology. Internal milestone names
 
 ## Configuration and credential invariants
 
-1. `basic.ini` contains only `SchemaVersion`, `YouTubeEnabled`, and the non-secret `YouTubeServerUrl` under `[EasyMultistream]`.
+1. `basic.ini` contains only the schema and enable value, an explicit connection mode, the non-secret manual `YouTubeServerUrl`, and optional non-secret account-selection IDs/labels under `[EasyMultistream]`.
 2. The stream key is written only to Windows Credential Manager and is never read back into the editor.
 3. Saving a key and changing a profile's enabled flag are independent operations; there is no cross-store transaction to partially commit.
 4. An explicit Save Key action requires a non-empty, valid key. Deleting the shared key requires confirmation and does not rewrite any profile setting.
@@ -111,6 +116,8 @@ User-visible text follows OBS and platform terminology. Internal milestone names
 6. Invalid and unknown future schemas are read-only and are never downgraded by this version.
 7. A failed safe-save restores the previous in-memory non-secret settings.
 8. Credential or YouTube output failure cannot alter the native OBS output.
+9. Account mode cannot read or start with the manual URL/key path; it remains unconfigured until the complete asynchronous account destination provider is integrated.
+10. Schema 1 and 2 profiles migrate in memory as manual mode. A normal settings save writes the current schema without placing any credential, token, authorization code, PKCE value, or resolved stream key in the profile.
 
 ## Runtime boundary
 

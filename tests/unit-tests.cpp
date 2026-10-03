@@ -23,6 +23,11 @@ namespace {
 int failures = 0;
 constexpr std::string_view kValidYouTubeServerUrl = "rtmps://a.rtmps.youtube.com/live2";
 
+easy_multistream::YouTubeAccountSelection accountSelection()
+{
+	return {"UC-account-channel", u8"配信チャンネル", "stream-reusable", u8"いつもの配信"};
+}
+
 #define CHECK(expression)                                                                                              \
 	do {                                                                                                           \
 		if (!(expression)) {                                                                                     \
@@ -152,7 +157,9 @@ void testSettingsDefaults()
 	const auto loaded = easy_multistream::loadProfileSettings(config.get());
 	CHECK(loaded.status == easy_multistream::SettingsLoadStatus::Defaults);
 	CHECK(!loaded.settings.youtubeEnabled);
+	CHECK(loaded.settings.youtubeConnectionMode == easy_multistream::YouTubeConnectionMode::Manual);
 	CHECK(loaded.settings.youtubeServerUrl.empty());
+	CHECK(!loaded.settings.youtubeAccountSelection.has_value());
 	CHECK(loaded.sourceSchemaVersion == easy_multistream::kSettingsSchemaVersion);
 }
 
@@ -229,8 +236,275 @@ void testSettingsRoundTripAndPlaintextRemoval()
 	const auto loaded = easy_multistream::loadProfileSettings(config.get());
 	CHECK(loaded.status == easy_multistream::SettingsLoadStatus::Loaded);
 	CHECK(loaded.settings.youtubeEnabled);
+	CHECK(loaded.settings.youtubeConnectionMode == easy_multistream::YouTubeConnectionMode::Manual);
 	CHECK(loaded.settings.youtubeServerUrl == kValidYouTubeServerUrl);
+	CHECK(!loaded.settings.youtubeAccountSelection.has_value());
 	CHECK(!config_has_user_value(config.get(), "EasyMultistream", "StreamKey"));
+}
+
+void testSettingsConnectionModesAndMigration()
+{
+	for (const char *schema : {"1", "2"}) {
+		const std::string contents =
+			std::string("[EasyMultistream]\nSchemaVersion=") + schema +
+			"\nYouTubeEnabled=true\nYouTubeServerUrl=" + std::string(kValidYouTubeServerUrl) + "\n";
+		Config legacy(contents.c_str());
+		const auto loaded = easy_multistream::loadProfileSettings(legacy.get());
+		CHECK(loaded.status == easy_multistream::SettingsLoadStatus::Loaded);
+		CHECK(loaded.settings.youtubeConnectionMode == easy_multistream::YouTubeConnectionMode::Manual);
+		CHECK(!loaded.settings.youtubeAccountSelection.has_value());
+	}
+
+	Config account("[EasyMultistream]\nSchemaVersion=3\nYouTubeEnabled=true\nConnectionMode=account\n"
+		       "YouTubeChannelId=UC-account-channel\nYouTubeChannelLabel=Channel\n"
+		       "YouTubeStreamId=stream-reusable\nYouTubeStreamLabel=Stream\n");
+	const auto connected = easy_multistream::loadProfileSettings(account.get());
+	CHECK(connected.status == easy_multistream::SettingsLoadStatus::Loaded);
+	CHECK(connected.settings.youtubeConnectionMode == easy_multistream::YouTubeConnectionMode::Account);
+	CHECK(connected.settings.youtubeServerUrl.empty());
+	CHECK(connected.settings.youtubeAccountSelection.has_value());
+	if (connected.settings.youtubeAccountSelection.has_value()) {
+		CHECK(connected.settings.youtubeAccountSelection->channelId == "UC-account-channel");
+		CHECK(connected.settings.youtubeAccountSelection->streamId == "stream-reusable");
+	}
+
+	Config incompleteAccount("[EasyMultistream]\nSchemaVersion=3\nYouTubeEnabled=true\nConnectionMode=account\n");
+	const auto setupRequired = easy_multistream::loadProfileSettings(incompleteAccount.get());
+	CHECK(setupRequired.status == easy_multistream::SettingsLoadStatus::SetupRequired);
+	CHECK(setupRequired.settings.youtubeConnectionMode == easy_multistream::YouTubeConnectionMode::Account);
+
+	Config unknownMode("[EasyMultistream]\nSchemaVersion=3\nYouTubeEnabled=true\nConnectionMode=automatic\n");
+	CHECK(easy_multistream::loadProfileSettings(unknownMode.get()).status ==
+	      easy_multistream::SettingsLoadStatus::InvalidSchema);
+
+	Config partialSelection("[EasyMultistream]\nSchemaVersion=3\nYouTubeEnabled=true\nConnectionMode=account\n"
+				"YouTubeChannelId=UC-account-channel\n");
+	CHECK(easy_multistream::loadProfileSettings(partialSelection.get()).status ==
+	      easy_multistream::SettingsLoadStatus::InvalidSchema);
+
+	Config emptyLabel("[EasyMultistream]\nSchemaVersion=3\nYouTubeEnabled=true\nConnectionMode=account\n"
+			  "YouTubeChannelId=UC-account-channel\nYouTubeChannelLabel=\n"
+			  "YouTubeStreamId=stream-reusable\nYouTubeStreamLabel=Stream\n");
+	CHECK(easy_multistream::loadProfileSettings(emptyLabel.get()).status ==
+	      easy_multistream::SettingsLoadStatus::InvalidSchema);
+
+	Config manualWithSelection("[EasyMultistream]\nSchemaVersion=3\nYouTubeEnabled=false\nConnectionMode=manual\n"
+				   "YouTubeServerUrl=rtmps://a.rtmps.youtube.com/live2\n"
+				   "YouTubeChannelId=UC-account-channel\nYouTubeChannelLabel=Channel\n"
+				   "YouTubeStreamId=stream-reusable\nYouTubeStreamLabel=Stream\n");
+	const auto preserved = easy_multistream::loadProfileSettings(manualWithSelection.get());
+	CHECK(preserved.status == easy_multistream::SettingsLoadStatus::Loaded);
+	CHECK(preserved.settings.youtubeConnectionMode == easy_multistream::YouTubeConnectionMode::Manual);
+	CHECK(preserved.settings.youtubeAccountSelection.has_value());
+
+	Config manualWithDamagedSelection(
+		"[EasyMultistream]\nSchemaVersion=3\nYouTubeEnabled=true\nConnectionMode=manual\n"
+		"YouTubeServerUrl=rtmps://a.rtmps.youtube.com/live2\nYouTubeChannelId=partial-only\n");
+	const auto recoveredManual = easy_multistream::loadProfileSettings(manualWithDamagedSelection.get());
+	CHECK(recoveredManual.status == easy_multistream::SettingsLoadStatus::Loaded);
+	CHECK(recoveredManual.settings.youtubeConnectionMode == easy_multistream::YouTubeConnectionMode::Manual);
+	CHECK(!recoveredManual.settings.youtubeAccountSelection.has_value());
+
+	Config accountWithDamagedManualUrl(
+		"[EasyMultistream]\nSchemaVersion=3\nYouTubeEnabled=true\nConnectionMode=account\n"
+		"YouTubeServerUrl=https://unsafe.example/live\n"
+		"YouTubeChannelId=UC-account-channel\nYouTubeChannelLabel=Channel\n"
+		"YouTubeStreamId=stream-reusable\nYouTubeStreamLabel=Stream\n");
+	const auto recoveredAccount = easy_multistream::loadProfileSettings(accountWithDamagedManualUrl.get());
+	CHECK(recoveredAccount.status == easy_multistream::SettingsLoadStatus::Loaded);
+	CHECK(recoveredAccount.settings.youtubeConnectionMode == easy_multistream::YouTubeConnectionMode::Account);
+	CHECK(recoveredAccount.settings.youtubeServerUrl.empty());
+	CHECK(recoveredAccount.settings.youtubeAccountSelection.has_value());
+}
+
+void testAccountSettingsRoundTripAndSecretExclusion()
+{
+	Config config("[EasyMultistream]\nRefreshToken=refresh-token-must-not-survive\n"
+		      "AccessToken=access-token-must-not-survive\nAuthorizationCode=code-must-not-survive\n"
+		      "CodeVerifier=verifier-must-not-survive\nStreamName=stream-name-must-not-survive\n");
+	easy_multistream::Settings settings;
+	settings.youtubeEnabled = true;
+	settings.youtubeConnectionMode = easy_multistream::YouTubeConnectionMode::Account;
+	settings.youtubeServerUrl = std::string(kValidYouTubeServerUrl);
+	settings.youtubeAccountSelection = accountSelection();
+	easy_multistream::writeProfileSettings(config.get(), settings);
+
+	const auto loaded = easy_multistream::loadProfileSettings(config.get());
+	CHECK(loaded.status == easy_multistream::SettingsLoadStatus::Loaded);
+	CHECK(loaded.settings.youtubeConnectionMode == easy_multistream::YouTubeConnectionMode::Account);
+	CHECK(loaded.settings.youtubeAccountSelection.has_value());
+	if (loaded.settings.youtubeAccountSelection.has_value()) {
+		CHECK(loaded.settings.youtubeAccountSelection->channelId ==
+		      settings.youtubeAccountSelection->channelId);
+		CHECK(loaded.settings.youtubeAccountSelection->channelLabel ==
+		      settings.youtubeAccountSelection->channelLabel);
+		CHECK(loaded.settings.youtubeAccountSelection->streamId == settings.youtubeAccountSelection->streamId);
+		CHECK(loaded.settings.youtubeAccountSelection->streamLabel ==
+		      settings.youtubeAccountSelection->streamLabel);
+	}
+	for (const char *forbidden :
+	     {"RefreshToken", "AccessToken", "AuthorizationCode", "CodeVerifier", "StreamName"}) {
+		CHECK(!config_has_user_value(config.get(), "EasyMultistream", forbidden));
+	}
+
+	easy_multistream::Settings invalid = settings;
+	invalid.youtubeAccountSelection->streamLabel.clear();
+	config_set_string(config.get(), "EasyMultistream", "RefreshToken", "remove-even-on-invalid-write");
+	easy_multistream::writeProfileSettings(config.get(), invalid);
+	CHECK(!config_has_user_value(config.get(), "EasyMultistream", "RefreshToken"));
+	CHECK(easy_multistream::saveProfileSettings(config.get(), invalid) == CONFIG_ERROR);
+	const auto afterRejectedSave = easy_multistream::loadProfileSettings(config.get());
+	CHECK(afterRejectedSave.status == easy_multistream::SettingsLoadStatus::Loaded);
+	CHECK(afterRejectedSave.settings.youtubeAccountSelection.has_value());
+
+	easy_multistream::Settings invalidMode = settings;
+	invalidMode.youtubeConnectionMode = static_cast<easy_multistream::YouTubeConnectionMode>(99);
+	CHECK(easy_multistream::saveProfileSettings(config.get(), invalidMode) == CONFIG_ERROR);
+}
+
+void testAccountSettingsSafeSaveAndReload()
+{
+	const std::filesystem::path path =
+		std::filesystem::current_path() / "easy-multistream-account-settings-test.ini";
+	std::error_code removeError;
+	std::filesystem::remove(path, removeError);
+	std::filesystem::remove(path.string() + ".tmp", removeError);
+
+	config_t *config = nullptr;
+	const std::string utf8Path = path.u8string();
+	CHECK(config_open(&config, utf8Path.c_str(), CONFIG_OPEN_ALWAYS) == CONFIG_SUCCESS);
+	CHECK(config != nullptr);
+	if (config != nullptr) {
+		easy_multistream::Settings settings;
+		settings.youtubeEnabled = true;
+		settings.youtubeConnectionMode = easy_multistream::YouTubeConnectionMode::Account;
+		settings.youtubeAccountSelection = accountSelection();
+		CHECK(easy_multistream::saveProfileSettings(config, settings) == CONFIG_SUCCESS);
+		config_close(config);
+	}
+
+	config = nullptr;
+	CHECK(config_open(&config, utf8Path.c_str(), CONFIG_OPEN_EXISTING) == CONFIG_SUCCESS);
+	CHECK(config != nullptr);
+	if (config != nullptr) {
+		const auto loaded = easy_multistream::loadProfileSettings(config);
+		CHECK(loaded.status == easy_multistream::SettingsLoadStatus::Loaded);
+		CHECK(loaded.settings.youtubeConnectionMode == easy_multistream::YouTubeConnectionMode::Account);
+		CHECK(loaded.settings.youtubeServerUrl.empty());
+		CHECK(loaded.settings.youtubeAccountSelection.has_value());
+		if (loaded.settings.youtubeAccountSelection.has_value()) {
+			CHECK(loaded.settings.youtubeAccountSelection->channelLabel == u8"配信チャンネル");
+			CHECK(loaded.settings.youtubeAccountSelection->streamLabel == u8"いつもの配信");
+		}
+		config_close(config);
+	}
+
+	std::ifstream savedFile(path, std::ios::binary);
+	const std::string contents{std::istreambuf_iterator<char>(savedFile), std::istreambuf_iterator<char>()};
+	savedFile.close();
+	CHECK(contents.find("ConnectionMode=account") != std::string::npos);
+	CHECK(contents.find("RefreshToken") == std::string::npos);
+	CHECK(contents.find("AccessToken") == std::string::npos);
+	CHECK(contents.find("StreamKey") == std::string::npos);
+	CHECK(contents.find("StreamName") == std::string::npos);
+	CHECK(!std::filesystem::exists(path.string() + ".tmp"));
+	CHECK(std::filesystem::remove(path, removeError));
+}
+
+void testInvalidSettingsStillScrubPlaintextSecretsFromDisk()
+{
+	const std::filesystem::path path =
+		std::filesystem::current_path() / "easy-multistream-invalid-settings-scrub-test.ini";
+	std::error_code removeError;
+	std::filesystem::remove(path, removeError);
+	std::filesystem::remove(path.string() + ".tmp", removeError);
+
+	config_t *config = nullptr;
+	const std::string utf8Path = path.u8string();
+	CHECK(config_open(&config, utf8Path.c_str(), CONFIG_OPEN_ALWAYS) == CONFIG_SUCCESS);
+	CHECK(config != nullptr);
+	if (config == nullptr) {
+		return;
+	}
+	config_set_uint(config, "EasyMultistream", "SchemaVersion", easy_multistream::kSettingsSchemaVersion);
+	config_set_bool(config, "EasyMultistream", "YouTubeEnabled", false);
+	config_set_string(config, "EasyMultistream", "ConnectionMode", "manual");
+	config_set_string(config, "EasyMultistream", "YouTubeServerUrl", kValidYouTubeServerUrl.data());
+	config_set_string(config, "EasyMultistream", "RefreshToken", "invalid-save-secret-sentinel");
+	CHECK(config_save_safe(config, "tmp", nullptr) == CONFIG_SUCCESS);
+
+	easy_multistream::Settings invalid;
+	invalid.youtubeConnectionMode = easy_multistream::YouTubeConnectionMode::Account;
+	CHECK(easy_multistream::saveProfileSettings(config, invalid) == CONFIG_ERROR);
+	CHECK(!config_has_user_value(config, "EasyMultistream", "RefreshToken"));
+	config_close(config);
+
+	std::ifstream savedFile(path, std::ios::binary);
+	const std::string contents{std::istreambuf_iterator<char>(savedFile), std::istreambuf_iterator<char>()};
+	savedFile.close();
+	CHECK(contents.find("invalid-save-secret-sentinel") == std::string::npos);
+	CHECK(contents.find("RefreshToken") == std::string::npos);
+	CHECK(contents.find("ConnectionMode=manual") != std::string::npos);
+	CHECK(!std::filesystem::exists(path.string() + ".tmp"));
+	CHECK(std::filesystem::remove(path, removeError));
+}
+
+void testPlaintextScrubSaveFailureIsRecoverable()
+{
+	const std::filesystem::path directory =
+		std::filesystem::current_path() / "easy-multistream-secret-scrub-failure-test";
+	const std::filesystem::path movedDirectory =
+		std::filesystem::current_path() / "easy-multistream-secret-scrub-failure-moved";
+	const std::filesystem::path path = directory / "basic.ini";
+	const std::filesystem::path movedPath = movedDirectory / "basic.ini";
+	std::error_code filesystemError;
+	std::filesystem::remove_all(directory, filesystemError);
+	std::filesystem::remove_all(movedDirectory, filesystemError);
+	CHECK(std::filesystem::create_directory(directory, filesystemError));
+
+	config_t *config = nullptr;
+	const std::string utf8Path = path.u8string();
+	CHECK(config_open(&config, utf8Path.c_str(), CONFIG_OPEN_ALWAYS) == CONFIG_SUCCESS);
+	CHECK(config != nullptr);
+	if (config == nullptr) {
+		std::filesystem::remove_all(directory, filesystemError);
+		return;
+	}
+	config_set_uint(config, "EasyMultistream", "SchemaVersion", easy_multistream::kSettingsSchemaVersion);
+	config_set_bool(config, "EasyMultistream", "YouTubeEnabled", false);
+	config_set_string(config, "EasyMultistream", "ConnectionMode", "manual");
+	config_set_string(config, "EasyMultistream", "YouTubeServerUrl", kValidYouTubeServerUrl.data());
+	config_set_string(config, "EasyMultistream", "RefreshToken", "scrub-retry-secret-sentinel");
+	CHECK(config_save_safe(config, "tmp", nullptr) == CONFIG_SUCCESS);
+	std::filesystem::rename(directory, movedDirectory, filesystemError);
+	CHECK(!filesystemError);
+
+	easy_multistream::Settings invalid;
+	invalid.youtubeConnectionMode = easy_multistream::YouTubeConnectionMode::Account;
+	CHECK(easy_multistream::saveProfileSettings(config, invalid) != CONFIG_SUCCESS);
+	CHECK(!config_has_user_value(config, "EasyMultistream", "RefreshToken"));
+
+	std::ifstream unchangedFile(movedPath, std::ios::binary);
+	const std::string unchangedContents{std::istreambuf_iterator<char>(unchangedFile),
+					    std::istreambuf_iterator<char>()};
+	unchangedFile.close();
+	CHECK(unchangedContents.find("scrub-retry-secret-sentinel") != std::string::npos);
+
+	filesystemError.clear();
+	std::filesystem::rename(movedDirectory, directory, filesystemError);
+	CHECK(!filesystemError);
+	easy_multistream::Settings valid;
+	valid.youtubeServerUrl = std::string(kValidYouTubeServerUrl);
+	CHECK(easy_multistream::saveProfileSettings(config, valid) == CONFIG_SUCCESS);
+	config_close(config);
+
+	std::ifstream repairedFile(path, std::ios::binary);
+	const std::string repairedContents{std::istreambuf_iterator<char>(repairedFile),
+					   std::istreambuf_iterator<char>()};
+	repairedFile.close();
+	CHECK(repairedContents.find("scrub-retry-secret-sentinel") == std::string::npos);
+	CHECK(repairedContents.find("RefreshToken") == std::string::npos);
+	CHECK(std::filesystem::remove_all(directory, filesystemError) != 0);
 }
 
 void testSettingsSafeSaveAndReload()
@@ -247,6 +521,11 @@ void testSettingsSafeSaveAndReload()
 	if (config != nullptr) {
 		config_set_string(config, "OtherPlugin", "Preserved", "yes");
 		config_set_string(config, "EasyMultistream", "YouTubeStreamKey", "plaintext-must-not-survive");
+		config_set_string(config, "EasyMultistream", "RefreshToken", "refresh-token-must-not-survive");
+		config_set_string(config, "EasyMultistream", "AccessToken", "access-token-must-not-survive");
+		config_set_string(config, "EasyMultistream", "AuthorizationCode", "code-must-not-survive");
+		config_set_string(config, "EasyMultistream", "CodeVerifier", "verifier-must-not-survive");
+		config_set_string(config, "EasyMultistream", "StreamName", "stream-name-must-not-survive");
 		easy_multistream::Settings settings;
 		settings.youtubeEnabled = true;
 		settings.youtubeServerUrl = kValidYouTubeServerUrl;
@@ -271,8 +550,17 @@ void testSettingsSafeSaveAndReload()
 	const std::string contents{std::istreambuf_iterator<char>(savedFile), std::istreambuf_iterator<char>()};
 	savedFile.close();
 	CHECK(contents.find("plaintext-must-not-survive") == std::string::npos);
+	CHECK(contents.find("refresh-token-must-not-survive") == std::string::npos);
+	CHECK(contents.find("access-token-must-not-survive") == std::string::npos);
+	CHECK(contents.find("code-must-not-survive") == std::string::npos);
+	CHECK(contents.find("verifier-must-not-survive") == std::string::npos);
+	CHECK(contents.find("stream-name-must-not-survive") == std::string::npos);
 	CHECK(contents.find("StreamKey") == std::string::npos);
-	CHECK(contents.find("Credential") == std::string::npos);
+	CHECK(contents.find("RefreshToken") == std::string::npos);
+	CHECK(contents.find("AccessToken") == std::string::npos);
+	CHECK(contents.find("AuthorizationCode") == std::string::npos);
+	CHECK(contents.find("CodeVerifier") == std::string::npos);
+	CHECK(contents.find("StreamName") == std::string::npos);
 	CHECK(!std::filesystem::exists(path.string() + ".tmp"));
 	CHECK(std::filesystem::remove(path, removeError));
 }
@@ -296,7 +584,12 @@ void testSettingsSaveFailureRollsBackInMemoryValues()
 
 	config_set_uint(config, "EasyMultistream", "SchemaVersion", easy_multistream::kSettingsSchemaVersion);
 	config_set_bool(config, "EasyMultistream", "YouTubeEnabled", false);
+	config_set_string(config, "EasyMultistream", "ConnectionMode", "account");
 	config_set_string(config, "EasyMultistream", "YouTubeServerUrl", kValidYouTubeServerUrl.data());
+	config_set_string(config, "EasyMultistream", "YouTubeChannelId", "UC-original");
+	config_set_string(config, "EasyMultistream", "YouTubeChannelLabel", "Original channel");
+	config_set_string(config, "EasyMultistream", "YouTubeStreamId", "stream-original");
+	config_set_string(config, "EasyMultistream", "YouTubeStreamLabel", "Original stream");
 	CHECK(config_save_safe(config, "tmp", nullptr) == CONFIG_SUCCESS);
 	CHECK(std::filesystem::remove(path, filesystemError));
 	CHECK(std::filesystem::remove(directory, filesystemError));
@@ -308,7 +601,13 @@ void testSettingsSaveFailureRollsBackInMemoryValues()
 	const auto afterFailure = easy_multistream::loadProfileSettings(config);
 	CHECK(afterFailure.status == easy_multistream::SettingsLoadStatus::Loaded);
 	CHECK(!afterFailure.settings.youtubeEnabled);
+	CHECK(afterFailure.settings.youtubeConnectionMode == easy_multistream::YouTubeConnectionMode::Account);
 	CHECK(afterFailure.settings.youtubeServerUrl == kValidYouTubeServerUrl);
+	CHECK(afterFailure.settings.youtubeAccountSelection.has_value());
+	if (afterFailure.settings.youtubeAccountSelection.has_value()) {
+		CHECK(afterFailure.settings.youtubeAccountSelection->channelId == "UC-original");
+		CHECK(afterFailure.settings.youtubeAccountSelection->streamId == "stream-original");
+	}
 	config_close(config);
 
 	CHECK(!std::filesystem::exists(path));
@@ -326,13 +625,15 @@ void testFutureSchemaIsDisabled()
 
 void testInvalidSchemaAndUnavailableConfig()
 {
-	Config config("[EasyMultistream]\nSchemaVersion=0\nYouTubeEnabled=true\nYouTubeServerUrl=rtmps://a.example/live2\n");
+	Config config(
+		"[EasyMultistream]\nSchemaVersion=0\nYouTubeEnabled=true\nYouTubeServerUrl=rtmps://a.example/live2\n");
 	const auto invalid = easy_multistream::loadProfileSettings(config.get());
 	CHECK(invalid.status == easy_multistream::SettingsLoadStatus::InvalidSchema);
 	CHECK(!invalid.settings.youtubeEnabled);
 	CHECK(invalid.sourceSchemaVersion == 0);
 
-	Config trailing("[EasyMultistream]\nSchemaVersion=1garbage\nYouTubeEnabled=true\nYouTubeServerUrl=rtmps://a.example/live2\n");
+	Config trailing(
+		"[EasyMultistream]\nSchemaVersion=1garbage\nYouTubeEnabled=true\nYouTubeServerUrl=rtmps://a.example/live2\n");
 	const auto trailingResult = easy_multistream::loadProfileSettings(trailing.get());
 	CHECK(trailingResult.status == easy_multistream::SettingsLoadStatus::InvalidSchema);
 	CHECK(!trailingResult.settings.youtubeEnabled);
@@ -373,7 +674,8 @@ void testInvalidSchemaAndUnavailableConfig()
 	CHECK(missingServerUrlResult.settings.youtubeEnabled);
 	CHECK(missingServerUrlResult.sourceSchemaVersion == 1);
 
-	Config invalidServerUrl("[EasyMultistream]\nSchemaVersion=2\nYouTubeEnabled=true\nYouTubeServerUrl=https://a.example/live2\n");
+	Config invalidServerUrl(
+		"[EasyMultistream]\nSchemaVersion=2\nYouTubeEnabled=true\nYouTubeServerUrl=https://a.example/live2\n");
 	const auto invalidServerUrlResult = easy_multistream::loadProfileSettings(invalidServerUrl.get());
 	CHECK(invalidServerUrlResult.status == easy_multistream::SettingsLoadStatus::InvalidSchema);
 
@@ -409,8 +711,7 @@ void testYouTubeServerUrlValidation()
 	CHECK(easy_multistream::validateYouTubeServerUrl(kValidYouTubeServerUrl) == ValidationError::None);
 	CHECK(easy_multistream::validateYouTubeServerUrl("rtmps://a.rtmps.youtube.com:443/live2") ==
 	      ValidationError::None);
-	CHECK(easy_multistream::validateYouTubeServerUrl("rtmps://B.RTMPS.YOUTUBE.COM/live2") ==
-	      ValidationError::None);
+	CHECK(easy_multistream::validateYouTubeServerUrl("rtmps://B.RTMPS.YOUTUBE.COM/live2") == ValidationError::None);
 	CHECK(easy_multistream::validateYouTubeServerUrl("RTMPS://a.rtmps.youtube.com/live2") ==
 	      ValidationError::InvalidScheme);
 
@@ -433,7 +734,8 @@ void testYouTubeServerUrlValidation()
 	      ValidationError::FragmentNotAllowed);
 	CHECK(easy_multistream::validateYouTubeServerUrl("rtmps://a.rtmps.youtube.com/live2/secret-key") ==
 	      ValidationError::InvalidPath);
-	CHECK(easy_multistream::validateYouTubeServerUrl("rtmps://a.rtmps.youtube.com") == ValidationError::InvalidPath);
+	CHECK(easy_multistream::validateYouTubeServerUrl("rtmps://a.rtmps.youtube.com") ==
+	      ValidationError::InvalidPath);
 	CHECK(easy_multistream::validateYouTubeServerUrl("rtmps://a.rtmps.youtube.com/live%32") ==
 	      ValidationError::InvalidPath);
 	CHECK(easy_multistream::validateYouTubeServerUrl("rtmps://evil.example/live2") ==
@@ -443,11 +745,12 @@ void testYouTubeServerUrlValidation()
 	CHECK(easy_multistream::validateYouTubeServerUrl(" rtmps://a.rtmps.youtube.com/live2") ==
 	      ValidationError::WhitespaceOrControlCharacter);
 	CHECK(easy_multistream::validateYouTubeServerUrl(
-		std::string(easy_multistream::kMaxYouTubeServerUrlBytes + 1, 'a')) == ValidationError::TooLong);
+		      std::string(easy_multistream::kMaxYouTubeServerUrlBytes + 1, 'a')) == ValidationError::TooLong);
 	const std::string embeddedNull("rtmps://a.rtmps.youtube.com/live\0", 34);
 	CHECK(easy_multistream::validateYouTubeServerUrl(embeddedNull) == ValidationError::EmbeddedNull);
-	const char invalidUtf8[] = {'r', 't', 'm', 'p', 's', ':', '/', '/', 'a', '.', static_cast<char>(0xc3),
-					    static_cast<char>(0x28), '/', 'l', 'i', 'v', 'e', '2'};
+	const char invalidUtf8[] = {
+		'r', 't', 'm', 'p', 's', ':', '/', '/', 'a', '.', static_cast<char>(0xc3), static_cast<char>(0x28),
+		'/', 'l', 'i', 'v', 'e', '2'};
 	CHECK(easy_multistream::validateYouTubeServerUrl({invalidUtf8, sizeof(invalidUtf8)}) ==
 	      ValidationError::InvalidUtf8);
 }
@@ -644,6 +947,11 @@ int main()
 	testSettingsDefaults();
 	testOnboardingPreference();
 	testSettingsRoundTripAndPlaintextRemoval();
+	testSettingsConnectionModesAndMigration();
+	testAccountSettingsRoundTripAndSecretExclusion();
+	testAccountSettingsSafeSaveAndReload();
+	testInvalidSettingsStillScrubPlaintextSecretsFromDisk();
+	testPlaintextScrubSaveFailureIsRecoverable();
 	testSettingsSafeSaveAndReload();
 	testSettingsSaveFailureRollsBackInMemoryValues();
 	testFutureSchemaIsDisabled();

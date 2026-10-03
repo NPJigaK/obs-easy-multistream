@@ -22,7 +22,9 @@ using easy_multistream::YouTubeAccountCoordinator;
 using easy_multistream::YouTubeAccountDiscovery;
 using easy_multistream::YouTubeAccountFailure;
 using easy_multistream::YouTubeAccountLease;
+using easy_multistream::YouTubeAccountSelectionValidationError;
 using easy_multistream::YouTubeAccountState;
+using easy_multistream::validateYouTubeAccountSelection;
 
 YouTubeAccountLease leaseFrom(const easy_multistream::YouTubeAccountTransition &transition)
 {
@@ -32,8 +34,8 @@ YouTubeAccountLease leaseFrom(const easy_multistream::YouTubeAccountTransition &
 
 YouTubeAccountDiscovery selection(const char *suffix)
 {
-	return {std::string("channel-") + suffix, std::string("Channel ") + suffix,
-		std::string("stream-") + suffix, std::string("Stream ") + suffix};
+	return {std::string("channel-") + suffix, std::string("Channel ") + suffix, std::string("stream-") + suffix,
+		std::string("Stream ") + suffix};
 }
 
 void connect(YouTubeAccountCoordinator &coordinator, const YouTubeAccountDiscovery &discovery)
@@ -121,10 +123,32 @@ void testDiscoveryValuesAreBoundedAndSafeForSnapshots()
 	YouTubeAccountDiscovery oversizedId = selection("valid");
 	oversizedId.channelId.assign(easy_multistream::kYouTubeAccountMaxIdentifierBytes + 1, 'a');
 	CHECK(rejected(oversizedId).state == YouTubeAccountState::Failed);
+	YouTubeAccountDiscovery maximumId = selection("valid");
+	maximumId.channelId.assign(easy_multistream::kYouTubeAccountMaxIdentifierBytes, 'a');
+	CHECK(validateYouTubeAccountSelection(maximumId) == YouTubeAccountSelectionValidationError::None);
+
+	YouTubeAccountDiscovery maximumLabel = selection("valid");
+	maximumLabel.channelLabel.assign(easy_multistream::kYouTubeAccountMaxLabelBytes, 'a');
+	CHECK(validateYouTubeAccountSelection(maximumLabel) == YouTubeAccountSelectionValidationError::None);
+	maximumLabel.channelLabel.push_back('a');
+	CHECK(validateYouTubeAccountSelection(maximumLabel) ==
+	      YouTubeAccountSelectionValidationError::InvalidChannelLabel);
 
 	YouTubeAccountDiscovery controlLabel = selection("valid");
 	controlLabel.channelLabel = "unsafe\nlabel";
 	CHECK(rejected(controlLabel).state == YouTubeAccountState::Failed);
+
+	YouTubeAccountDiscovery emptyChannelLabel = selection("valid");
+	emptyChannelLabel.channelLabel.clear();
+	CHECK(validateYouTubeAccountSelection(emptyChannelLabel) ==
+	      YouTubeAccountSelectionValidationError::EmptyChannelLabel);
+	CHECK(rejected(emptyChannelLabel).state == YouTubeAccountState::Failed);
+
+	YouTubeAccountDiscovery emptyStreamLabel = selection("valid");
+	emptyStreamLabel.streamLabel.clear();
+	CHECK(validateYouTubeAccountSelection(emptyStreamLabel) ==
+	      YouTubeAccountSelectionValidationError::EmptyStreamLabel);
+	CHECK(rejected(emptyStreamLabel).state == YouTubeAccountState::Failed);
 
 	YouTubeAccountDiscovery invalidUtf8 = selection("valid");
 	invalidUtf8.streamLabel.assign("\xC0\xAF", 2);
@@ -137,6 +161,53 @@ void testDiscoveryValuesAreBoundedAndSafeForSnapshots()
 	connect(coordinator, unicodeLabels);
 	CHECK(coordinator.snapshot().channelLabel == unicodeLabels.channelLabel);
 	CHECK(coordinator.snapshot().streamLabel == unicodeLabels.streamLabel);
+}
+
+void testSharedSelectionValidationClassifiesEachField()
+{
+	const YouTubeAccountDiscovery valid = selection("valid");
+	CHECK(validateYouTubeAccountSelection(valid) == YouTubeAccountSelectionValidationError::None);
+
+	YouTubeAccountDiscovery emptyChannelId = valid;
+	emptyChannelId.channelId.clear();
+	CHECK(validateYouTubeAccountSelection(emptyChannelId) ==
+	      YouTubeAccountSelectionValidationError::EmptyChannelId);
+
+	YouTubeAccountDiscovery invalidChannelId = valid;
+	invalidChannelId.channelId = "channel id";
+	CHECK(validateYouTubeAccountSelection(invalidChannelId) ==
+	      YouTubeAccountSelectionValidationError::InvalidChannelId);
+
+	YouTubeAccountDiscovery invalidChannelLabel = valid;
+	invalidChannelLabel.channelLabel.assign("bad\xC0\xAF", 5);
+	CHECK(validateYouTubeAccountSelection(invalidChannelLabel) ==
+	      YouTubeAccountSelectionValidationError::InvalidChannelLabel);
+
+	YouTubeAccountDiscovery emptyStreamId = valid;
+	emptyStreamId.streamId.clear();
+	CHECK(validateYouTubeAccountSelection(emptyStreamId) == YouTubeAccountSelectionValidationError::EmptyStreamId);
+
+	YouTubeAccountDiscovery invalidStreamId = valid;
+	invalidStreamId.streamId.assign(1, '\x7F');
+	CHECK(validateYouTubeAccountSelection(invalidStreamId) ==
+	      YouTubeAccountSelectionValidationError::InvalidStreamId);
+
+	YouTubeAccountDiscovery invalidStreamLabel = valid;
+	invalidStreamLabel.streamLabel.assign("bad\xE0\x80\x80", 6);
+	CHECK(validateYouTubeAccountSelection(invalidStreamLabel) ==
+	      YouTubeAccountSelectionValidationError::InvalidStreamLabel);
+
+	YouTubeAccountDiscovery lineSeparatorLabel = valid;
+	lineSeparatorLabel.streamLabel = "bad\xE2\x80\xA8"
+					 "label";
+	CHECK(validateYouTubeAccountSelection(lineSeparatorLabel) ==
+	      YouTubeAccountSelectionValidationError::InvalidStreamLabel);
+
+	YouTubeAccountDiscovery bidiControlLabel = valid;
+	bidiControlLabel.streamLabel = "bad\xE2\x80\xAE"
+				       "label";
+	CHECK(validateYouTubeAccountSelection(bidiControlLabel) ==
+	      YouTubeAccountSelectionValidationError::InvalidStreamLabel);
 }
 
 void testReplacementIsTransactional()
@@ -380,6 +451,7 @@ int main()
 	testStaleAndDuplicateEventsAreNoOps();
 	testInvalidDiscoveryCannotConnect();
 	testDiscoveryValuesAreBoundedAndSafeForSnapshots();
+	testSharedSelectionValidationClassifiesEachField();
 	testReplacementIsTransactional();
 	testReplacementCommitsOnlyAfterCredentialStorage();
 	testInvalidReplacementPreservesCommittedConnection();

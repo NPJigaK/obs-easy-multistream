@@ -3,20 +3,24 @@
 
 #pragma once
 
+#include "youtube-account-selection.hpp"
 #include "youtube-destination.hpp"
 
 #include <util/config-file.h>
 
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace easy_multistream {
 
-inline constexpr std::uint64_t kSettingsSchemaVersion = 2;
+inline constexpr std::uint64_t kSettingsSchemaVersion = 3;
 
 struct Settings {
 	bool youtubeEnabled = false;
+	YouTubeConnectionMode youtubeConnectionMode = YouTubeConnectionMode::Manual;
 	std::string youtubeServerUrl;
+	std::optional<YouTubeAccountSelection> youtubeAccountSelection;
 };
 
 enum class SettingsLoadStatus {

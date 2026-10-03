@@ -12,6 +12,16 @@
 
 namespace easy_multistream {
 
+namespace {
+
+bool hasManualYouTubeDestination(const RuntimeSettings &settings) noexcept
+{
+	return settings.youtubeConnectionMode == YouTubeConnectionMode::Manual && settings.youtubeKeyAvailable &&
+	       isValidRtmpsUrl(settings.youtubeServerUrl);
+}
+
+} // namespace
+
 bool isValidRtmpsUrl(std::string_view value) noexcept
 {
 	// Keep the runtime gate identical to the settings/profile validator.  This
@@ -126,7 +136,7 @@ void RuntimeController::setSettings(RuntimeSettings settings)
 	}
 
 	settings_ = std::move(settings);
-	const bool configured = settings_.youtubeKeyAvailable && isValidRtmpsUrl(settings_.youtubeServerUrl);
+	const bool configured = hasManualYouTubeDestination(settings_);
 	applyTransition(coordinator_.configure(settings_.nativeDestination, settings_.youtubeEnabled, configured));
 }
 
@@ -157,7 +167,7 @@ void RuntimeController::onProfileChanged(RuntimeSettings settings)
 	nativeOutputStartingObserved_ = false;
 	activeNativeLease_.reset();
 	stoppingNativeLease_.reset();
-	const bool configured = settings_.youtubeKeyAvailable && isValidRtmpsUrl(settings_.youtubeServerUrl);
+	const bool configured = hasManualYouTubeDestination(settings_);
 	applyTransition(coordinator_.profileChanged(settings_.nativeDestination, settings_.youtubeEnabled, configured));
 }
 
@@ -179,7 +189,7 @@ void RuntimeController::onStreamingStarting(NativeDestination observedDestinatio
 		stoppingNativeLease_ = activeNativeLease_;
 	}
 	settings_.nativeDestination = observedDestination;
-	const bool configured = settings_.youtubeKeyAvailable && isValidRtmpsUrl(settings_.youtubeServerUrl);
+	const bool configured = hasManualYouTubeDestination(settings_);
 	applyTransition(coordinator_.configure(settings_.nativeDestination, settings_.youtubeEnabled, configured));
 
 	const SessionTransition starting = coordinator_.nativeStarting();
@@ -374,10 +384,9 @@ void RuntimeController::startYouTube(OutputLease lease)
 	// stale effect from reaching the adapter if integration code re-enters the
 	// bridge while processing a profile or output callback.
 	const SessionSnapshot current = coordinator_.snapshot();
-	if (current.phase != SessionPhase::Ready || !current.youtubeLease.has_value() || *current.youtubeLease != lease ||
-	    current.youtube != YouTubeStreamState::Connecting || !settings_.youtubeEnabled ||
-	    !settings_.youtubeKeyAvailable || !isValidRtmpsUrl(settings_.youtubeServerUrl) ||
-	    pendingOutputStop_.has_value()) {
+	if (current.phase != SessionPhase::Ready || !current.youtubeLease.has_value() ||
+	    *current.youtubeLease != lease || current.youtube != YouTubeStreamState::Connecting ||
+	    !settings_.youtubeEnabled || !hasManualYouTubeDestination(settings_) || pendingOutputStop_.has_value()) {
 		completeRejectedStart(lease);
 		return;
 	}

@@ -3,15 +3,14 @@
 
 #pragma once
 
+#include "youtube-account-selection.hpp"
+
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
 
 namespace easy_multistream {
-
-inline constexpr std::size_t kYouTubeAccountMaxIdentifierBytes = 256U;
-inline constexpr std::size_t kYouTubeAccountMaxLabelBytes = 1024U;
 
 // This value-only state machine is deliberately independent of Qt, OBS,
 // browsers, HTTP, and credential storage. Its owner must serialize calls on
@@ -61,14 +60,10 @@ constexpr bool operator!=(const YouTubeAccountLease &left, const YouTubeAccountL
 	return !(left == right);
 }
 
-// These identifiers and labels are not credentials. In particular, this type
-// can never contain an authorization code, token, PKCE value, or stream key.
-struct YouTubeAccountDiscovery {
-	std::string channelId;
-	std::string channelLabel;
-	std::string streamId;
-	std::string streamLabel;
-};
+// Keep the pre-existing coordinator-facing name as a compatibility alias.
+// The shared selection model is also used by profile persistence and future
+// account-provider code, so its validation cannot remain coordinator-local.
+using YouTubeAccountDiscovery = YouTubeAccountSelection;
 
 struct YouTubeAccountSnapshot {
 	std::uint64_t generation = 1;
@@ -118,8 +113,7 @@ public:
 	// Context invalidation discards the committed selection and invalidates all
 	// outstanding work. Closed is terminal.
 	YouTubeAccountTransition invalidateContext();
-	YouTubeAccountTransition markUnavailable(YouTubeAccountLease connectionLease,
-						 YouTubeAccountFailure failure);
+	YouTubeAccountTransition markUnavailable(YouTubeAccountLease connectionLease, YouTubeAccountFailure failure);
 	YouTubeAccountTransition markNeedsReauthorization(YouTubeAccountLease connectionLease);
 	YouTubeAccountTransition shutdown();
 

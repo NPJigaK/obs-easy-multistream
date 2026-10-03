@@ -8,12 +8,15 @@ The active OBS profile stores only these non-secret values in `basic.ini`:
 
 ```ini
 [EasyMultistream]
-SchemaVersion=2
+SchemaVersion=3
 YouTubeEnabled=false
+ConnectionMode=manual
 YouTubeServerUrl=rtmps://a.rtmps.youtube.com/live2
 ```
 
-The YouTube stream key is stored as a Windows Generic Credential for the current Windows account. It is not stored in `basic.ini`, scene collections, profile exports, plugin logs, or diagnostic text. One credential is shared by all OBS profiles; the dock states this explicitly. The non-secret Stream URL is profile-scoped.
+The account-ready profile format can also hold a non-secret YouTube channel ID, channel label, reusable-stream ID, and stream label. Those values are strictly bounded and validated, but the unfinished account path is not exposed in the dock and cannot start an output. The connection mode is explicit: an account-mode profile never falls back to the saved manual URL/key path.
+
+The YouTube stream key is stored as a Windows Generic Credential for the current Windows account. It is not stored in `basic.ini`, scene collections, profile exports, plugin logs, or diagnostic text. One credential is shared by all OBS profiles; the dock states this explicitly. The non-secret Stream URL and future account selection are profile-scoped. The separate refresh-token credential target is fixed by the plugin and is never written into a profile; no current production path writes a refresh token yet.
 
 Deleting the credential is an explicit, confirmed action. It does not rewrite any profile's non-secret enabled flag. Enabled profiles remain configured but cannot stream until a new shared key is saved.
 
@@ -29,13 +32,15 @@ The key necessarily exists briefly in process memory while the user enters it an
 
 Qt, OBS, Windows, libobs service settings, and the process allocator can still retain transient copies outside the plugin's direct control. In particular, libobs must copy the key into the temporary RTMP service configuration, and the public OBS config API can remove an accidentally present legacy plaintext field from the persisted profile but does not securely erase the freed config heap allocation. This project therefore does not claim resistance to live process-memory inspection or crash-dump forensics.
 
+Known plaintext credential field names are removed before any profile write, including when the proposed settings are otherwise invalid. If the atomic profile save itself fails, the in-memory config remains scrubbed but the previous on-disk file cannot be rewritten; the normal save-failure notice remains visible and the next successful save retries the cleanup. Tests cover both the failure and recovery paths.
+
 The same boundary applies to the account connection under development. Listener-owned byte buffers and the final authorization code container are wiped, but strict callback validation currently passes through transient Qt `QUrl`, `QUrlQuery`, and `QString` values. Qt does not promise to zero those internal allocations when they are released. Authorization codes, state values, and tokens are never logged or persisted through that path, but the project does not claim that every transient copy can be removed from process memory.
 
 ## Credential Manager boundary
 
 Windows Credential Manager protects the key for the signed-in Windows user and keeps it on the local computer. It is not a hardware-backed vault, does not protect against malware running as the same user, and is not a substitute for rotating a key after suspected compromise.
 
-The plugin uses the documented Generic Credential size limit, validates the key before writing it, treats a missing credential as a normal state, and treats access-denied or unavailable credential services as a non-streaming failure. Development tests use an injected fake API and do not write test credentials to the developer's global Credential Manager.
+The plugin uses the documented Generic Credential size limit, validates the key before writing it, treats a missing credential as a normal state, and treats access-denied or unavailable credential services as a non-streaming failure. Manual-key and future refresh-token targets are distinct. Development tests use an injected fake API and do not write test credentials to the developer's global Credential Manager.
 
 ## Network surface
 

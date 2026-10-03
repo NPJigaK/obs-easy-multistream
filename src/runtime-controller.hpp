@@ -5,6 +5,7 @@
 
 #include "secure-buffer.hpp"
 #include "session-coordinator.hpp"
+#include "youtube-account-selection.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -22,6 +23,7 @@ namespace easy_multistream {
 struct RuntimeSettings {
 	NativeDestination nativeDestination = NativeDestination::Unknown;
 	bool youtubeEnabled = false;
+	YouTubeConnectionMode youtubeConnectionMode = YouTubeConnectionMode::Manual;
 	bool youtubeKeyAvailable = false;
 	std::string youtubeServerUrl;
 };
