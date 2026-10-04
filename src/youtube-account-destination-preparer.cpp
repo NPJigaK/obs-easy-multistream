@@ -12,6 +12,7 @@
 
 #include <cassert>
 #include <limits>
+#include <stdexcept>
 #include <utility>
 
 namespace easy_multistream {
@@ -192,6 +193,9 @@ public:
 		  refreshTokenStore_(refreshTokenStore),
 		  operationLockProvider_(operationLockProvider)
 	{
+		if (refreshPort_ == nullptr || resolverPort_ == nullptr) {
+			throw std::invalid_argument("YouTube destination ports are required");
+		}
 	}
 
 	YouTubeDestinationPrepareStartStatus start(YouTubeDestinationPrepareRequest request,
@@ -265,7 +269,9 @@ public:
 			if (!isCurrent(operationEpoch_, request.attempt,
 				       YouTubeDestinationPreparerState::ReadingCredential)) {
 				credential.secret.clear();
-				return YouTubeDestinationPrepareStartStatus::Started;
+				return state_ == YouTubeDestinationPreparerState::Closed
+					       ? YouTubeDestinationPrepareStartStatus::Closed
+					       : YouTubeDestinationPrepareStartStatus::OperationFailed;
 			}
 			if (credential.result.error == CredentialError::NotFound ||
 			    credential.result.error == CredentialError::CorruptData ||
@@ -299,6 +305,16 @@ public:
 			if (status != GoogleOAuthTokenStartStatus::Started &&
 			    isCurrent(epoch, request.attempt, YouTubeDestinationPreparerState::RefreshingAccessToken)) {
 				finish(tokenStartFailure(status));
+			}
+			// A credential store or transport adapter is allowed to synchronously
+			// re-enter profile invalidation/shutdown. Those operations advance the
+			// epoch and clear the attempt; do not report the obsolete operation as
+			// Started. A normal synchronous provider completion does not advance the
+			// epoch and therefore remains a valid Started operation.
+			if (operationEpoch_ != epoch) {
+				return state_ == YouTubeDestinationPreparerState::Closed
+					       ? YouTubeDestinationPrepareStartStatus::Closed
+					       : YouTubeDestinationPrepareStartStatus::OperationFailed;
 			}
 			return YouTubeDestinationPrepareStartStatus::Started;
 		} catch (...) {
@@ -376,6 +392,8 @@ public:
 	YouTubeDestinationPreparerState state() const noexcept { return state_; }
 
 	std::optional<YouTubeDestinationPrepareAttempt> activeAttempt() const noexcept { return activeAttempt_; }
+
+	bool lockHeld() const noexcept { return operationLock_.cleanupPending(); }
 
 private:
 	bool onOwnerThread() const noexcept
@@ -669,6 +687,11 @@ YouTubeDestinationPreparerState YouTubeAccountDestinationPreparer::state() const
 std::optional<YouTubeDestinationPrepareAttempt> YouTubeAccountDestinationPreparer::activeAttempt() const noexcept
 {
 	return impl_->activeAttempt();
+}
+
+bool YouTubeAccountDestinationPreparer::lockHeld() const noexcept
+{
+	return impl_->lockHeld();
 }
 
 } // namespace easy_multistream

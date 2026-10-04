@@ -78,6 +78,10 @@ enum class YouTubeDestinationPrepareStatus {
 	ServiceUnavailable,
 	InvalidResponse,
 	Cancelled,
+	// Added by the lifecycle owner when the active OBS profile no longer
+	// matches the immutable preparation scope. The preparer itself never emits
+	// this value and never exposes a destination from that obsolete scope.
+	ProfileChanged,
 };
 
 struct YouTubeDestinationPrepareCompletion final {
@@ -150,10 +154,15 @@ public:
 
 	YouTubeDestinationPreparerState state() const noexcept;
 	std::optional<YouTubeDestinationPrepareAttempt> activeAttempt() const noexcept;
+	// True while the profile operation lock still owns native cleanup state.
+	// This remains true after mutex ownership is relinquished when closing the
+	// native handle fails, so the owner can retry cleanup during shutdown.
+	bool lockHeld() const noexcept;
 
 private:
 	using QObject::moveToThread;
 	friend class YouTubeAccountDestinationPreparerTestAccess;
+	friend class YouTubeAccountRuntimeOwner;
 
 	YouTubeAccountDestinationPreparer(QString clientId, std::unique_ptr<YouTubeDestinationRefreshPort> refreshPort,
 					  std::unique_ptr<YouTubeDestinationResolverPort> resolverPort,
