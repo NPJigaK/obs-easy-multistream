@@ -818,6 +818,7 @@ private:
 		socket->setReadBufferSize(1);
 		QObject::connect(socket, &QTcpSocket::disconnected, socket, &QObject::deleteLater);
 		socket->write(response);
+		(void)socket->flush();
 		socket->disconnectFromHost();
 	}
 
