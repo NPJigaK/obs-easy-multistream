@@ -272,6 +272,126 @@ public:
 	CompletionHandler handler;
 };
 
+class OwnerTestDestinationRefreshPort final : public YouTubeDestinationRefreshPort {
+public:
+	GoogleOAuthTokenStartStatus startRefresh(GoogleOAuthTokenRefreshRequest request,
+						 CompletionHandler completionHandler) noexcept override
+	{
+		++startCount;
+		lastAttempt = request.attempt;
+		lastRefreshToken = std::string(request.refreshToken.view());
+		handler = std::move(completionHandler);
+		if (onStart) {
+			onStart();
+		}
+		return startStatus;
+	}
+
+	bool cancel(GoogleOAuthTokenAttempt attempt) noexcept override
+	{
+		++cancelCount;
+		lastCancelledAttempt = attempt;
+		if (onCancel) {
+			onCancel();
+		}
+		return cancelResult;
+	}
+
+	bool shutdown() noexcept override
+	{
+		++shutdownCount;
+		closed = true;
+		if (onShutdown) {
+			onShutdown();
+		}
+		return shutdownResult;
+	}
+
+	void complete(GoogleOAuthTokenCompletion completion)
+	{
+		if (handler) {
+			auto callback = handler;
+			callback(std::move(completion));
+		}
+	}
+
+	GoogleOAuthTokenStartStatus startStatus = GoogleOAuthTokenStartStatus::Started;
+	bool cancelResult = true;
+	bool shutdownResult = true;
+	bool closed = false;
+	int startCount = 0;
+	int cancelCount = 0;
+	int shutdownCount = 0;
+	std::optional<GoogleOAuthTokenAttempt> lastAttempt;
+	GoogleOAuthTokenAttempt lastCancelledAttempt;
+	std::string lastRefreshToken;
+	CompletionHandler handler;
+	std::function<void()> onStart;
+	std::function<void()> onCancel;
+	std::function<void()> onShutdown;
+};
+
+class OwnerTestDestinationResolverPort final : public YouTubeDestinationResolverPort {
+public:
+	YouTubeStreamResolverStartStatus startResolveStream(YouTubeResolveStreamRequest request,
+							    CompletionHandler completionHandler) noexcept override
+	{
+		++startCount;
+		lastAttempt = request.attempt;
+		lastChannelId = std::move(request.channelId);
+		lastStreamId = std::move(request.streamId);
+		handler = std::move(completionHandler);
+		if (onStart) {
+			onStart();
+		}
+		return startStatus;
+	}
+
+	bool cancel(YouTubeApiAttempt attempt) noexcept override
+	{
+		++cancelCount;
+		lastCancelledAttempt = attempt;
+		if (onCancel) {
+			onCancel();
+		}
+		return cancelResult;
+	}
+
+	bool shutdown() noexcept override
+	{
+		++shutdownCount;
+		closed = true;
+		if (onShutdown) {
+			onShutdown();
+		}
+		return shutdownResult;
+	}
+
+	void complete(YouTubeStreamResolverCompletion completion)
+	{
+		if (handler) {
+			auto callback = handler;
+			callback(std::move(completion));
+		}
+	}
+
+	YouTubeStreamResolverStartStatus startStatus = YouTubeStreamResolverStartStatus::Started;
+	bool cancelResult = true;
+	bool shutdownResult = true;
+	bool closed = false;
+	int startCount = 0;
+	int cancelCount = 0;
+	int shutdownCount = 0;
+	std::optional<YouTubeApiAttempt> lastAttempt;
+	YouTubeApiAttempt lastCancelledAttempt;
+	std::string lastChannelId;
+	std::string lastStreamId;
+	CompletionHandler handler;
+	std::function<void()> onStart;
+	std::function<void()> onCancel;
+	std::function<void()> onShutdown;
+};
+
 } // namespace easy_multistream
 
 namespace {
@@ -357,17 +477,19 @@ makeOwner(std::string &currentPath, ConfigHandle &config, std::unique_ptr<WinCre
 	  std::unique_ptr<YouTubeAccountProfileOperationLockApi> lockApi,
 	  GoogleOAuthAuthorizationSession::BrowserOpener browserOpener = {},
 	  YouTubeAccountRuntimeOwner::ConfigReader configReaderOverride = {}, QString clientId = {},
-	  std::unique_ptr<YouTubeAccountRemoteRevokePort> remoteRevokePort = {})
+	  std::unique_ptr<YouTubeAccountRemoteRevokePort> remoteRevokePort = {},
+	  std::unique_ptr<YouTubeDestinationRefreshPort> destinationRefreshPort = {},
+	  std::unique_ptr<YouTubeDestinationResolverPort> destinationResolverPort = {})
 {
 	if (!configReaderOverride) {
 		configReaderOverride = [&config]() {
 			return config.get();
 		};
 	}
-	return std::make_unique<YouTubeAccountRuntimeOwner>([&currentPath]() { return currentPath; },
-								    std::move(configReaderOverride), std::move(clientId),
-								    std::move(browserOpener), std::move(credentialApi),
-								    std::move(lockApi), std::move(remoteRevokePort));
+	return std::make_unique<YouTubeAccountRuntimeOwner>(
+		[&currentPath]() { return currentPath; }, std::move(configReaderOverride), std::move(clientId),
+		std::move(browserOpener), std::move(credentialApi), std::move(lockApi), std::move(remoteRevokePort),
+		std::move(destinationRefreshPort), std::move(destinationResolverPort));
 }
 
 void saveCredential(OwnerTestCredentialApi &api, std::string_view profilePath, const YouTubeAccountSelection &selection)
@@ -397,7 +519,7 @@ public:
 		auto remoteRevokePort = std::make_unique<OwnerTestRemoteRevokePort>();
 		remoteRevokePortRaw = remoteRevokePort.get();
 		owner = makeOwner(currentPath, config, std::move(credentialApi), std::move(lockApi), {}, {}, {},
-					  std::move(remoteRevokePort));
+				  std::move(remoteRevokePort));
 		CHECK(owner->restoreActiveProfile().status == YouTubeAccountProfileRestoreStatus::Restored);
 	}
 
@@ -409,9 +531,408 @@ public:
 	std::unique_ptr<YouTubeAccountRuntimeOwner> owner;
 };
 
+constexpr std::string_view kOwnerDestinationServerUrl = "rtmps://a.rtmps.youtube.com/live2";
+constexpr std::string_view kOwnerDestinationStreamKey = "owner-destination-stream-key";
+constexpr std::string_view kOwnerDestinationAccessToken = "owner-destination-access-token";
+constexpr std::string_view kOwnerDestinationRotatedRefreshToken = "owner-destination-rotated-refresh-token";
+
+GoogleOAuthTokenCompletion ownerDestinationRefreshSuccess(GoogleOAuthTokenAttempt attempt, bool rotate = false)
+{
+	GoogleOAuthTokenCompletion completion;
+	completion.attempt = attempt;
+	completion.operation = GoogleOAuthTokenOperation::RefreshAccessToken;
+	completion.status = GoogleOAuthTokenCompletionStatus::Success;
+	completion.providerError = GoogleOAuthTokenProviderError::None;
+	completion.tokens.accessToken = SecureBuffer::copyOf(kOwnerDestinationAccessToken);
+	if (rotate) {
+		completion.tokens.refreshToken = SecureBuffer::copyOf(kOwnerDestinationRotatedRefreshToken);
+	}
+	completion.tokens.expiresInSeconds = 3600;
+	return completion;
+}
+
+YouTubeStreamResolverCompletion ownerDestinationResolveSuccess(YouTubeApiAttempt attempt)
+{
+	YouTubeStreamResolverCompletion completion;
+	completion.attempt = attempt;
+	completion.status = YouTubeStreamResolverCompletionStatus::Success;
+	YouTubeResolvedIngestion ingestion;
+	ingestion.serverUrl = std::string(kOwnerDestinationServerUrl);
+	ingestion.streamKey = SecureBuffer::copyOf(kOwnerDestinationStreamKey);
+	completion.ingestion.emplace(std::move(ingestion));
+	return completion;
+}
+
+YouTubeStreamResolverCompletion ownerDestinationResolveFailure(YouTubeApiAttempt attempt)
+{
+	YouTubeStreamResolverCompletion completion;
+	completion.attempt = attempt;
+	completion.status = YouTubeStreamResolverCompletionStatus::StreamNotReady;
+	completion.providerError = YouTubeApiProviderError::None;
+	return completion;
+}
+
+class DestinationOwnerFixture final {
+public:
+	DestinationOwnerFixture(const char *configName,
+				GoogleOAuthAuthorizationSession::BrowserOpener browserOpener = {})
+	{
+		CHECK(config.open(configName));
+		setAccountSettings(config.get(), selectionA());
+
+		auto credentialApi = std::make_unique<OwnerTestCredentialApi>();
+		credentialApiRaw = credentialApi.get();
+		saveCredential(*credentialApiRaw, currentPath, selectionA());
+
+		auto lockApi = std::make_unique<OwnerTestLockApi>();
+		lockApiRaw = lockApi.get();
+		auto remoteRevokePort = std::make_unique<OwnerTestRemoteRevokePort>();
+		remoteRevokePortRaw = remoteRevokePort.get();
+		auto destinationRefreshPort = std::make_unique<OwnerTestDestinationRefreshPort>();
+		destinationRefreshPortRaw = destinationRefreshPort.get();
+		auto destinationResolverPort = std::make_unique<OwnerTestDestinationResolverPort>();
+		destinationResolverPortRaw = destinationResolverPort.get();
+		owner = makeOwner(currentPath, config, std::move(credentialApi), std::move(lockApi),
+				  std::move(browserOpener), {},
+				  QStringLiteral("runtime-owner-destination-client.apps.googleusercontent.com"),
+				  std::move(remoteRevokePort), std::move(destinationRefreshPort),
+				  std::move(destinationResolverPort));
+		CHECK(owner->restoreActiveProfile().status == YouTubeAccountProfileRestoreStatus::Restored);
+	}
+
+	ConfigHandle config;
+	std::string currentPath{kProfilePathA};
+	OwnerTestCredentialApi *credentialApiRaw = nullptr;
+	OwnerTestLockApi *lockApiRaw = nullptr;
+	OwnerTestRemoteRevokePort *remoteRevokePortRaw = nullptr;
+	OwnerTestDestinationRefreshPort *destinationRefreshPortRaw = nullptr;
+	OwnerTestDestinationResolverPort *destinationResolverPortRaw = nullptr;
+	std::unique_ptr<YouTubeAccountRuntimeOwner> owner;
+};
+
 void processOwnerEvents()
 {
 	QCoreApplication::processEvents();
+}
+
+void testRuntimeOwnerDestinationPreparationSuccessReleasesLockBeforeHandler()
+{
+	DestinationOwnerFixture fixture("easy-multistream-runtime-owner-destination-success.ini");
+	const int releasesBeforePreparation = fixture.lockApiRaw->releaseCount;
+	bool handlerCalled = false;
+	bool handlerSawReleasedLock = false;
+	YouTubeDestinationPrepareStatus receivedStatus = YouTubeDestinationPrepareStatus::InvalidResponse;
+	bool receivedIngestion = false;
+	std::string receivedServerUrl;
+	std::string receivedStreamKey;
+
+	CHECK(fixture.owner->startDestinationPreparation([&](YouTubeDestinationPrepareCompletion completion) {
+		handlerCalled = true;
+		handlerSawReleasedLock = fixture.lockApiRaw->releaseCount == releasesBeforePreparation + 1;
+		receivedStatus = completion.status;
+		receivedIngestion = completion.ingestion.has_value();
+		if (completion.ingestion.has_value()) {
+			receivedServerUrl = completion.ingestion->serverUrl;
+			receivedStreamKey = std::string(completion.ingestion->streamKey.view());
+		}
+	}) == YouTubeAccountDestinationOperationStatus::Started);
+	const auto active = fixture.owner->destinationSnapshot().activeAttempt;
+	CHECK(active.has_value());
+	CHECK(fixture.destinationRefreshPortRaw->startCount == 1);
+	CHECK(fixture.destinationRefreshPortRaw->lastAttempt.has_value());
+	if (!active.has_value() || !fixture.destinationRefreshPortRaw->lastAttempt.has_value()) {
+		return;
+	}
+
+	CHECK(fixture.destinationRefreshPortRaw->lastAttempt->generation == active->generation);
+	CHECK(fixture.destinationRefreshPortRaw->lastAttempt->attempt == active->attempt);
+	fixture.destinationRefreshPortRaw->complete(
+		ownerDestinationRefreshSuccess(*fixture.destinationRefreshPortRaw->lastAttempt));
+	CHECK(fixture.destinationResolverPortRaw->startCount == 1);
+	CHECK(fixture.destinationResolverPortRaw->lastAttempt.has_value());
+	CHECK(fixture.lockApiRaw->releaseCount == releasesBeforePreparation);
+	if (!fixture.destinationResolverPortRaw->lastAttempt.has_value()) {
+		return;
+	}
+	fixture.destinationResolverPortRaw->complete(
+		ownerDestinationResolveSuccess(*fixture.destinationResolverPortRaw->lastAttempt));
+	CHECK(!handlerCalled);
+	processOwnerEvents();
+
+	CHECK(handlerCalled);
+	CHECK(handlerSawReleasedLock);
+	CHECK(receivedStatus == YouTubeDestinationPrepareStatus::Success);
+	CHECK(receivedIngestion);
+	CHECK(receivedServerUrl == kOwnerDestinationServerUrl);
+	CHECK(receivedStreamKey == kOwnerDestinationStreamKey);
+	const auto destination = fixture.owner->destinationSnapshot();
+	CHECK(destination.state == YouTubeDestinationPreparerState::Completed);
+	CHECK(!destination.activeAttempt.has_value());
+	CHECK(!destination.lockCleanupPending);
+	CHECK(destination.lastStatus.has_value());
+	CHECK(destination.lastStatus == YouTubeDestinationPrepareStatus::Success);
+	CHECK(destination.restored);
+}
+
+void testRuntimeOwnerDestinationPreparationBlocksOtherAccountOperations()
+{
+	int browserOpenCount = 0;
+	DestinationOwnerFixture fixture("easy-multistream-runtime-owner-destination-busy.ini",
+					[&browserOpenCount](const QUrl &) {
+						++browserOpenCount;
+						return true;
+					});
+	const auto before = fixture.owner->snapshot();
+	CHECK(fixture.owner->startDestinationPreparation([](YouTubeDestinationPrepareCompletion) {}) ==
+	      YouTubeAccountDestinationOperationStatus::Started);
+	const auto active = fixture.owner->destinationSnapshot().activeAttempt;
+	CHECK(active.has_value());
+	const int readsAfterStart = fixture.credentialApiRaw->readCount;
+	const int destinationStartsAfterStart = fixture.destinationRefreshPortRaw->startCount;
+
+	CHECK(fixture.owner->restoreActiveProfile().status == YouTubeAccountProfileRestoreStatus::Busy);
+	CHECK(YouTubeAccountRuntimeOwnerTestAccess::disconnect(*fixture.owner).status ==
+	      YouTubeAccountProfileDisconnectStatus::Busy);
+	CHECK(fixture.owner->startRemoteRevoke([](YouTubeAccountRemoteRevokeCompletion) {}) ==
+	      YouTubeAccountRemoteRevokeStartStatus::Busy);
+	CHECK(fixture.owner->startConnection() == YouTubeAccountConnectionOperationStatus::Busy);
+	CHECK(fixture.owner->startDestinationPreparation([](YouTubeDestinationPrepareCompletion) {}) ==
+	      YouTubeAccountDestinationOperationStatus::Busy);
+
+	CHECK(fixture.remoteRevokePortRaw->startCount == 0);
+	CHECK(browserOpenCount == 0);
+	CHECK(fixture.credentialApiRaw->readCount == readsAfterStart);
+	CHECK(fixture.destinationRefreshPortRaw->startCount == destinationStartsAfterStart);
+	const auto after = fixture.owner->snapshot();
+	CHECK(after.restored == before.restored);
+	CHECK(after.restoreStatus == before.restoreStatus);
+	CHECK(after.generation == before.generation);
+	CHECK(after.profileBinding == before.profileBinding);
+	CHECK(after.closed == before.closed);
+	const auto destination = fixture.owner->destinationSnapshot();
+	CHECK(destination.activeAttempt == active);
+	CHECK(destination.lockCleanupPending);
+	CHECK(destination.restored);
+
+	if (active.has_value()) {
+		CHECK(fixture.owner->cancelDestinationPreparation(*active) ==
+		      YouTubeAccountDestinationOperationStatus::Cancelled);
+	}
+	processOwnerEvents();
+}
+
+void testRuntimeOwnerDestinationCompletionRejectsChangedProfileAndRestoresNewOne()
+{
+	DestinationOwnerFixture fixture("easy-multistream-runtime-owner-destination-profile-change.ini");
+	bool handlerCalled = false;
+	YouTubeDestinationPrepareStatus receivedStatus = YouTubeDestinationPrepareStatus::InvalidResponse;
+	bool receivedIngestion = true;
+	CHECK(fixture.owner->startDestinationPreparation([&](YouTubeDestinationPrepareCompletion completion) {
+		handlerCalled = true;
+		receivedStatus = completion.status;
+		receivedIngestion = completion.ingestion.has_value();
+	}) == YouTubeAccountDestinationOperationStatus::Started);
+	CHECK(fixture.destinationRefreshPortRaw->lastAttempt.has_value());
+	if (!fixture.destinationRefreshPortRaw->lastAttempt.has_value()) {
+		return;
+	}
+	fixture.destinationRefreshPortRaw->complete(
+		ownerDestinationRefreshSuccess(*fixture.destinationRefreshPortRaw->lastAttempt));
+	CHECK(fixture.destinationResolverPortRaw->lastAttempt.has_value());
+	if (!fixture.destinationResolverPortRaw->lastAttempt.has_value()) {
+		return;
+	}
+	fixture.destinationResolverPortRaw->complete(
+		ownerDestinationResolveSuccess(*fixture.destinationResolverPortRaw->lastAttempt));
+
+	const auto old = fixture.owner->snapshot();
+	saveCredential(*fixture.credentialApiRaw, kProfilePathB, selectionB());
+	fixture.currentPath = std::string(kProfilePathB);
+	setAccountSettings(fixture.config.get(), selectionB());
+	const auto pendingRestore = fixture.owner->restoreActiveProfile();
+	CHECK(pendingRestore.status == YouTubeAccountProfileRestoreStatus::Busy);
+	processOwnerEvents();
+
+	CHECK(handlerCalled);
+	CHECK(receivedStatus == YouTubeDestinationPrepareStatus::ProfileChanged);
+	CHECK(!receivedIngestion);
+	CHECK(fixture.owner->destinationSnapshot().lastStatus.has_value());
+	CHECK(fixture.owner->destinationSnapshot().lastStatus == YouTubeDestinationPrepareStatus::ProfileChanged);
+
+	const auto expectedBinding = makeYouTubeAccountProfileBinding(kProfilePathB);
+	CHECK(expectedBinding.has_value());
+	const auto after = fixture.owner->snapshot();
+	CHECK(after.restored);
+	CHECK(after.restoreStatus == YouTubeAccountProfileRestoreStatus::Restored);
+	CHECK(after.generation > old.generation);
+	CHECK(expectedBinding.has_value() && after.profileBinding == *expectedBinding);
+}
+
+void testRuntimeOwnerDestinationProfileChangeRetriesNativeCleanupBeforeRestore()
+{
+	DestinationOwnerFixture fixture("easy-multistream-runtime-owner-destination-profile-cleanup-retry.ini");
+	int handlerCount = 0;
+	CHECK(fixture.owner->startDestinationPreparation([&](YouTubeDestinationPrepareCompletion) {
+		++handlerCount;
+	}) == YouTubeAccountDestinationOperationStatus::Started);
+	CHECK(fixture.destinationRefreshPortRaw->lastAttempt.has_value());
+	if (!fixture.destinationRefreshPortRaw->lastAttempt.has_value()) {
+		return;
+	}
+	const auto obsoleteAttempt = *fixture.destinationRefreshPortRaw->lastAttempt;
+
+	fixture.lockApiRaw->releaseResult = false;
+	CHECK(!fixture.owner->invalidateForProfileChange());
+	CHECK(fixture.owner->destinationSnapshot().lockCleanupPending);
+	CHECK(!fixture.owner->snapshot().restored);
+	CHECK(fixture.owner->snapshot().restoreStatus == YouTubeAccountProfileRestoreStatus::OperationFailed);
+	CHECK(fixture.destinationRefreshPortRaw->cancelCount == 1);
+
+	saveCredential(*fixture.credentialApiRaw, kProfilePathB, selectionB());
+	fixture.currentPath = std::string(kProfilePathB);
+	setAccountSettings(fixture.config.get(), selectionB());
+	fixture.lockApiRaw->releaseResult = true;
+	CHECK(fixture.owner->restoreActiveProfile().status == YouTubeAccountProfileRestoreStatus::Busy);
+	processOwnerEvents();
+
+	const auto expectedBinding = makeYouTubeAccountProfileBinding(kProfilePathB);
+	CHECK(expectedBinding.has_value());
+	const auto restored = fixture.owner->snapshot();
+	CHECK(restored.restored);
+	CHECK(restored.restoreStatus == YouTubeAccountProfileRestoreStatus::Restored);
+	CHECK(expectedBinding.has_value() && restored.profileBinding == *expectedBinding);
+	CHECK(!fixture.owner->destinationSnapshot().lockCleanupPending);
+	CHECK(!fixture.owner->destinationSnapshot().activeAttempt.has_value());
+	CHECK(handlerCount == 0);
+
+	fixture.destinationRefreshPortRaw->complete(ownerDestinationRefreshSuccess(obsoleteAttempt));
+	processOwnerEvents();
+	CHECK(fixture.destinationResolverPortRaw->startCount == 0);
+	CHECK(handlerCount == 0);
+}
+
+void testRuntimeOwnerDestinationShutdownSuppressesLateCallbacks()
+{
+	DestinationOwnerFixture fixture("easy-multistream-runtime-owner-destination-shutdown.ini");
+	int handlerCount = 0;
+	CHECK(fixture.owner->startDestinationPreparation([&](YouTubeDestinationPrepareCompletion) {
+		++handlerCount;
+	}) == YouTubeAccountDestinationOperationStatus::Started);
+	CHECK(fixture.destinationRefreshPortRaw->lastAttempt.has_value());
+	if (!fixture.destinationRefreshPortRaw->lastAttempt.has_value()) {
+		return;
+	}
+	fixture.destinationRefreshPortRaw->complete(
+		ownerDestinationRefreshSuccess(*fixture.destinationRefreshPortRaw->lastAttempt));
+	CHECK(fixture.destinationResolverPortRaw->lastAttempt.has_value());
+	if (!fixture.destinationResolverPortRaw->lastAttempt.has_value()) {
+		return;
+	}
+	const auto resolverAttempt = *fixture.destinationResolverPortRaw->lastAttempt;
+	CHECK(fixture.owner->destinationSnapshot().activeAttempt.has_value());
+	CHECK(fixture.owner->shutdown());
+	CHECK(fixture.destinationRefreshPortRaw->cancelCount == 1);
+	CHECK(fixture.destinationResolverPortRaw->cancelCount == 1);
+	CHECK(fixture.destinationRefreshPortRaw->shutdownCount == 1);
+	CHECK(fixture.destinationResolverPortRaw->shutdownCount == 1);
+	CHECK(fixture.destinationRefreshPortRaw->closed);
+	CHECK(fixture.destinationResolverPortRaw->closed);
+
+	// Both transport callbacks remain callable in this fake, modelling a late
+	// provider completion after the owner has invalidated the preparer's epoch.
+	fixture.destinationRefreshPortRaw->complete(
+		ownerDestinationRefreshSuccess(*fixture.destinationRefreshPortRaw->lastAttempt));
+	fixture.destinationResolverPortRaw->complete(ownerDestinationResolveSuccess(resolverAttempt));
+	processOwnerEvents();
+	CHECK(handlerCount == 0);
+	const auto destination = fixture.owner->destinationSnapshot();
+	CHECK(destination.closed);
+	CHECK(destination.state == YouTubeDestinationPreparerState::Closed);
+	CHECK(!destination.activeAttempt.has_value());
+	CHECK(!destination.lockCleanupPending);
+	CHECK(fixture.owner->startDestinationPreparation([](YouTubeDestinationPrepareCompletion) {}) ==
+	      YouTubeAccountDestinationOperationStatus::Closed);
+}
+
+void testRuntimeOwnerDestinationCompletionLockFailureFailsClosedAndRetriesOnShutdown()
+{
+	DestinationOwnerFixture fixture("easy-multistream-runtime-owner-destination-lock-failure.ini");
+	YouTubeDestinationPrepareStatus receivedStatus = YouTubeDestinationPrepareStatus::InvalidResponse;
+	bool receivedIngestion = true;
+	CHECK(fixture.owner->startDestinationPreparation([&](YouTubeDestinationPrepareCompletion completion) {
+		receivedStatus = completion.status;
+		receivedIngestion = completion.ingestion.has_value();
+	}) == YouTubeAccountDestinationOperationStatus::Started);
+	CHECK(fixture.destinationRefreshPortRaw->lastAttempt.has_value());
+	if (!fixture.destinationRefreshPortRaw->lastAttempt.has_value()) {
+		return;
+	}
+	fixture.destinationRefreshPortRaw->complete(
+		ownerDestinationRefreshSuccess(*fixture.destinationRefreshPortRaw->lastAttempt));
+	CHECK(fixture.destinationResolverPortRaw->lastAttempt.has_value());
+	if (!fixture.destinationResolverPortRaw->lastAttempt.has_value()) {
+		return;
+	}
+	fixture.lockApiRaw->releaseResult = false;
+	fixture.destinationResolverPortRaw->complete(
+		ownerDestinationResolveSuccess(*fixture.destinationResolverPortRaw->lastAttempt));
+	processOwnerEvents();
+
+	CHECK(receivedStatus == YouTubeDestinationPrepareStatus::ServiceUnavailable);
+	CHECK(!receivedIngestion);
+	CHECK(!fixture.owner->snapshot().restored);
+	CHECK(fixture.owner->snapshot().restoreStatus == YouTubeAccountProfileRestoreStatus::OperationFailed);
+	CHECK(fixture.owner->destinationSnapshot().lockCleanupPending);
+	CHECK(fixture.owner->startDestinationPreparation([](YouTubeDestinationPrepareCompletion) {}) ==
+	      YouTubeAccountDestinationOperationStatus::Busy);
+
+	fixture.lockApiRaw->releaseResult = true;
+	CHECK(fixture.owner->shutdown());
+	CHECK(!fixture.owner->destinationSnapshot().lockCleanupPending);
+	CHECK(fixture.owner->snapshot().closed);
+}
+
+void testRuntimeOwnerDestinationRotationSurvivesResolverFailureForRemoteRevoke()
+{
+	DestinationOwnerFixture fixture("easy-multistream-runtime-owner-destination-rotation.ini");
+	YouTubeDestinationPrepareStatus receivedStatus = YouTubeDestinationPrepareStatus::InvalidResponse;
+	bool receivedIngestion = true;
+	CHECK(fixture.owner->startDestinationPreparation([&](YouTubeDestinationPrepareCompletion completion) {
+		receivedStatus = completion.status;
+		receivedIngestion = completion.ingestion.has_value();
+	}) == YouTubeAccountDestinationOperationStatus::Started);
+	CHECK(fixture.destinationRefreshPortRaw->lastAttempt.has_value());
+	if (!fixture.destinationRefreshPortRaw->lastAttempt.has_value()) {
+		return;
+	}
+	fixture.destinationRefreshPortRaw->complete(
+		ownerDestinationRefreshSuccess(*fixture.destinationRefreshPortRaw->lastAttempt, true));
+	CHECK(fixture.credentialApiRaw->writeCount == 2);
+	CHECK(fixture.destinationResolverPortRaw->lastAttempt.has_value());
+	if (!fixture.destinationResolverPortRaw->lastAttempt.has_value()) {
+		return;
+	}
+	fixture.destinationResolverPortRaw->complete(
+		ownerDestinationResolveFailure(*fixture.destinationResolverPortRaw->lastAttempt));
+	processOwnerEvents();
+
+	CHECK(receivedStatus == YouTubeDestinationPrepareStatus::DestinationUnavailable);
+	CHECK(!receivedIngestion);
+	const auto binding = makeYouTubeAccountProfileBinding(kProfilePathA);
+	CHECK(binding.has_value());
+	if (binding.has_value()) {
+		WindowsYouTubeAccountRefreshTokenStore store(*fixture.credentialApiRaw);
+		const auto rotated = store.read({*binding, selectionA().channelId});
+		CHECK(rotated.result.succeeded());
+		CHECK(std::string(rotated.secret.view()) == kOwnerDestinationRotatedRefreshToken);
+	}
+
+	CHECK(fixture.owner->startRemoteRevoke([](YouTubeAccountRemoteRevokeCompletion) {}) ==
+	      YouTubeAccountRemoteRevokeStartStatus::Started);
+	CHECK(fixture.remoteRevokePortRaw->startCount == 1);
+	CHECK(fixture.remoteRevokePortRaw->lastToken == kOwnerDestinationRotatedRefreshToken);
+	fixture.remoteRevokePortRaw->complete(fixture.remoteRevokePortRaw->networkFailure());
+	processOwnerEvents();
 }
 
 void testRuntimeOwnerRemoteRevokeSuccessPublishesSetupRequiredBeforeHandler()
@@ -422,10 +943,10 @@ void testRuntimeOwnerRemoteRevokeSuccessPublishesSetupRequiredBeforeHandler()
 	YouTubeAccountProfileContext::LoadResult handlerProfile;
 
 	CHECK(fixture.owner->startRemoteRevoke([&](YouTubeAccountRemoteRevokeCompletion completion) {
-			handlerSnapshot = fixture.owner->snapshot();
-			handlerProfile = completion.profile;
-			received.emplace(std::move(completion));
-		}) == YouTubeAccountRemoteRevokeStartStatus::Started);
+		handlerSnapshot = fixture.owner->snapshot();
+		handlerProfile = completion.profile;
+		received.emplace(std::move(completion));
+	}) == YouTubeAccountRemoteRevokeStartStatus::Started);
 	CHECK(fixture.remoteRevokePortRaw->startCount == 1);
 	CHECK(fixture.remoteRevokePortRaw->lastToken == "owner-refresh-token");
 	fixture.remoteRevokePortRaw->complete(fixture.remoteRevokePortRaw->success());
@@ -793,6 +1314,12 @@ void testRestoreOnlyOwnerBindsSuccessfulGeneration()
 	CHECK(owner->snapshot().profileBinding == snapshot.profileBinding);
 	CHECK(owner->snapshot().providerStage == YouTubeAccountProviderStage::Configured);
 	CHECK(YouTubeAccountRuntimeOwnerTestAccess::commitSelection(*owner, selectionA()));
+
+	const int readsBeforeDestination = credentialApiRaw->readCount;
+	CHECK(owner->startDestinationPreparation([](YouTubeDestinationPrepareCompletion) {}) ==
+	      YouTubeAccountDestinationOperationStatus::NotConfigured);
+	CHECK(credentialApiRaw->readCount == readsBeforeDestination);
+	CHECK(!owner->destinationSnapshot().activeAttempt.has_value());
 }
 
 void testConnectionSeamFailsClosedWhenProductionOAuthIsUnconfigured()
@@ -1426,6 +1953,11 @@ void testOwnerLifecycleIsThreadBoundWithoutSideEffects()
 	YouTubeAccountConnectionOperationStatus streamStatus = YouTubeAccountConnectionOperationStatus::OperationFailed;
 	YouTubeAccountConnectionOperationStatus cancelStatus = YouTubeAccountConnectionOperationStatus::OperationFailed;
 	YouTubeAccountConnectionSnapshot connectionSnapshot;
+	YouTubeAccountDestinationOperationStatus destinationStartStatus =
+		YouTubeAccountDestinationOperationStatus::OperationFailed;
+	YouTubeAccountDestinationOperationStatus destinationCancelStatus =
+		YouTubeAccountDestinationOperationStatus::OperationFailed;
+	YouTubeAccountDestinationSnapshot destinationSnapshot;
 	bool invalidateResult = true;
 	bool shutdownResult = true;
 	std::thread worker([&]() {
@@ -1436,6 +1968,9 @@ void testOwnerLifecycleIsThreadBoundWithoutSideEffects()
 		streamStatus = owner->selectStream({1, 1}, {1, 0});
 		cancelStatus = owner->cancelConnection({1, 1});
 		connectionSnapshot = owner->connectionSnapshot();
+		destinationStartStatus = owner->startDestinationPreparation([](YouTubeDestinationPrepareCompletion) {});
+		destinationCancelStatus = owner->cancelDestinationPreparation({1, 1});
+		destinationSnapshot = owner->destinationSnapshot();
 		invalidateResult = owner->invalidateForProfileChange();
 		shutdownResult = owner->shutdown();
 	});
@@ -1450,9 +1985,14 @@ void testOwnerLifecycleIsThreadBoundWithoutSideEffects()
 	CHECK(channelStatus == YouTubeAccountConnectionOperationStatus::WrongThread);
 	CHECK(streamStatus == YouTubeAccountConnectionOperationStatus::WrongThread);
 	CHECK(cancelStatus == YouTubeAccountConnectionOperationStatus::WrongThread);
+	CHECK(destinationStartStatus == YouTubeAccountDestinationOperationStatus::WrongThread);
+	CHECK(destinationCancelStatus == YouTubeAccountDestinationOperationStatus::WrongThread);
 	CHECK(!connectionSnapshot.restored);
 	CHECK(!connectionSnapshot.closed);
 	CHECK(!connectionSnapshot.activeAttempt.has_value());
+	CHECK(!destinationSnapshot.restored);
+	CHECK(!destinationSnapshot.closed);
+	CHECK(!destinationSnapshot.activeAttempt.has_value());
 }
 
 void testProfileChangeClearsOldBindingAndRestoresNewOne()
@@ -1525,6 +2065,13 @@ void testShutdownRetriesIncompleteNativeCleanup()
 int main(int argc, char **argv)
 {
 	QCoreApplication application(argc, argv);
+	testRuntimeOwnerDestinationPreparationSuccessReleasesLockBeforeHandler();
+	testRuntimeOwnerDestinationPreparationBlocksOtherAccountOperations();
+	testRuntimeOwnerDestinationCompletionRejectsChangedProfileAndRestoresNewOne();
+	testRuntimeOwnerDestinationProfileChangeRetriesNativeCleanupBeforeRestore();
+	testRuntimeOwnerDestinationShutdownSuppressesLateCallbacks();
+	testRuntimeOwnerDestinationCompletionLockFailureFailsClosedAndRetriesOnShutdown();
+	testRuntimeOwnerDestinationRotationSurvivesResolverFailureForRemoteRevoke();
 	testRuntimeOwnerRemoteRevokeSuccessPublishesSetupRequiredBeforeHandler();
 	testRuntimeOwnerBlocksRestoreConnectionAndDisconnectWhileRemoteRevokeRuns();
 	testRuntimeOwnerRemoteRevokeNetworkFailurePreservesRestoredState();

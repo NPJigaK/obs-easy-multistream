@@ -63,7 +63,7 @@ The output adapter never receives an OAuth access or refresh token. The account 
 
 Account connection and output delivery are separate states. A channel may be connected while YouTube is not streaming, and a YouTube output may fail without disconnecting the account.
 
-The detached `YouTubeAccountDestinationPreparer` is the boundary immediately before future output integration. For one
+The lifecycle-owned `YouTubeAccountDestinationPreparer` is the boundary immediately before future output integration. For one
 selected channel/stream it captures an immutable profile/channel scope and acquires the injected profile-operation lock
 before reading the saved refresh credential. It retains that owner-thread lock while refreshing an access token, persisting
 a provider-rotated refresh token in the same scope, resolving the selected stream, and finalizing queued completion state.
@@ -73,8 +73,10 @@ resolution later fails or the preparation is cancelled; it is not rolled back to
 owner-thread-only, uses an independent epoch and attempt, and supports cancellation, context invalidation, shutdown,
 stale-callback rejection, and queued value-only completion. A busy lock returns without changing preparer state; a
 recovered lock is internal recovery metadata and is not user-facing.
-It is currently a detached/testable library and is not instantiated by `PluginState`, `RuntimeController`, the dock, or
-the output adapter.
+`YouTubeAccountRuntimeOwner` constructs and owns it with the same profile-scoped credential store and operation-lock
+provider as restore, connection, and revoke. Its narrow headless facade derives generation, binding, and selection from
+the last accepted active-profile restore rather than accepting them from a caller. It is not invoked by `PluginState`,
+`RuntimeController`, the dock, or the output adapter.
 
 ## Desktop authorization
 
@@ -125,7 +127,7 @@ Credential Manager metadata, logs, or UI. Each profile owns one current selected
 profile replaces that record rather than retaining a collection of channel credentials. The old fixed refresh-token
 target is never read, migrated, or deleted.
 
-Access tokens, authorization codes, PKCE values, token endpoint responses, and resolved stream keys remain in wipeable process buffers for the shortest practical lifetime. None is displayed or logged. The detached destination preparer reads the refresh token only for a current preparation, and writes a provider-rotated refresh token to the immutable scope before resolving the selected stream. The current OBS plugin does not instantiate that preparer. The production account owner now has internal local-disconnect and remote-revoke transactions. Remote revoke reads the exact profile/channel credential while holding the profile operation lock, contacts only Google's fixed revoke endpoint, and performs local cleanup only after Google accepts the token or reports it already invalid. No current dock, plugin-main action, or output path invokes either transaction. A revoked or `invalid_grant` token becomes **Reconnect YouTube**, not an automatic fallback.
+Access tokens, authorization codes, PKCE values, token endpoint responses, and resolved stream keys remain in wipeable process buffers for the shortest practical lifetime. None is displayed or logged. The lifecycle-owned destination preparer reads the refresh token only for a current preparation, and writes a provider-rotated refresh token to the immutable scope before resolving the selected stream. The production account owner now has internal destination-preparation, local-disconnect, and remote-revoke transactions. Remote revoke reads the exact profile/channel credential while holding the profile operation lock, contacts only Google's fixed revoke endpoint, and performs local cleanup only after Google accepts the token or reports it already invalid. No current dock, plugin-main action, or output path invokes these transactions. A revoked or `invalid_grant` token becomes **Reconnect YouTube**, not an automatic fallback.
 
 As with the existing stream key, this design does not claim resistance to malware running as the same Windows user, live process inspection, or copies made internally by Qt, Windows, or libobs.
 
@@ -153,7 +155,8 @@ is cancelled. The preparer's epoch and attempt must match at every stage; cancel
 and destruction suppress stale completions and clear active secret-bearing state. The preparer releases its
 owner-thread profile lock after rollback/finalization and immediately before the external completion handler runs.
 If release fails, it destroys any successful destination and reports a service failure. When mutex ownership remains, it
-retains the profile claim until owner-thread shutdown retries the unfinished cleanup. Provider shutdown likewise retries
+retains the profile claim fail-closed. During a profile transition the lifecycle owner queues one bounded cleanup retry
+before restoring the current profile; shutdown retries any cleanup that still remains. Provider shutdown likewise retries
 only the coordinator, ports, or lock steps that did not previously finish.
 Local disconnect and remote revoke use the same profile-scoped boundary for selection and credential changes. Ambiguous network, rate-limit, and service failures retain the local state for an explicit retry. A remote success followed by a local deletion or profile-save failure is never reported as a completed disconnect and remains fail-closed.
 
@@ -211,8 +214,8 @@ The internal implementation order is intentionally not shown in the user interfa
 
 The first two items, the loopback listener and injected browser-opener authorization-session portions of item three,
 the token transport plus bounded channel/reusable-stream discovery portions of item four, the selected-stream resolver
-and detached destination-preparation orchestration in item five, and the interactive
-authorization/exchange/discovery/selection/storage orchestration are now present as non-instantiated libraries with
+and destination-preparation orchestration in item five, and the interactive
+authorization/exchange/discovery/selection/storage orchestration are now present as tested headless components with
 standalone tests. The listener and authorization-session tests use real
 local sockets to verify exclusive `127.0.0.1` binding, bounded HTTP parsing, state rejection, one-shot completion,
 timeout, request limits, cancellation, bind-and-arm-before-open ordering, browser-open failure, re-entrant completion,
@@ -237,9 +240,9 @@ lease, and persists the non-secret selection before the scoped refresh token, re
 token write fails. It can also restore a persisted selection from credential status alone: present is
 only locally configured and remains unverified against Google, while missing and unavailable remain distinct. Every
 restore creates a new generation, and a profile without a selection remains setup-required without touching any
-credential. The production plugin now owns the account provider and profile-operation coordinator behind a lifecycle-only
+credential. The production plugin now owns the account provider, destination preparer, and profile-operation coordinator behind a lifecycle-only
 wrapper: it restores during module/profile load, invalidates before a profile switch, shuts down during exit, and exposes
-internal connection, local-disconnect, and remote-revoke transactions that are not connected to the dock or plugin main. The connection
+internal connection, destination-preparation, local-disconnect, and remote-revoke transactions that are not connected to the dock or plugin main. The connection
 facade rechecks the active profile without changing its generation, uses attempt-scoped operations, and converts channel
 and stream candidates to revision-bound handles plus copied labels so raw Google IDs do not cross into a future UI. A future
 selection commit must match both the generation and profile binding from the last accepted restore, and it cannot
@@ -247,9 +250,9 @@ silently change a manual profile into account mode. The provider's network adapt
 depends on Qt Network, but the wrapper supplies no client ID or browser opener and no production caller invokes its
 connection-start method. It therefore returns not-configured before opening a browser or listener, emits no OAuth/API
 request, does not copy the refresh token out of the
-Credential Manager status buffer, and cannot change the dock or start an output. The destination preparer remains
-detached. Production client configuration, browser
-opening, refresh/output preparation, the user-facing revoke action, interactive output handoff, and all later items stay gated, so a partial connection path cannot appear in
+Credential Manager status buffer, and cannot change the dock or start an output. The destination preparer is lifecycle-owned,
+but no production caller starts it. Production client configuration, browser opening, the user-facing revoke action,
+interactive output handoff, and all later items stay gated, so a partial connection path cannot appear in
 the user interface.
 
 The manual stream-key credential remains shared across OBS profiles. The refresh-token credential is scoped to the SHA-256
@@ -272,9 +275,9 @@ process-wide claim registry prevents Windows' same-thread recursive mutex behavi
 The lock is owner-thread-bound, non-copyable, non-movable, and releases both the native handle and the local claim on every terminal
 path. The provider, destination preparer, and remote-revoke coordinator require the lock provider and hold it across
 their complete transactions, including rollback; asynchronous coordinators release it before invoking an external
-completion handler. Saved-state restore, local disconnect, remote-first Google revoke, and their lock are owned by the
-production lifecycle wrapper. Interactive paths remain unreachable from the OBS plugin; neither local disconnect nor
-remote revoke is exposed in the dock.
+completion handler. Saved-state restore, local disconnect, remote-first Google revoke, destination preparation, and their
+locks are owned by the production lifecycle wrapper. Interactive paths remain unreachable from the OBS plugin; none of
+these account transactions is exposed in the dock.
 
 The `YouTubeAccountProfileRestoreCoordinator` provides the outer profile transaction for both saved-state restoration
 and local disconnect and is called by the production lifecycle owner. It first reads a

@@ -5,9 +5,11 @@
 
 #include "windows-credential-vault.hpp"
 
+#include <QMetaObject>
 #include <QThread>
 
 #include <cassert>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -21,6 +23,17 @@ template<typename T> T &requireDependency(const std::unique_ptr<T> &dependency)
 		throw std::invalid_argument("YouTube account runtime owner dependency is required");
 	}
 	return *dependency;
+}
+
+std::uint64_t nextNonZero(std::uint64_t value) noexcept
+{
+	return value == std::numeric_limits<std::uint64_t>::max() ? 1 : value + 1;
+}
+
+bool sameSelection(const YouTubeAccountSelection &left, const YouTubeAccountSelection &right) noexcept
+{
+	return left.channelId == right.channelId && left.channelLabel == right.channelLabel &&
+	       left.streamId == right.streamId && left.streamLabel == right.streamLabel;
 }
 
 YouTubeAccountLease providerLease(YouTubeAccountConnectionAttempt attempt) noexcept
@@ -167,6 +180,64 @@ remoteStatusForConnectionPreflight(YouTubeAccountConnectionOperationStatus statu
 	return YouTubeAccountRemoteRevokeStartStatus::OperationFailed;
 }
 
+YouTubeAccountDestinationOperationStatus
+destinationStatusForConnectionPreflight(YouTubeAccountConnectionOperationStatus status) noexcept
+{
+	switch (status) {
+	case YouTubeAccountConnectionOperationStatus::Accepted:
+		return YouTubeAccountDestinationOperationStatus::Started;
+	case YouTubeAccountConnectionOperationStatus::NotConfigured:
+		return YouTubeAccountDestinationOperationStatus::NotConfigured;
+	case YouTubeAccountConnectionOperationStatus::NotRestored:
+		return YouTubeAccountDestinationOperationStatus::NotRestored;
+	case YouTubeAccountConnectionOperationStatus::NotAccountMode:
+		return YouTubeAccountDestinationOperationStatus::NotAccountMode;
+	case YouTubeAccountConnectionOperationStatus::ProfileUnavailable:
+		return YouTubeAccountDestinationOperationStatus::ProfileUnavailable;
+	case YouTubeAccountConnectionOperationStatus::ProfileChanged:
+		return YouTubeAccountDestinationOperationStatus::ProfileChanged;
+	case YouTubeAccountConnectionOperationStatus::Busy:
+		return YouTubeAccountDestinationOperationStatus::Busy;
+	case YouTubeAccountConnectionOperationStatus::WrongThread:
+		return YouTubeAccountDestinationOperationStatus::WrongThread;
+	case YouTubeAccountConnectionOperationStatus::Closed:
+		return YouTubeAccountDestinationOperationStatus::Closed;
+	case YouTubeAccountConnectionOperationStatus::Cancelled:
+	case YouTubeAccountConnectionOperationStatus::NoActiveAttempt:
+	case YouTubeAccountConnectionOperationStatus::StaleAttempt:
+	case YouTubeAccountConnectionOperationStatus::UnknownCandidate:
+	case YouTubeAccountConnectionOperationStatus::WrongPhase:
+	case YouTubeAccountConnectionOperationStatus::OperationFailed:
+		return YouTubeAccountDestinationOperationStatus::OperationFailed;
+	}
+	return YouTubeAccountDestinationOperationStatus::OperationFailed;
+}
+
+YouTubeAccountDestinationOperationStatus mapDestinationStartStatus(YouTubeDestinationPrepareStartStatus status) noexcept
+{
+	switch (status) {
+	case YouTubeDestinationPrepareStartStatus::Started:
+		return YouTubeAccountDestinationOperationStatus::Started;
+	case YouTubeDestinationPrepareStartStatus::WrongThread:
+		return YouTubeAccountDestinationOperationStatus::WrongThread;
+	case YouTubeDestinationPrepareStartStatus::Busy:
+		return YouTubeAccountDestinationOperationStatus::Busy;
+	case YouTubeDestinationPrepareStartStatus::Closed:
+		return YouTubeAccountDestinationOperationStatus::Closed;
+	case YouTubeDestinationPrepareStartStatus::InvalidClientId:
+		return YouTubeAccountDestinationOperationStatus::NotConfigured;
+	case YouTubeDestinationPrepareStartStatus::InvalidProfileBinding:
+		return YouTubeAccountDestinationOperationStatus::ProfileChanged;
+	case YouTubeDestinationPrepareStartStatus::InvalidSelection:
+		return YouTubeAccountDestinationOperationStatus::NoSelection;
+	case YouTubeDestinationPrepareStartStatus::InvalidAttempt:
+	case YouTubeDestinationPrepareStartStatus::InvalidCompletionHandler:
+	case YouTubeDestinationPrepareStartStatus::OperationFailed:
+		return YouTubeAccountDestinationOperationStatus::OperationFailed;
+	}
+	return YouTubeAccountDestinationOperationStatus::OperationFailed;
+}
+
 } // namespace
 
 YouTubeAccountRuntimeOwner::YouTubeAccountRuntimeOwner(ProfilePathReader profilePathReader, ConfigReader configReader)
@@ -180,13 +251,19 @@ YouTubeAccountRuntimeOwner::YouTubeAccountRuntimeOwner(
 	ProfilePathReader profilePathReader, ConfigReader configReader, QString clientId,
 	GoogleOAuthAuthorizationSession::BrowserOpener browserOpener, std::unique_ptr<WinCredentialApi> credentialApi,
 	std::unique_ptr<YouTubeAccountProfileOperationLockApi> profileLockApi,
-	std::unique_ptr<YouTubeAccountRemoteRevokePort> remoteRevokePort)
+	std::unique_ptr<YouTubeAccountRemoteRevokePort> remoteRevokePort,
+	std::unique_ptr<YouTubeDestinationRefreshPort> destinationRefreshPort,
+	std::unique_ptr<YouTubeDestinationResolverPort> destinationResolverPort)
 	: context_(std::move(profilePathReader), std::move(configReader)),
 	  credentialApi_(std::move(credentialApi)),
 	  refreshTokenStore_(requireDependency(credentialApi_)),
 	  profileLockApi_(std::move(profileLockApi)),
 	  profileLockProvider_(requireDependency(profileLockApi_))
 {
+	if ((destinationRefreshPort == nullptr) != (destinationResolverPort == nullptr)) {
+		throw std::invalid_argument("YouTube destination ports must be supplied together");
+	}
+	const QString destinationClientId = clientId;
 	const std::string initialBinding = context_.currentProfileBinding().value_or(std::string{});
 	provider_ = std::make_unique<YouTubeAccountProvider>(
 		std::move(clientId), std::move(browserOpener), refreshTokenStore_, profileLockProvider_, initialBinding,
@@ -197,10 +274,19 @@ YouTubeAccountRuntimeOwner::YouTubeAccountRuntimeOwner(
 		std::make_unique<YouTubeAccountProfileRestoreCoordinator>(context_, *provider_, profileLockProvider_);
 	if (remoteRevokePort != nullptr) {
 		remoteRevokeCoordinator_.reset(new YouTubeAccountRemoteRevokeCoordinator(
-			context_, *provider_, refreshTokenStore_, profileLockProvider_, std::move(remoteRevokePort), nullptr));
+			context_, *provider_, refreshTokenStore_, profileLockProvider_, std::move(remoteRevokePort),
+			nullptr));
 	} else {
 		remoteRevokeCoordinator_ = std::make_unique<YouTubeAccountRemoteRevokeCoordinator>(
 			context_, *provider_, refreshTokenStore_, profileLockProvider_);
+	}
+	if (destinationRefreshPort != nullptr) {
+		destinationPreparer_.reset(new YouTubeAccountDestinationPreparer(
+			destinationClientId, std::move(destinationRefreshPort), std::move(destinationResolverPort),
+			refreshTokenStore_, profileLockProvider_, nullptr));
+	} else {
+		destinationPreparer_ = std::make_unique<YouTubeAccountDestinationPreparer>(
+			destinationClientId, refreshTokenStore_, profileLockProvider_);
 	}
 }
 
@@ -208,8 +294,9 @@ YouTubeAccountRuntimeOwner::~YouTubeAccountRuntimeOwner()
 {
 	assert(QThread::currentThread() == (provider_ != nullptr ? provider_->thread() : QThread::currentThread()));
 	(void)shutdown();
-	// Both coordinators reference the provider. Remote revoke owns the outermost
-	// asynchronous transaction and therefore receives the first cleanup retry.
+	// Secret-bearing destination work is destroyed before the account provider,
+	// credential store, and shared profile-lock provider it references.
+	destinationPreparer_.reset();
 	remoteRevokeCoordinator_.reset();
 	restoreCoordinator_.reset();
 	provider_.reset();
@@ -258,8 +345,7 @@ bool YouTubeAccountRuntimeOwner::isAcceptedDisconnect(const YouTubeAccountProfil
 	return isUsableProfile(snapshot) && !snapshot.selection.has_value();
 }
 
-bool YouTubeAccountRuntimeOwner::isAcceptedRemoteRevoke(
-	const YouTubeAccountRemoteRevokeCompletion &completion) noexcept
+bool YouTubeAccountRuntimeOwner::isAcceptedRemoteRevoke(const YouTubeAccountRemoteRevokeCompletion &completion) noexcept
 {
 	if (completion.status != YouTubeAccountRemoteRevokeStatus::Revoked &&
 	    completion.status != YouTubeAccountRemoteRevokeStatus::AlreadyRevoked) {
@@ -327,11 +413,15 @@ YouTubeAccountProfileRestoreResult YouTubeAccountRuntimeOwner::restoreActiveProf
 		result.providerStatus = YouTubeAccountProviderRestoreStatus::Closed;
 		return result;
 	}
-	if (remoteRevokeBusy()) {
+	if (accountOperationBusy()) {
 		// PROFILE_CHANGED is delivered only once. If the previous profile's
-		// revoke completion is still queued, remember this request and restore
-		// the then-current profile after that transaction is fully released.
+		// asynchronous account transaction still owns the lock, remember this
+		// request and restore the then-current profile after it is fully released.
 		profileRestorePending_ = true;
+		if (destinationPreparer_ != nullptr && !destinationPreparer_->activeAttempt().has_value() &&
+		    destinationPreparer_->lockHeld()) {
+			scheduleDestinationCleanupRetry();
+		}
 		result.status = YouTubeAccountProfileRestoreStatus::Busy;
 		result.providerStatus = YouTubeAccountProviderRestoreStatus::Busy;
 		return result;
@@ -408,7 +498,7 @@ YouTubeAccountConnectionOperationStatus YouTubeAccountRuntimeOwner::preflightCon
 	if (closed_) {
 		return YouTubeAccountConnectionOperationStatus::Closed;
 	}
-	if (remoteRevokeBusy()) {
+	if (accountOperationBusy()) {
 		return YouTubeAccountConnectionOperationStatus::Busy;
 	}
 	if (!restored_ || restoredGeneration_ == 0 || restoredBinding_.empty()) {
@@ -649,6 +739,19 @@ bool YouTubeAccountRuntimeOwner::remoteRevokeBusy() const noexcept
 	return remoteRevokeCoordinator_->activeAttempt().has_value() || remoteRevokeCoordinator_->lockHeld();
 }
 
+bool YouTubeAccountRuntimeOwner::destinationPreparationBusy() const noexcept
+{
+	if (destinationPreparer_ == nullptr) {
+		return false;
+	}
+	return destinationPreparer_->activeAttempt().has_value() || destinationPreparer_->lockHeld();
+}
+
+bool YouTubeAccountRuntimeOwner::accountOperationBusy() const noexcept
+{
+	return remoteRevokeBusy() || destinationPreparationBusy();
+}
+
 YouTubeAccountRemoteRevokeStartStatus YouTubeAccountRuntimeOwner::startRemoteRevoke(
 	YouTubeAccountRemoteRevokeCoordinator::CompletionHandler completionHandler) noexcept
 {
@@ -681,9 +784,8 @@ YouTubeAccountRemoteRevokeStartStatus YouTubeAccountRuntimeOwner::startRemoteRev
 		const std::string expectedBinding = restoredBinding_;
 		const YouTubeAccountRemoteRevokeRequest request{restoredGeneration_, restoredBinding_};
 		auto status = remoteRevokeCoordinator_->start(
-			request,
-			[this, handler = std::move(completionHandler)](
-				YouTubeAccountRemoteRevokeCompletion completion) mutable {
+			request, [this, handler = std::move(completionHandler)](
+					 YouTubeAccountRemoteRevokeCompletion completion) mutable {
 				updateAfterRemoteRevoke(completion);
 				retryPendingProfileRestore();
 				if (handler) {
@@ -740,7 +842,7 @@ void YouTubeAccountRuntimeOwner::retryPendingProfileRestore() noexcept
 		profileRestorePending_ = false;
 		return;
 	}
-	if (remoteRevokeBusy()) {
+	if (accountOperationBusy()) {
 		return;
 	}
 
@@ -770,8 +872,249 @@ YouTubeAccountRemoteRevokeSnapshot YouTubeAccountRuntimeOwner::remoteRevokeSnaps
 	return value;
 }
 
-void YouTubeAccountRuntimeOwner::updateAfterRemoteRevoke(
-	YouTubeAccountRemoteRevokeCompletion &completion) noexcept
+YouTubeAccountDestinationOperationStatus YouTubeAccountRuntimeOwner::startDestinationPreparation(
+	YouTubeAccountDestinationPreparer::CompletionHandler completionHandler) noexcept
+{
+	if (!onOwnerThread()) {
+		return YouTubeAccountDestinationOperationStatus::WrongThread;
+	}
+	if (closed_ || destinationPreparer_ == nullptr) {
+		return YouTubeAccountDestinationOperationStatus::Closed;
+	}
+	if (!completionHandler) {
+		return YouTubeAccountDestinationOperationStatus::OperationFailed;
+	}
+	if (accountOperationBusy()) {
+		return YouTubeAccountDestinationOperationStatus::Busy;
+	}
+
+	const auto preflight = preflightConnection();
+	if (preflight != YouTubeAccountConnectionOperationStatus::Accepted) {
+		return destinationStatusForConnectionPreflight(preflight);
+	}
+
+	try {
+		const auto providerSnapshot = provider_->snapshot();
+		if (providerSnapshot.account.lease.has_value()) {
+			return YouTubeAccountDestinationOperationStatus::Busy;
+		}
+
+		const auto profile = context_.snapshot();
+		if (profile.generation != restoredGeneration_ || profile.profileBinding != restoredBinding_ ||
+		    profile.connectionMode != YouTubeConnectionMode::Account) {
+			(void)invalidateConnectionContext(YouTubeAccountProfileRestoreStatus::ProfileChanged);
+			return YouTubeAccountDestinationOperationStatus::ProfileChanged;
+		}
+		if (!profile.selection.has_value()) {
+			return YouTubeAccountDestinationOperationStatus::NoSelection;
+		}
+
+		const std::uint64_t expectedGeneration = restoredGeneration_;
+		const std::string expectedBinding = restoredBinding_;
+		const YouTubeAccountSelection expectedSelection = *profile.selection;
+		destinationAttemptCounter_ = nextNonZero(destinationAttemptCounter_);
+		const YouTubeDestinationPrepareAttempt expectedAttempt{expectedGeneration, destinationAttemptCounter_};
+		YouTubeDestinationPrepareRequest request;
+		request.attempt = expectedAttempt;
+		request.profileBinding = expectedBinding;
+		request.selection = expectedSelection;
+
+		const auto status = destinationPreparer_->start(
+			std::move(request), [this, expectedAttempt, expectedBinding, expectedSelection,
+					     handler = std::move(completionHandler)](
+						    YouTubeDestinationPrepareCompletion completion) mutable {
+				updateAfterDestinationPreparation(completion, expectedAttempt, expectedBinding,
+								  expectedSelection);
+				retryPendingProfileRestore();
+				if (handler) {
+					try {
+						handler(std::move(completion));
+					} catch (...) {
+					}
+				}
+			});
+
+		// Credential and transport test doubles can synchronously re-enter a
+		// profile change or shutdown. The lifecycle mutation wins over a stale
+		// immediate start result.
+		if (closed_) {
+			return YouTubeAccountDestinationOperationStatus::Closed;
+		}
+		if (!restored_) {
+			return destinationStatusForConnectionPreflight(connectionStatusForLostRestore(restoreStatus_));
+		}
+		if (restoredGeneration_ != expectedGeneration || restoredBinding_ != expectedBinding) {
+			return YouTubeAccountDestinationOperationStatus::ProfileChanged;
+		}
+
+		const auto mapped = mapDestinationStartStatus(status);
+		if (mapped == YouTubeAccountDestinationOperationStatus::Started) {
+			lastDestinationStatus_.reset();
+		} else if (status == YouTubeDestinationPrepareStartStatus::OperationFailed &&
+			   destinationPreparer_->lockHeld()) {
+			clearRestoredBinding();
+			restoreStatus_ = YouTubeAccountProfileRestoreStatus::OperationFailed;
+		}
+		return mapped;
+	} catch (...) {
+		if (destinationPreparer_ != nullptr && destinationPreparer_->lockHeld()) {
+			clearRestoredBinding();
+			restoreStatus_ = YouTubeAccountProfileRestoreStatus::OperationFailed;
+		}
+		return YouTubeAccountDestinationOperationStatus::OperationFailed;
+	}
+}
+
+YouTubeAccountDestinationOperationStatus
+YouTubeAccountRuntimeOwner::cancelDestinationPreparation(YouTubeDestinationPrepareAttempt attempt) noexcept
+{
+	if (!onOwnerThread()) {
+		return YouTubeAccountDestinationOperationStatus::WrongThread;
+	}
+	if (closed_ || destinationPreparer_ == nullptr) {
+		return YouTubeAccountDestinationOperationStatus::Closed;
+	}
+	const auto active = destinationPreparer_->activeAttempt();
+	if (!active.has_value()) {
+		return YouTubeAccountDestinationOperationStatus::NoActiveAttempt;
+	}
+	if (!(*active == attempt)) {
+		return YouTubeAccountDestinationOperationStatus::StaleAttempt;
+	}
+
+	try {
+		const auto activeStatus = context_.checkActiveAccount(restoredGeneration_, restoredBinding_);
+		if (activeStatus != YouTubeAccountProfileContext::ActiveAccountStatus::Current ||
+		    attempt.generation != restoredGeneration_) {
+			const bool invalidated = destinationPreparer_->invalidateContext();
+			clearRestoredBinding();
+			restoreStatus_ = invalidated ? YouTubeAccountProfileRestoreStatus::ProfileChanged
+						     : YouTubeAccountProfileRestoreStatus::OperationFailed;
+			return invalidated ? YouTubeAccountDestinationOperationStatus::ProfileChanged
+					   : YouTubeAccountDestinationOperationStatus::OperationFailed;
+		}
+		if (destinationPreparer_->cancel(attempt)) {
+			return YouTubeAccountDestinationOperationStatus::Cancelled;
+		}
+		if (destinationPreparer_->lockHeld()) {
+			clearRestoredBinding();
+			restoreStatus_ = YouTubeAccountProfileRestoreStatus::OperationFailed;
+		}
+		return YouTubeAccountDestinationOperationStatus::OperationFailed;
+	} catch (...) {
+		return YouTubeAccountDestinationOperationStatus::OperationFailed;
+	}
+}
+
+YouTubeAccountDestinationSnapshot YouTubeAccountRuntimeOwner::destinationSnapshot() const
+{
+	YouTubeAccountDestinationSnapshot value;
+	if (!onOwnerThread()) {
+		return value;
+	}
+	value.lastStatus = lastDestinationStatus_;
+	value.generation = restoredGeneration_;
+	value.restored = restored_;
+	value.closed = closed_;
+	if (destinationPreparer_ != nullptr) {
+		value.state = destinationPreparer_->state();
+		value.activeAttempt = destinationPreparer_->activeAttempt();
+		value.lockCleanupPending = destinationPreparer_->lockHeld();
+	}
+	return value;
+}
+
+void YouTubeAccountRuntimeOwner::updateAfterDestinationPreparation(
+	YouTubeDestinationPrepareCompletion &completion, YouTubeDestinationPrepareAttempt expectedAttempt,
+	const std::string &expectedBinding, const YouTubeAccountSelection &expectedSelection) noexcept
+{
+	try {
+		const std::uint64_t expectedGeneration = expectedAttempt.generation;
+		if (destinationPreparer_ == nullptr || destinationPreparer_->lockHeld()) {
+			completion.status = YouTubeDestinationPrepareStatus::ServiceUnavailable;
+			completion.ingestion.reset();
+			lastDestinationStatus_ = completion.status;
+			clearRestoredBinding();
+			restoreStatus_ = YouTubeAccountProfileRestoreStatus::OperationFailed;
+			return;
+		}
+		if (closed_) {
+			completion.status = YouTubeDestinationPrepareStatus::Cancelled;
+			completion.ingestion.reset();
+			lastDestinationStatus_ = completion.status;
+			return;
+		}
+		if (profileRestorePending_) {
+			// restoreActiveProfile() was requested while this transaction still
+			// owned the profile lock. The retry below will advance the generation,
+			// so never hand a destination from the prior generation to its caller.
+			completion.status = YouTubeDestinationPrepareStatus::ProfileChanged;
+			completion.ingestion.reset();
+			lastDestinationStatus_ = completion.status;
+			return;
+		}
+
+		const auto activeStatus = context_.checkActiveAccount(expectedGeneration, expectedBinding);
+		const auto profile = context_.snapshot();
+		const bool ownerMatches = restored_ && restoredGeneration_ == expectedGeneration &&
+					  restoredBinding_ == expectedBinding;
+		const bool profileMatches =
+			activeStatus == YouTubeAccountProfileContext::ActiveAccountStatus::Current &&
+			profile.generation == expectedGeneration && profile.profileBinding == expectedBinding &&
+			profile.connectionMode == YouTubeConnectionMode::Account && profile.selection.has_value() &&
+			sameSelection(*profile.selection, expectedSelection);
+		if (!ownerMatches || !profileMatches || !(completion.attempt == expectedAttempt)) {
+			completion.status = YouTubeDestinationPrepareStatus::ProfileChanged;
+			completion.ingestion.reset();
+			lastDestinationStatus_ = completion.status;
+			if (ownerMatches) {
+				(void)invalidateConnectionContext(YouTubeAccountProfileRestoreStatus::ProfileChanged);
+			}
+			return;
+		}
+
+		lastDestinationStatus_ = completion.status;
+	} catch (...) {
+		completion.status = YouTubeDestinationPrepareStatus::ServiceUnavailable;
+		completion.ingestion.reset();
+		lastDestinationStatus_ = completion.status;
+		clearRestoredBinding();
+		restoreStatus_ = YouTubeAccountProfileRestoreStatus::OperationFailed;
+	}
+}
+
+void YouTubeAccountRuntimeOwner::scheduleDestinationCleanupRetry() noexcept
+{
+	if (destinationCleanupRetryScheduled_ || closed_ || destinationPreparer_ == nullptr ||
+	    !destinationPreparer_->lockHeld()) {
+		return;
+	}
+
+	destinationCleanupRetryScheduled_ = true;
+	const bool queued = QMetaObject::invokeMethod(
+		destinationPreparer_.get(),
+		[this]() {
+			destinationCleanupRetryScheduled_ = false;
+			if (closed_ || destinationPreparer_ == nullptr) {
+				return;
+			}
+			if (destinationPreparer_->activeAttempt().has_value()) {
+				return;
+			}
+			if (destinationPreparer_->lockHeld() && !destinationPreparer_->invalidateContext()) {
+				clearRestoredBinding();
+				restoreStatus_ = YouTubeAccountProfileRestoreStatus::OperationFailed;
+				return;
+			}
+			retryPendingProfileRestore();
+		},
+		Qt::QueuedConnection);
+	if (!queued) {
+		destinationCleanupRetryScheduled_ = false;
+	}
+}
+
+void YouTubeAccountRuntimeOwner::updateAfterRemoteRevoke(YouTubeAccountRemoteRevokeCompletion &completion) noexcept
 {
 	try {
 		if (completion.lockCleanupPending) {
@@ -849,7 +1192,7 @@ YouTubeAccountProfileDisconnectResult YouTubeAccountRuntimeOwner::disconnectActi
 		result.providerStatus = YouTubeAccountProviderDisconnectStatus::Closed;
 		return result;
 	}
-	if (remoteRevokeBusy()) {
+	if (accountOperationBusy()) {
 		result.status = YouTubeAccountProfileDisconnectStatus::Busy;
 		result.providerStatus = YouTubeAccountProviderDisconnectStatus::Busy;
 		return result;
@@ -909,12 +1252,25 @@ bool YouTubeAccountRuntimeOwner::invalidateForProfileChange() noexcept
 		return false;
 	}
 	try {
+		const bool destinationInvalidated = destinationPreparer_ == nullptr ||
+						    destinationPreparer_->invalidateContext();
 		const bool remoteInvalidated = remoteRevokeCoordinator_ == nullptr ||
 					       remoteRevokeCoordinator_->invalidateContext();
 		clearRestoredBinding();
 		const bool restoreInvalidated = restoreCoordinator_->invalidate();
-		restoreStatus_ = YouTubeAccountProfileRestoreStatus::ProfileChanged;
-		return remoteInvalidated && restoreInvalidated;
+		const bool invalidated = destinationInvalidated && remoteInvalidated && restoreInvalidated;
+		// A coordinator can reject synchronous re-entry while its own transaction
+		// is already converting the result to ProfileChanged. Preserve that
+		// lifecycle outcome. Only retained native cleanup from the destination
+		// transaction turns the owner into an operation failure here.
+		restoreStatus_ = !destinationInvalidated && destinationPreparer_ != nullptr &&
+						 destinationPreparer_->lockHeld()
+					 ? YouTubeAccountProfileRestoreStatus::OperationFailed
+					 : YouTubeAccountProfileRestoreStatus::ProfileChanged;
+		if (!destinationInvalidated && destinationPreparer_ != nullptr && destinationPreparer_->lockHeld()) {
+			scheduleDestinationCleanupRetry();
+		}
+		return invalidated;
 	} catch (...) {
 		restoreStatus_ = YouTubeAccountProfileRestoreStatus::OperationFailed;
 		return false;
@@ -931,11 +1287,16 @@ bool YouTubeAccountRuntimeOwner::shutdown() noexcept
 	}
 	closed_ = true;
 	profileRestorePending_ = false;
+	destinationCleanupRetryScheduled_ = false;
 	clearRestoredBinding();
 	bool coordinatorClosed = true;
 	bool remoteClosed = true;
+	bool destinationClosed = true;
 	bool providerClosed = true;
 	try {
+		if (destinationPreparer_ != nullptr) {
+			destinationClosed = destinationPreparer_->shutdown();
+		}
 		if (remoteRevokeCoordinator_ != nullptr) {
 			remoteClosed = remoteRevokeCoordinator_->shutdown();
 		}
@@ -946,17 +1307,19 @@ bool YouTubeAccountRuntimeOwner::shutdown() noexcept
 			providerClosed = provider_->shutdown();
 		}
 	} catch (...) {
+		destinationClosed = false;
+		remoteClosed = false;
 		coordinatorClosed = false;
 		providerClosed = false;
 	}
 	restoreStatus_ = YouTubeAccountProfileRestoreStatus::Closed;
-	shutdownComplete_ = remoteClosed && coordinatorClosed && providerClosed;
+	shutdownComplete_ = destinationClosed && remoteClosed && coordinatorClosed && providerClosed;
 	return shutdownComplete_;
 }
 
 bool YouTubeAccountRuntimeOwner::commitSelection(const std::optional<YouTubeAccountSelection> &selection) noexcept
 {
-	if (closed_ || remoteRevokeBusy() || !restored_ || restoredGeneration_ == 0 || restoredBinding_.empty()) {
+	if (closed_ || accountOperationBusy() || !restored_ || restoredGeneration_ == 0 || restoredBinding_.empty()) {
 		return false;
 	}
 	try {
