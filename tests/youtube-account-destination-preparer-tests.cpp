@@ -103,6 +103,7 @@ public:
 	{
 		return preparer_->activeAttempt();
 	}
+	bool lockHeld() const noexcept { return preparer_->lockHeld(); }
 
 private:
 	std::unique_ptr<YouTubeAccountDestinationPreparer> preparer_;
@@ -593,9 +594,11 @@ void testCompletionReleaseFailureFailsClosedAndRetries()
 		CHECK(nestedStartStatus == YouTubeDestinationPrepareStartStatus::Busy);
 		CHECK(fixture.lockApi.releaseCount == 1);
 		CHECK(!fixture.preparer->activeAttempt().has_value());
+		CHECK(fixture.preparer->lockHeld());
 		fixture.lockApi.releaseSucceeds = true;
 		CHECK(fixture.preparer->shutdown());
 		CHECK(fixture.lockApi.releaseCount == 2);
+		CHECK(!fixture.preparer->lockHeld());
 		CHECK(fixture.lockApi.closeCount == 1);
 	}
 
@@ -623,8 +626,42 @@ void testCompletionReleaseFailureFailsClosedAndRetries()
 		processQueuedEvents();
 		CHECK(deliveredStatus == YouTubeDestinationPrepareStatus::ServiceUnavailable);
 		CHECK(!deliveredIngestion);
+		CHECK(fixture.preparer->lockHeld());
 		fixture.lockApi.releaseSucceeds = true;
 		CHECK(fixture.preparer->shutdown());
+		CHECK(!fixture.preparer->lockHeld());
+	}
+
+	{
+		Fixture fixture;
+		fixture.vault.seed({kProfileBindingA, "channel-1"}, kOldRefreshToken);
+		fixture.lockApi.closeSucceeds = false;
+		YouTubeDestinationPrepareStatus deliveredStatus = YouTubeDestinationPrepareStatus::InvalidResponse;
+		bool deliveredIngestion = true;
+		const auto attempt = YouTubeDestinationPrepareAttempt{2, 4};
+		CHECK(fixture.preparer->start(requestFor(attempt), [&](YouTubeDestinationPrepareCompletion completion) {
+			deliveredStatus = completion.status;
+			deliveredIngestion = completion.ingestion.has_value();
+		}) == YouTubeDestinationPrepareStartStatus::Started);
+		CHECK(fixture.refreshState->lastAttempt.has_value());
+		if (fixture.refreshState->lastAttempt.has_value()) {
+			fixture.refreshState->handlers.front()(refreshSuccess(*fixture.refreshState->lastAttempt));
+		}
+		CHECK(fixture.resolverState->lastAttempt.has_value());
+		if (fixture.resolverState->lastAttempt.has_value()) {
+			fixture.resolverState->handlers.front()(resolveSuccess(*fixture.resolverState->lastAttempt));
+		}
+		processQueuedEvents();
+		CHECK(deliveredStatus == YouTubeDestinationPrepareStatus::ServiceUnavailable);
+		CHECK(!deliveredIngestion);
+		CHECK(fixture.lockApi.releaseCount == 1);
+		CHECK(fixture.lockApi.closeCount == 1);
+		CHECK(fixture.preparer->lockHeld());
+		fixture.lockApi.closeSucceeds = true;
+		CHECK(fixture.preparer->shutdown());
+		CHECK(fixture.lockApi.releaseCount == 1);
+		CHECK(fixture.lockApi.closeCount == 2);
+		CHECK(!fixture.preparer->lockHeld());
 	}
 }
 
@@ -664,6 +701,7 @@ void testOperationLockReleaseForCancellationInvalidationAndShutdownFailure()
 		CHECK(fixture.preparer->state() == YouTubeDestinationPreparerState::Closed);
 		CHECK(fixture.lockApi.releaseCount == 1);
 		CHECK(fixture.lockApi.closeCount == 1);
+		CHECK(!fixture.preparer->lockHeld());
 		CHECK(fixture.refreshState->shutdownCount == 1);
 		CHECK(fixture.resolverState->shutdownCount == 1);
 		fixture.refreshState->shutdownResult = true;
@@ -682,9 +720,11 @@ void testOperationLockReleaseForCancellationInvalidationAndShutdownFailure()
 		      YouTubeDestinationPrepareStartStatus::Started);
 		CHECK(!fixture.preparer->shutdown());
 		CHECK(fixture.lockApi.releaseCount == 1);
+		CHECK(fixture.preparer->lockHeld());
 		fixture.lockApi.releaseSucceeds = true;
 		CHECK(fixture.preparer->shutdown());
 		CHECK(fixture.lockApi.releaseCount == 2);
+		CHECK(!fixture.preparer->lockHeld());
 	}
 }
 
@@ -1203,6 +1243,110 @@ void testLifecycleMutationRejectsSynchronousPortReentry()
 	}
 }
 
+void testSynchronousReadAndPortReentryDoesNotReportStarted()
+{
+	{
+		Fixture fixture;
+		bool invalidated = false;
+		fixture.vault.onRead = [&] {
+			invalidated = fixture.preparer->invalidateContext();
+		};
+		const auto status =
+			fixture.preparer->start(requestFor({10, 10}), [](YouTubeDestinationPrepareCompletion) {});
+		CHECK(invalidated);
+		CHECK(status == YouTubeDestinationPrepareStartStatus::OperationFailed);
+		CHECK(fixture.preparer->state() == YouTubeDestinationPreparerState::Idle);
+		CHECK(!fixture.preparer->lockHeld());
+		CHECK(fixture.refreshState->handlers.empty());
+	}
+
+	{
+		Fixture fixture;
+		bool shutDown = false;
+		fixture.vault.onRead = [&] {
+			shutDown = fixture.preparer->shutdown();
+		};
+		const auto status =
+			fixture.preparer->start(requestFor({10, 11}), [](YouTubeDestinationPrepareCompletion) {});
+		CHECK(shutDown);
+		CHECK(status == YouTubeDestinationPrepareStartStatus::Closed);
+		CHECK(fixture.preparer->state() == YouTubeDestinationPreparerState::Closed);
+		CHECK(!fixture.preparer->lockHeld());
+	}
+
+	{
+		Fixture fixture;
+		fixture.vault.seed({kProfileBindingA, "channel-1"}, kOldRefreshToken);
+		bool invalidated = false;
+		fixture.refreshState->onStart = [&] {
+			invalidated = fixture.preparer->invalidateContext();
+		};
+		const auto status =
+			fixture.preparer->start(requestFor({10, 12}), [](YouTubeDestinationPrepareCompletion) {});
+		CHECK(invalidated);
+		CHECK(status == YouTubeDestinationPrepareStartStatus::OperationFailed);
+		CHECK(fixture.preparer->state() == YouTubeDestinationPreparerState::Idle);
+		CHECK(!fixture.preparer->lockHeld());
+	}
+
+	{
+		Fixture fixture;
+		fixture.vault.seed({kProfileBindingA, "channel-1"}, kOldRefreshToken);
+		bool shutDown = false;
+		fixture.refreshState->onStart = [&] {
+			shutDown = fixture.preparer->shutdown();
+		};
+		const auto status =
+			fixture.preparer->start(requestFor({10, 13}), [](YouTubeDestinationPrepareCompletion) {});
+		CHECK(shutDown);
+		CHECK(status == YouTubeDestinationPrepareStartStatus::Closed);
+		CHECK(fixture.preparer->state() == YouTubeDestinationPreparerState::Closed);
+		CHECK(!fixture.preparer->lockHeld());
+	}
+
+	{
+		Fixture fixture;
+		std::vector<Result> results;
+		fixture.vault.seed({kProfileBindingA, "channel-1"}, kOldRefreshToken);
+		bool invalidated = false;
+		fixture.resolverState->onStart = [&] {
+			invalidated = fixture.preparer->invalidateContext();
+		};
+		CHECK(fixture.preparer->start(requestFor({10, 14}), recorder(results)) ==
+		      YouTubeDestinationPrepareStartStatus::Started);
+		CHECK(fixture.refreshState->lastAttempt.has_value());
+		if (fixture.refreshState->lastAttempt.has_value()) {
+			fixture.refreshState->handlers.front()(refreshSuccess(*fixture.refreshState->lastAttempt));
+		}
+		CHECK(invalidated);
+		CHECK(fixture.preparer->state() == YouTubeDestinationPreparerState::Idle);
+		CHECK(!fixture.preparer->lockHeld());
+		processQueuedEvents();
+		CHECK(results.empty());
+	}
+
+	{
+		Fixture fixture;
+		std::vector<Result> results;
+		fixture.vault.seed({kProfileBindingA, "channel-1"}, kOldRefreshToken);
+		bool shutDown = false;
+		fixture.resolverState->onStart = [&] {
+			shutDown = fixture.preparer->shutdown();
+		};
+		CHECK(fixture.preparer->start(requestFor({10, 15}), recorder(results)) ==
+		      YouTubeDestinationPrepareStartStatus::Started);
+		CHECK(fixture.refreshState->lastAttempt.has_value());
+		if (fixture.refreshState->lastAttempt.has_value()) {
+			fixture.refreshState->handlers.front()(refreshSuccess(*fixture.refreshState->lastAttempt));
+		}
+		CHECK(shutDown);
+		CHECK(fixture.preparer->state() == YouTubeDestinationPreparerState::Closed);
+		CHECK(!fixture.preparer->lockHeld());
+		processQueuedEvents();
+		CHECK(results.empty());
+	}
+}
+
 void testStaleAttemptCannotReplaceNewAttempt()
 {
 	Fixture fixture;
@@ -1389,6 +1533,7 @@ int main(int argc, char **argv)
 	testCancelAtResolverAndLateCallback();
 	testCancelDuringQueuedDeliveryProducesOneCancelledCompletion();
 	testLifecycleMutationRejectsSynchronousPortReentry();
+	testSynchronousReadAndPortReentryDoesNotReportStarted();
 	testStaleAttemptCannotReplaceNewAttempt();
 	testInvalidRequestAndBusyState();
 	testInvalidationSuppressesOldContext();
