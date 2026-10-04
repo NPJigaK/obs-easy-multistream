@@ -54,9 +54,10 @@ the operation re-reads durable state where required and no recovery terminology 
 releases its owner-thread lock after credential/profile rollback or the final commit. The preparer releases its lock
 after queued completion state is finalized and immediately before invoking an external completion handler. If native
 release fails, neither component reports a usable result. When ownership remains, it retains the lock fail-closed and
-retries unfinished lock or port cleanup during shutdown. A production lifecycle owner now links the provider and restore
-coordinator into the OBS plugin solely to restore saved local state during module load and `PROFILE_CHANGED`, invalidate
-it during `PROFILE_CHANGING`, and close it during `EXIT`. The interactive entry points are not exposed. The owner uses an
+retries unfinished lock or port cleanup during shutdown. A production lifecycle owner now links the provider and profile
+operation coordinator into the OBS plugin to restore saved local state during module load and `PROFILE_CHANGED`, invalidate
+it during `PROFILE_CHANGING`, close it during `EXIT`, and provide a tested local-disconnect seam for the future account UI.
+No current dock or plugin-main action invokes that seam. The interactive connection entry points are not exposed. The owner uses an
 empty client ID and browser opener, so it opens no listener or browser, makes no OAuth/API request, and cannot start an
 output. The dormant provider does construct its Qt network adapters; this adds the Qt Network runtime dependency but no
 socket bind, HTTP request, or background service. The current dock and manual RTMPS workflow remain unchanged. The
@@ -66,10 +67,10 @@ so clearing or importing a profile never silently changes it to the manual-key p
 a saved selection by checking only the scoped Credential Manager entry: present becomes locally configured but not
 Google-validated, missing becomes reauthorization-required, and credential-service errors remain unavailable. A profile
 with no selection does not inspect or delete any account credential. Restoration advances the account generation
-and starts no browser, listener, HTTP request, discovery operation, or output. Until the complete account provider is
-integrated, account mode fails closed and cannot consume the manual URL/key destination. Production client
-configuration, browser opening, refresh/revoke, runtime integration, and user-facing account controls remain
-release-gated.
+and starts no browser, listener, HTTP request, discovery operation, or output. The provider lifecycle integration is
+active, but account mode remains fail-closed until destination preparation and output handoff are integrated; it cannot
+consume the manual URL/key destination. Production client configuration, browser opening, refresh/remote revoke,
+interactive output integration, and user-facing account controls remain release-gated.
 
 The manual YouTube stream key remains intentionally shared by all OBS profiles, but the Google refresh token uses a
 separate typed store scoped to the exact active OBS profile path and selected YouTube channel. The profile path is
@@ -84,12 +85,12 @@ profile cannot read or write another profile's credential. Before any output can
 and resolve the exact saved channel and stream. If profile selection is persisted before a new token is written and that
 write fails, the selection is rolled back. The profile-operation lock derives a non-secret `Local\\` mutex name from the
 same validated binding, rejects both other-process ownership and same-process recursive acquisition without waiting, and
-reports recovered ownership only as an internal result. Future disconnect and revoke operations must use this same
-profile boundary for their selection and credential changes. Interactive authorization and destination preparation
-remain detached from the production dock and runtime even though the restore-only owner is now part of the plugin.
+reports recovered ownership only as an internal result. Local disconnect already uses this same boundary; future remote
+revoke must use it as well. Interactive authorization and destination preparation
+remain detached from the production dock and runtime even though the account lifecycle owner is now part of the plugin.
 
-The `YouTubeAccountProfileRestoreCoordinator` supplies the outer restore transaction used by the production lifecycle
-owner. On its owner thread it first obtains only a value-copy candidate binding, then
+The `YouTubeAccountProfileRestoreCoordinator` supplies the outer profile transaction used by the production lifecycle
+owner for both restore and local disconnect. On its owner thread it first obtains only a value-copy candidate binding, then
 performs a non-blocking acquisition of the exact profile-operation lock. While that lock is held it re-reads the active
 profile path and config, verifies that the binding is unchanged, and asks the provider to perform credential-status
 inspection and saved-state restoration through the already-held lock. It verifies the active binding again after that
@@ -101,9 +102,13 @@ provider state unchanged; an active-profile race, invalid or future settings, an
 Owner-thread destruction makes the provider terminal even if the last native cleanup retry fails; any retained native
 ownership remains fail-closed until process teardown. Recovered ownership is accepted only for the same locked reread
 and remains internal metadata. It passes only copied non-secret values across
-the transaction boundary; refresh tokens and stream keys stay in their credential/output boundaries. The owner binds a
-future selection commit to the generation and profile binding from the last accepted restore, but exposes no interactive
-connection operation yet. Future disconnect and revoke operations must use the same profile-operation boundary.
+the transaction boundary; refresh tokens and stream keys stay in their credential/output boundaries. Local disconnect
+deletes the exact scoped credential before clearing the non-secret selection, preserves account mode, and never contacts
+Google. A credential-delete failure changes neither durable store and remains retryable. If selection persistence fails
+after deletion, the credential is not reconstructed and the provider becomes unavailable until restoration. Native lock
+release failure still overrides success and remains fail-closed. The owner rebinds successful results to the resulting
+profile generation, but exposes no interactive connection operation yet. Remote revoke must use the same
+profile-operation boundary.
 
 The profile path/config readers are a frontend-thread contract: both must observe the same stable active profile and
 must not process events. OBS emits `PROFILE_CHANGING` before activation, swaps `activeConfiguration` and the current

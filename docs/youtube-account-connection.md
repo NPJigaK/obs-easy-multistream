@@ -106,9 +106,10 @@ Profile settings may contain only non-secret selection data such as the connecti
 The profile codec now implements this non-secret boundary. Older manual profiles load as manual mode; account mode
 accepts either a complete, strictly validated channel/stream selection or an explicit setup-required state with no
 selection, and does not require a saved ingestion URL. Saving the latter removes stale selection fields without changing
-the mode or touching any refresh-token credential. The current runtime deliberately treats account mode as
-unavailable until the headless provider is wired through the plugin lifecycle and output preparation, so a partially
-implemented or imported account profile cannot silently use the manual URL/key instead.
+the mode or touching any refresh-token credential. Although the headless provider is now wired through the plugin
+lifecycle for restore and local disconnect, the current output path deliberately treats account mode as unavailable
+until destination preparation and output handoff are integrated. A partially implemented or imported account profile
+therefore cannot silently use the manual URL/key instead.
 
 Windows Credential Manager uses separate boundaries for:
 
@@ -124,7 +125,7 @@ Credential Manager metadata, logs, or UI. Each profile owns one current selected
 profile replaces that record rather than retaining a collection of channel credentials. The old fixed refresh-token
 target is never read, migrated, or deleted.
 
-Access tokens, authorization codes, PKCE values, token endpoint responses, and resolved stream keys remain in wipeable process buffers for the shortest practical lifetime. None is displayed or logged. The detached destination preparer reads the refresh token only for a current preparation, and writes a provider-rotated refresh token to the immutable scope before resolving the selected stream. The current OBS plugin does not instantiate that preparer. A future disconnect must remove the selected profile's account selection and its scoped local credential; any remote revoke must be an explicit account action. A revoked or `invalid_grant` token becomes **Reconnect YouTube**, not an automatic fallback.
+Access tokens, authorization codes, PKCE values, token endpoint responses, and resolved stream keys remain in wipeable process buffers for the shortest practical lifetime. None is displayed or logged. The detached destination preparer reads the refresh token only for a current preparation, and writes a provider-rotated refresh token to the immutable scope before resolving the selected stream. The current OBS plugin does not instantiate that preparer. The production account owner now has an internal local-disconnect transaction that removes the selected profile's scoped credential and then clears its non-secret selection while preserving account mode. No current UI invokes it. Remote Google revoke remains a separate future explicit account action. A revoked or `invalid_grant` token becomes **Reconnect YouTube**, not an automatic fallback.
 
 As with the existing stream key, this design does not claim resistance to malware running as the same Windows user, live process inspection, or copies made internally by Qt, Windows, or libobs.
 
@@ -154,7 +155,7 @@ owner-thread profile lock after rollback/finalization and immediately before the
 If release fails, it destroys any successful destination and reports a service failure. When mutex ownership remains, it
 retains the profile claim until owner-thread shutdown retries the unfinished cleanup. Provider shutdown likewise retries
 only the coordinator, ports, or lock steps that did not previously finish.
-Future disconnect and revoke operations must use the same profile-scoped boundary for selection and credential changes.
+Local disconnect uses the same profile-scoped boundary for selection and credential changes. Future remote revoke must use it as well.
 
 The provider:
 
@@ -236,15 +237,16 @@ lease, and persists the non-secret selection before the scoped refresh token, re
 token write fails. It can also restore a persisted selection from credential status alone: present is
 only locally configured and remains unverified against Google, while missing and unavailable remain distinct. Every
 restore creates a new generation, and a profile without a selection remains setup-required without touching any
-credential. The production plugin now owns the account provider and restore coordinator behind a lifecycle-only wrapper:
-it restores during module/profile load, invalidates before a profile switch, and shuts down during exit. A future
+credential. The production plugin now owns the account provider and profile-operation coordinator behind a lifecycle-only
+wrapper: it restores during module/profile load, invalidates before a profile switch, shuts down during exit, and exposes
+an internal local-disconnect transaction that is not connected to the dock or plugin main. A future
 selection commit must match both the generation and profile binding from the last accepted restore, and it cannot
 silently change a manual profile into account mode. The provider's network adapters are constructed, so the module now
 depends on Qt Network, but the wrapper supplies no client ID or browser opener and exposes no connection-start method.
 It therefore opens no browser or listener, emits no OAuth/API request, does not copy the refresh token out of the
 Credential Manager status buffer, and cannot change the dock or start an output. The destination preparer remains
 detached. Production client configuration, browser
-opening, refresh/revoke, runtime handoff, and all later items stay gated, so a partial connection path cannot appear in
+opening, refresh/remote revoke, interactive output handoff, and all later items stay gated, so a partial connection path cannot appear in
 the user interface.
 
 The manual stream-key credential remains shared across OBS profiles. The refresh-token credential is scoped to the SHA-256
@@ -252,9 +254,11 @@ binding of the exact active profile path and to the selected channel's SHA-256 `
 never labels credential presence as a verified connection. A profile duplicate, import, rename, or portable path move has
 a different binding and must reconnect; no automatic transfer or cleanup is attempted, and the old fixed target is never
 read, migrated, or deleted. Before this path is connected to runtime or UI, these profile lifecycle rules and exact
-scope tests must remain covered. The future disconnect adapter must also preserve the provider's single-owner
-serialization rule: the Windows API cannot conditionally delete a credential by its channel metadata, so two OBS
-processes must not mutate the same profile binding concurrently. In all cases, the start-time destination preparer must
+scope tests must remain covered. The local-disconnect transaction preserves the provider's single-owner serialization
+rule: the Windows API cannot conditionally delete a credential by its channel metadata, so two OBS processes must not
+mutate the same profile binding concurrently. It deletes the exact scoped credential before clearing the non-secret
+selection. A delete failure leaves both stores unchanged and retryable; a profile-save failure after deletion never
+recreates the token and leaves the provider unavailable. In all cases, the start-time destination preparer must
 successfully refresh and resolve the exact saved channel and stream before an output can be created.
 
 The repository now contains a detached Windows operation-lock foundation for that rule. It derives a `Local\\` named
@@ -264,12 +268,12 @@ recovery result so durable state can be re-read before continuing; the recovery 
 process-wide claim registry prevents Windows' same-thread recursive mutex behavior from admitting two local operations.
 The lock is owner-thread-bound, non-copyable, non-movable, and releases both the native handle and the local claim on every terminal
 path. Both account classes require the lock provider and hold it across their complete asynchronous transactions,
-including rollback; the preparer releases it before invoking an external completion handler. Only the saved-state
-restore owner and its lock are active in production. Interactive paths remain unreachable from the OBS plugin and are
-not exposed in the dock.
+including rollback; the preparer releases it before invoking an external completion handler. The saved-state restore and
+local-disconnect owner and its lock are active in production. Interactive paths remain unreachable from the OBS plugin;
+local disconnect is not exposed in the dock.
 
-The `YouTubeAccountProfileRestoreCoordinator` provides that outer restore transaction and is called by the production
-lifecycle owner. It first reads a
+The `YouTubeAccountProfileRestoreCoordinator` provides the outer profile transaction for both saved-state restoration
+and local disconnect and is called by the production lifecycle owner. It first reads a
 candidate profile binding without reading the profile config, acquires the matching lock without waiting, re-reads the
 active profile path and config while the lock is held, and rejects the transaction if the binding changed. It then calls
 the provider's held-lock restore path, so credential status and provider state are read or changed inside the same
@@ -280,7 +284,8 @@ synchronous callback cannot release that lock early: reentrant invalidation and 
 provider transition completes, while a nested restore returns busy. Busy or unavailable acquisition leaves
 context/provider state untouched; a profile race, invalid or future settings, and native release failure fail closed. A
 recovered mutex is treated as held for the reread but is retained only as internal metadata. The coordinator exposes
-only copied non-secret selection/provider values. Active-profile restore/invalidation/shutdown is now wired, while
-interactive connection, account UI, disconnect, and revoke remain release-gated and must use the same profile lock.
+only copied non-secret selection/provider values. Active-profile restore/invalidation/shutdown and the internal local-
+disconnect seam are now wired. Interactive connection, account UI, and remote revoke remain release-gated and must use
+the same profile lock. No current user action calls local disconnect.
 
 No account UI is added merely to advertise unfinished functionality. A build without a complete configured provider continues to show only the working manual setup.

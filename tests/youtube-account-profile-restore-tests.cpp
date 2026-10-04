@@ -109,11 +109,6 @@ public:
 		++readCount;
 		return {};
 	}
-	CredentialResult erase(const YouTubeAccountCredentialScope &) noexcept override
-	{
-		++eraseCount;
-		return {};
-	}
 	CredentialStatus status(const YouTubeAccountCredentialScope &scope) noexcept override
 	{
 		++statusCount;
@@ -124,8 +119,20 @@ public:
 		return statusValue;
 	}
 
+	CredentialResult erase(const YouTubeAccountCredentialScope &scope) noexcept override
+	{
+		++eraseCount;
+		lastScope = scope;
+		if (onErase) {
+			onErase();
+		}
+		return eraseValue;
+	}
+
 	CredentialStatus statusValue{CredentialState::Missing, {CredentialError::NotFound, 0}};
+	CredentialResult eraseValue;
 	std::function<void()> onStatus;
+	std::function<void()> onErase;
 	int writeCount = 0;
 	int readCount = 0;
 	int eraseCount = 0;
@@ -689,6 +696,204 @@ void testClosedProviderIsSideEffectFree()
 	CHECK(fixture.store.statusCount == 0);
 }
 
+void testLocalDisconnectClearsSelectionAndCredential()
+{
+	Fixture fixture;
+	fixture.account(selectionA());
+	fixture.store.statusValue = {CredentialState::Present, {}};
+	CHECK(fixture.coordinator.restore().status == YouTubeAccountProfileRestoreStatus::Restored);
+	const int releaseCountBefore = fixture.lockApi.releaseCount;
+	const int closeCountBefore = fixture.lockApi.closeCount;
+
+	const auto result = fixture.coordinator.disconnectLocal();
+	CHECK(result.status == YouTubeAccountProfileDisconnectStatus::Disconnected);
+	CHECK(result.providerStatus == YouTubeAccountProviderDisconnectStatus::Disconnected);
+	CHECK(fixture.store.eraseCount == 1);
+	CHECK(fixture.store.lastScope.has_value());
+	CHECK(result.profile.status == YouTubeAccountProfileContext::LoadStatus::SetupRequired);
+	CHECK(result.profile.snapshot.connectionMode == YouTubeConnectionMode::Account);
+	CHECK(!result.profile.snapshot.selection.has_value());
+	CHECK(!fixture.context.snapshot().selection.has_value());
+	CHECK(!fixture.coordinator.lockHeld());
+	CHECK(fixture.lockApi.releaseCount == releaseCountBefore + 1);
+	CHECK(fixture.lockApi.closeCount == closeCountBefore + 1);
+}
+
+void testLocalDisconnectWithoutSelectionDoesNotEraseCredential()
+{
+	Fixture fixture;
+	fixture.account(std::nullopt);
+	fixture.store.statusValue = {CredentialState::Present, {}};
+	CHECK(fixture.coordinator.restore().status == YouTubeAccountProfileRestoreStatus::SetupRequired);
+
+	const auto result = fixture.coordinator.disconnectLocal();
+	CHECK(result.status == YouTubeAccountProfileDisconnectStatus::AlreadyDisconnected);
+	CHECK(result.providerStatus == YouTubeAccountProviderDisconnectStatus::AlreadyDisconnected);
+	CHECK(fixture.store.eraseCount == 0);
+	CHECK(!result.profile.snapshot.selection.has_value());
+	CHECK(result.profile.snapshot.connectionMode == YouTubeConnectionMode::Account);
+	CHECK(!fixture.coordinator.lockHeld());
+}
+
+void testLocalDisconnectManualProfileDoesNotEraseCredential()
+{
+	Fixture fixture;
+	setSettings(fixture.config.get(), YouTubeConnectionMode::Manual, std::nullopt);
+
+	const auto result = fixture.coordinator.disconnectLocal();
+	CHECK(result.status == YouTubeAccountProfileDisconnectStatus::NotAccountMode);
+	CHECK(fixture.store.eraseCount == 0);
+	CHECK(result.profile.snapshot.connectionMode == YouTubeConnectionMode::Manual);
+	CHECK(!result.profile.snapshot.selection.has_value());
+	CHECK(!fixture.coordinator.lockHeld());
+}
+
+void testLocalDisconnectDoesNotEraseOnBusyLock()
+{
+	Fixture fixture;
+	fixture.account(selectionA());
+	fixture.store.statusValue = {CredentialState::Present, {}};
+	CHECK(fixture.coordinator.restore().status == YouTubeAccountProfileRestoreStatus::Restored);
+	const auto before = fixture.context.snapshot();
+	fixture.lockApi.nextWaitResult = WAIT_TIMEOUT;
+
+	const auto result = fixture.coordinator.disconnectLocal();
+	CHECK(result.status == YouTubeAccountProfileDisconnectStatus::Busy);
+	CHECK(result.providerStatus == YouTubeAccountProviderDisconnectStatus::Busy);
+	CHECK(fixture.store.eraseCount == 0);
+	CHECK(fixture.context.snapshot().generation == before.generation);
+	CHECK(fixture.context.snapshot().profileBinding == before.profileBinding);
+	CHECK(!fixture.coordinator.lockHeld());
+}
+
+void testLocalDisconnectRejectsProfileRaceBeforeCredentialErase()
+{
+	Fixture fixture;
+	fixture.account(selectionA());
+	fixture.store.statusValue = {CredentialState::Present, {}};
+	CHECK(fixture.coordinator.restore().status == YouTubeAccountProfileRestoreStatus::Restored);
+	fixture.lockApi.onWait = [&fixture]() {
+		fixture.currentPath = std::string(kProfileB);
+		fixture.account(selectionB());
+	};
+
+	const auto result = fixture.coordinator.disconnectLocal();
+	CHECK(result.status == YouTubeAccountProfileDisconnectStatus::ProfileChanged);
+	CHECK(result.providerStatus == YouTubeAccountProviderDisconnectStatus::OperationFailed);
+	CHECK(fixture.store.eraseCount == 0);
+	CHECK(result.profile.snapshot.profileBinding.empty());
+	CHECK(!result.profile.snapshot.selection.has_value());
+	CHECK(fixture.context.snapshot().profileBinding.empty());
+	CHECK(fixture.provider.snapshot().stage == YouTubeAccountProviderStage::Idle);
+	CHECK(!fixture.coordinator.lockHeld());
+}
+
+void testLocalDisconnectReleaseFailureFailsClosedAndRetries()
+{
+	Fixture fixture;
+	fixture.account(selectionA());
+	fixture.store.statusValue = {CredentialState::Present, {}};
+	CHECK(fixture.coordinator.restore().status == YouTubeAccountProfileRestoreStatus::Restored);
+	fixture.lockApi.releaseResult = false;
+	const int releaseCountBefore = fixture.lockApi.releaseCount;
+
+	const auto result = fixture.coordinator.disconnectLocal();
+	CHECK(result.status == YouTubeAccountProfileDisconnectStatus::OperationFailed);
+	CHECK(result.providerStatus == YouTubeAccountProviderDisconnectStatus::OperationFailed);
+	CHECK(fixture.store.eraseCount == 1);
+	CHECK(fixture.coordinator.lockHeld());
+	CHECK(fixture.provider.snapshot().stage == YouTubeAccountProviderStage::Unavailable);
+	CHECK(result.profile.snapshot.profileBinding.empty());
+	CHECK(!result.profile.snapshot.selection.has_value());
+
+	fixture.lockApi.releaseResult = true;
+	CHECK(fixture.coordinator.shutdown());
+	CHECK(!fixture.coordinator.lockHeld());
+	CHECK(fixture.lockApi.releaseCount == releaseCountBefore + 2);
+}
+
+void testLocalDisconnectCredentialFailurePreservesStateAndCanRetry()
+{
+	Fixture fixture;
+	fixture.account(selectionA());
+	fixture.store.statusValue = {CredentialState::Present, {}};
+	CHECK(fixture.coordinator.restore().status == YouTubeAccountProfileRestoreStatus::Restored);
+	const auto before = fixture.context.snapshot();
+	const auto providerBefore = fixture.provider.snapshot();
+	fixture.store.eraseValue = {CredentialError::Unavailable, ERROR_ACCESS_DENIED};
+
+	const auto failed = fixture.coordinator.disconnectLocal();
+	CHECK(failed.status == YouTubeAccountProfileDisconnectStatus::CredentialUnavailable);
+	CHECK(failed.providerStatus == YouTubeAccountProviderDisconnectStatus::CredentialUnavailable);
+	CHECK(failed.profile.snapshot.generation > before.generation);
+	CHECK(failed.profile.snapshot.profileBinding == before.profileBinding);
+	CHECK(failed.profile.snapshot.selection.has_value());
+	CHECK(fixture.context.snapshot().selection.has_value());
+	CHECK(fixture.provider.snapshot().stage == providerBefore.stage);
+	CHECK(fixture.provider.snapshot().account.state == providerBefore.account.state);
+	CHECK(!fixture.coordinator.lockHeld());
+
+	fixture.store.eraseValue = {};
+	const auto retried = fixture.coordinator.disconnectLocal();
+	CHECK(retried.status == YouTubeAccountProfileDisconnectStatus::Disconnected);
+	CHECK(!retried.profile.snapshot.selection.has_value());
+}
+
+void testReentrantLocalDisconnectInvalidationIsDeferred()
+{
+	Fixture fixture;
+	fixture.account(selectionA());
+	fixture.store.statusValue = {CredentialState::Present, {}};
+	CHECK(fixture.coordinator.restore().status == YouTubeAccountProfileRestoreStatus::Restored);
+	fixture.store.onErase = [&]() {
+		CHECK(!fixture.coordinator.invalidate());
+		CHECK(fixture.coordinator.lockHeld());
+	};
+
+	const auto result = fixture.coordinator.disconnectLocal();
+	CHECK(result.status == YouTubeAccountProfileDisconnectStatus::ProfileChanged);
+	CHECK(result.providerStatus == YouTubeAccountProviderDisconnectStatus::OperationFailed);
+	CHECK(fixture.store.eraseCount == 1);
+	CHECK(result.profile.snapshot.profileBinding.empty());
+	CHECK(!result.profile.snapshot.selection.has_value());
+	CHECK(fixture.provider.snapshot().stage == YouTubeAccountProviderStage::Idle);
+	CHECK(!fixture.coordinator.lockHeld());
+}
+
+void testLocalDisconnectWrongThreadAndClosedAreSideEffectFree()
+{
+	Fixture fixture;
+	fixture.account(selectionA());
+	YouTubeAccountProfileDisconnectResult wrongThread;
+	std::thread worker([&]() { wrongThread = fixture.coordinator.disconnectLocal(); });
+	worker.join();
+	CHECK(wrongThread.status == YouTubeAccountProfileDisconnectStatus::WrongThread);
+	CHECK(wrongThread.providerStatus == YouTubeAccountProviderDisconnectStatus::WrongThread);
+	CHECK(fixture.store.eraseCount == 0);
+
+	CHECK(fixture.coordinator.shutdown());
+	const auto closed = fixture.coordinator.disconnectLocal();
+	CHECK(closed.status == YouTubeAccountProfileDisconnectStatus::Closed);
+	CHECK(closed.providerStatus == YouTubeAccountProviderDisconnectStatus::Closed);
+	CHECK(fixture.store.eraseCount == 0);
+}
+
+void testLocalDisconnectPreservesPreciseProfileValidationFailures()
+{
+	Fixture fixture;
+	fixture.account(selectionA());
+	config_set_uint(fixture.config.get(), "EasyMultistream", "SchemaVersion", 0);
+	const auto invalid = fixture.coordinator.disconnectLocal();
+	CHECK(invalid.status == YouTubeAccountProfileDisconnectStatus::InvalidSettings);
+	CHECK(fixture.store.eraseCount == 0);
+
+	fixture.account(selectionA());
+	config_set_uint(fixture.config.get(), "EasyMultistream", "SchemaVersion", kSettingsSchemaVersion + 1);
+	const auto future = fixture.coordinator.disconnectLocal();
+	CHECK(future.status == YouTubeAccountProfileDisconnectStatus::UnsupportedFutureSettings);
+	CHECK(fixture.store.eraseCount == 0);
+}
+
 } // namespace
 
 int main(int argc, char **argv)
@@ -712,6 +917,16 @@ int main(int argc, char **argv)
 	testWrongThreadDoesNotReadProfile();
 	testShutdownIsTerminalAndDoesNotReadProfileAgain();
 	testClosedProviderIsSideEffectFree();
+	testLocalDisconnectClearsSelectionAndCredential();
+	testLocalDisconnectWithoutSelectionDoesNotEraseCredential();
+	testLocalDisconnectManualProfileDoesNotEraseCredential();
+	testLocalDisconnectDoesNotEraseOnBusyLock();
+	testLocalDisconnectRejectsProfileRaceBeforeCredentialErase();
+	testLocalDisconnectReleaseFailureFailsClosedAndRetries();
+	testLocalDisconnectCredentialFailurePreservesStateAndCanRetry();
+	testReentrantLocalDisconnectInvalidationIsDeferred();
+	testLocalDisconnectWrongThreadAndClosedAreSideEffectFree();
+	testLocalDisconnectPreservesPreciseProfileValidationFailures();
 	if (failures != 0) {
 		std::cerr << failures << " youtube-account-profile-restore test(s) failed\n";
 		return 1;

@@ -199,6 +199,12 @@ bool validStream(const YouTubeReusableStream &stream, std::string_view channelId
 	       isValidYouTubeAccountIdentifier(stream.channelId) && isValidYouTubeAccountLabel(stream.label);
 }
 
+bool sameSelection(const YouTubeAccountSelection &left, const YouTubeAccountSelection &right) noexcept
+{
+	return left.channelId == right.channelId && left.channelLabel == right.channelLabel &&
+	       left.streamId == right.streamId && left.streamLabel == right.streamLabel;
+}
+
 YouTubeAccountProviderStage providerStageForRetainedConnection(YouTubeAccountState state,
 							       YouTubeAccountProviderStage fallback) noexcept
 {
@@ -526,6 +532,126 @@ public:
 		}
 		externalOperationLockBorrowed_ = true;
 		return restoreSavedStateWhileOperationLockHeld(std::move(profileBinding), std::move(selection));
+	}
+
+	YouTubeAccountProviderDisconnectStatus disconnectSavedStateUnderHeldOperationLock(
+		std::string profileBinding, std::optional<YouTubeAccountSelection> selection,
+		const YouTubeAccountProfileOperationLock &heldLock,
+		YouTubeAccountSelectionCommitter selectionCommitter) noexcept
+	{
+		// The profile restore coordinator owns the lock and remains responsible for
+		// releasing it.  Validate every input before setting the borrowed-lock
+		// handshake or touching the credential store so a rejected request has no
+		// provider-visible side effect.
+		if (!onOwnerThread()) {
+			return YouTubeAccountProviderDisconnectStatus::WrongThread;
+		}
+		if (stage_ == YouTubeAccountProviderStage::Closed) {
+			return YouTubeAccountProviderDisconnectStatus::Closed;
+		}
+		if (externalOperationLockBorrowed_ || commitInProgress_ || lifecycleMutationInProgress_ ||
+		    activeLease().has_value() || operationLock_.cleanupPending()) {
+			return YouTubeAccountProviderDisconnectStatus::Busy;
+		}
+		if (!isValidYouTubeAccountProfileBinding(profileBinding) || !profileBindingValid_ ||
+		    profileBinding_ != profileBinding) {
+			return YouTubeAccountProviderDisconnectStatus::InvalidProfileBinding;
+		}
+		if (!heldLock.acquiredFor(profileBinding)) {
+			return YouTubeAccountProviderDisconnectStatus::OperationFailed;
+		}
+
+		if (selection.has_value()) {
+			if (validateYouTubeAccountSelection(*selection) != YouTubeAccountSelectionValidationError::None ||
+			    !savedSelection_.has_value() || !sameSelection(*savedSelection_, *selection)) {
+				return YouTubeAccountProviderDisconnectStatus::InvalidSelection;
+			}
+			// Do not erase a credential until the transaction-scoped profile
+			// committer is known to be callable. The constructor committer belongs
+			// to the last restore generation and is deliberately not used here.
+			if (!selectionCommitter) {
+				return YouTubeAccountProviderDisconnectStatus::InvalidSelectionCommitter;
+			}
+		}
+
+		externalOperationLockBorrowed_ = true;
+		lifecycleMutationInProgress_ = true;
+		operationEpoch_ = nextNonZero(operationEpoch_);
+
+		if (!selection.has_value()) {
+			// There is no safe credential scope without a selected channel.  This is
+			// a valid setup-required state, and must never probe or erase another
+			// channel's credential target.
+			clearEphemeral();
+			savedSelection_.reset();
+			try {
+				coordinator_.invalidateContext();
+				setStage(YouTubeAccountProviderStage::Idle);
+				touch();
+				lifecycleMutationInProgress_ = false;
+				return YouTubeAccountProviderDisconnectStatus::AlreadyDisconnected;
+			} catch (...) {
+				setStage(YouTubeAccountProviderStage::Unavailable);
+				lifecycleMutationInProgress_ = false;
+				return YouTubeAccountProviderDisconnectStatus::OperationFailed;
+			}
+		}
+
+		CredentialResult eraseResult;
+		try {
+			eraseResult = refreshTokenStore_.erase(credentialScope(*selection));
+		} catch (...) {
+			eraseResult.error = CredentialError::OperatingSystemError;
+		}
+		if (!eraseResult.succeeded() && eraseResult.error != CredentialError::NotFound) {
+			// The durable selection and the in-memory usable account remain
+			// unchanged. The outer transaction will release the borrowed lock and
+			// call externalOperationLockReleased() after this return.
+			lifecycleMutationInProgress_ = false;
+			return YouTubeAccountProviderDisconnectStatus::CredentialUnavailable;
+		}
+
+		bool selectionCleared = false;
+		try {
+			selectionCleared = selectionCommitter(std::nullopt);
+		} catch (...) {
+			selectionCleared = false;
+		}
+		if (!selectionCleared) {
+			// The token has already been erased and must never be recreated from an
+			// old in-memory value. Keep the non-secret selection visible as an
+			// unavailable account until the profile transaction can be retried.
+			operationEpoch_ = nextNonZero(operationEpoch_);
+			clearEphemeral();
+			savedSelection_ = *selection;
+			try {
+				coordinator_.restoreSavedConnection(*selection,
+								    YouTubeAccountSavedCredentialState::Unavailable);
+			} catch (...) {
+				try {
+					coordinator_.invalidateContext();
+				} catch (...) {
+				}
+			}
+			setStage(YouTubeAccountProviderStage::Unavailable);
+			touch();
+			lifecycleMutationInProgress_ = false;
+			return YouTubeAccountProviderDisconnectStatus::ProfileSaveFailed;
+		}
+
+		clearEphemeral();
+		savedSelection_.reset();
+		try {
+			coordinator_.invalidateContext();
+			setStage(YouTubeAccountProviderStage::Idle);
+			touch();
+			lifecycleMutationInProgress_ = false;
+			return YouTubeAccountProviderDisconnectStatus::Disconnected;
+		} catch (...) {
+			setStage(YouTubeAccountProviderStage::Unavailable);
+			lifecycleMutationInProgress_ = false;
+			return YouTubeAccountProviderDisconnectStatus::OperationFailed;
+		}
 	}
 
 	bool cancel(YouTubeAccountLease lease) noexcept
@@ -1298,6 +1424,15 @@ YouTubeAccountProviderRestoreStatus YouTubeAccountProvider::restoreSavedStateUnd
 	const YouTubeAccountProfileOperationLock &heldLock) noexcept
 {
 	return impl_->restoreSavedStateUnderHeldOperationLock(std::move(profileBinding), std::move(selection), heldLock);
+}
+
+YouTubeAccountProviderDisconnectStatus YouTubeAccountProvider::disconnectSavedStateUnderHeldOperationLock(
+	std::string profileBinding, std::optional<YouTubeAccountSelection> selection,
+	const YouTubeAccountProfileOperationLock &heldLock,
+	YouTubeAccountSelectionCommitter selectionCommitter) noexcept
+{
+	return impl_->disconnectSavedStateUnderHeldOperationLock(std::move(profileBinding), std::move(selection),
+									 heldLock, std::move(selectionCommitter));
 }
 
 void YouTubeAccountProvider::externalOperationLockReleased() noexcept
