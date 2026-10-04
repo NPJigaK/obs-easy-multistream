@@ -10,6 +10,23 @@
 
 namespace easy_multistream {
 
+namespace {
+
+bool sameSelection(const std::optional<YouTubeAccountSelection> &left,
+		   const std::optional<YouTubeAccountSelection> &right) noexcept
+{
+	if (left.has_value() != right.has_value()) {
+		return false;
+	}
+	if (!left.has_value()) {
+		return true;
+	}
+	return left->channelId == right->channelId && left->channelLabel == right->channelLabel &&
+	       left->streamId == right->streamId && left->streamLabel == right->streamLabel;
+}
+
+} // namespace
+
 YouTubeAccountProfileContext::YouTubeAccountProfileContext(ProfilePathReader profilePathReader,
 							   ConfigReader configReader)
 	: profilePathReader_(std::move(profilePathReader)),
@@ -138,6 +155,75 @@ void YouTubeAccountProfileContext::invalidate() noexcept
 YouTubeAccountProfileContext::Snapshot YouTubeAccountProfileContext::snapshot() const
 {
 	return snapshot_;
+}
+
+YouTubeAccountProfileContext::ActiveAccountStatus
+YouTubeAccountProfileContext::checkActiveAccount(std::uint64_t expectedGeneration,
+						 std::string_view expectedProfileBinding) const noexcept
+{
+	if (expectedGeneration == 0 || expectedGeneration != snapshot_.generation || expectedProfileBinding.empty() ||
+	    expectedProfileBinding != snapshot_.profileBinding ||
+	    !isValidYouTubeAccountProfileBinding(expectedProfileBinding)) {
+		return ActiveAccountStatus::Stale;
+	}
+	if (snapshot_.connectionMode != YouTubeConnectionMode::Account) {
+		return ActiveAccountStatus::NotAccountMode;
+	}
+
+	try {
+		if (!profilePathReader_ || !configReader_) {
+			return ActiveAccountStatus::Unavailable;
+		}
+		const auto bindingBeforeConfigRead = readProfileBinding();
+		if (!bindingBeforeConfigRead.has_value()) {
+			return ActiveAccountStatus::ProfileUnavailable;
+		}
+		if (*bindingBeforeConfigRead != expectedProfileBinding) {
+			return ActiveAccountStatus::Stale;
+		}
+
+		config_t *config = configReader_();
+		const auto bindingAfterConfigRead = readProfileBinding();
+		if (!bindingAfterConfigRead.has_value()) {
+			return ActiveAccountStatus::ProfileUnavailable;
+		}
+		if (*bindingAfterConfigRead != expectedProfileBinding) {
+			return ActiveAccountStatus::Stale;
+		}
+		if (config == nullptr) {
+			return ActiveAccountStatus::Unavailable;
+		}
+
+		const SettingsLoadResult settings = loadProfileSettings(config);
+		const auto bindingAfterLoad = readProfileBinding();
+		if (!bindingAfterLoad.has_value()) {
+			return ActiveAccountStatus::ProfileUnavailable;
+		}
+		if (*bindingAfterLoad != expectedProfileBinding) {
+			return ActiveAccountStatus::Stale;
+		}
+
+		switch (settings.status) {
+		case SettingsLoadStatus::Loaded:
+		case SettingsLoadStatus::Defaults:
+		case SettingsLoadStatus::SetupRequired:
+			if (settings.settings.youtubeConnectionMode != YouTubeConnectionMode::Account) {
+				return ActiveAccountStatus::NotAccountMode;
+			}
+			return sameSelection(settings.settings.youtubeAccountSelection, snapshot_.selection)
+				       ? ActiveAccountStatus::Current
+				       : ActiveAccountStatus::Stale;
+		case SettingsLoadStatus::InvalidSchema:
+			return ActiveAccountStatus::InvalidSettings;
+		case SettingsLoadStatus::UnsupportedFutureSchema:
+			return ActiveAccountStatus::UnsupportedFutureSettings;
+		case SettingsLoadStatus::Unavailable:
+			return ActiveAccountStatus::Unavailable;
+		}
+	} catch (...) {
+		return ActiveAccountStatus::Unavailable;
+	}
+	return ActiveAccountStatus::Unavailable;
 }
 
 YouTubeAccountProfileContext::CommitResult

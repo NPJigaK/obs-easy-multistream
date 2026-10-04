@@ -57,8 +57,11 @@ release fails, neither component reports a usable result. When ownership remains
 retries unfinished lock or port cleanup during shutdown. A production lifecycle owner now links the provider and profile
 operation coordinator into the OBS plugin to restore saved local state during module load and `PROFILE_CHANGED`, invalidate
 it during `PROFILE_CHANGING`, close it during `EXIT`, and provide a tested local-disconnect seam for the future account UI.
-No current dock or plugin-main action invokes that seam. The interactive connection entry points are not exposed. The owner uses an
-empty client ID and browser opener, so it opens no listener or browser, makes no OAuth/API request, and cannot start an
+No current dock or plugin-main action invokes either internal seam. The owner now exposes a headless connection facade
+that revalidates the active account-mode profile without advancing its generation, maps provider details to stable
+operation results, uses attempt-scoped cancellation, and exposes candidates only through revision-bound handles and
+copied labels rather than raw Google resource IDs. The production owner still uses an empty client ID and browser opener,
+so the facade returns not-configured before it opens a listener or browser, makes an OAuth/API request, or starts an
 output. The dormant provider does construct its Qt network adapters; this adds the Qt Network runtime dependency but no
 socket bind, HTTP request, or background service. The current dock and manual RTMPS workflow remain unchanged. The
 profile codec now distinguishes manual and account modes and can preserve a bounded,
@@ -107,8 +110,9 @@ deletes the exact scoped credential before clearing the non-secret selection, pr
 Google. A credential-delete failure changes neither durable store and remains retryable. If selection persistence fails
 after deletion, the credential is not reconstructed and the provider becomes unavailable until restoration. Native lock
 release failure still overrides success and remains fail-closed. The owner rebinds successful results to the resulting
-profile generation, but exposes no interactive connection operation yet. Remote revoke must use the same
-profile-operation boundary.
+profile generation. Its internal connection facade re-reads the active path and profile settings before every operation
+and invalidates an attempt if the profile, generation, or connection mode no longer matches. No production caller invokes
+that facade. Remote revoke must use the same profile-operation boundary.
 
 The profile path/config readers are a frontend-thread contract: both must observe the same stable active profile and
 must not process events. OBS emits `PROFILE_CHANGING` before activation, swaps `activeConfiguration` and the current

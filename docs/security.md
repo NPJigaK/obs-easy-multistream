@@ -60,8 +60,9 @@ The plugin uses the documented Generic Credential size limit, validates the key 
 The current OBS plugin performs no OAuth, HTTP API, update, telemetry, relay, or inbound-network operation. When YouTube is enabled and OBS confirms that a recognized native Twitch stream is running, the plugin opens one outbound RTMPS connection using OBS's `rtmp_output`. URL validation requires `rtmps://`, port 443 when a port is present, a single application path, and a host under `*.rtmps.youtube.com`; this prevents an imported profile from sending the saved YouTube key to an arbitrary RTMPS host.
 
 The loopback-listener and authorization-session libraries are now linked through the account lifecycle owner, but no
-production call can start them: the owner supplies neither a client ID nor a browser opener and exposes no interactive
-connection method. Construction does not call `listen()`, bind a socket, or launch a browser. Standalone tests exercise
+production call can start them: the owner supplies neither a client ID nor a browser opener, and its uncalled internal
+connection facade rejects that configuration before delegating to the authorization layer. Construction does not call
+`listen()`, bind a socket, or launch a browser. Standalone tests exercise
 the active path: it binds only `127.0.0.1` on an OS-assigned port, sets `SO_EXCLUSIVEADDRUSE` before bind, accepts one
 strictly validated HTTP/1.1 callback, and enforces request-size, connection-count, per-client, and overall authorization
 limits. Wrong-state and malformed requests do not complete an authorization attempt; accepted and rejected browser
@@ -97,8 +98,11 @@ A separate headless account-provider library composes authorization, code exchan
 selection, scoped refresh-token storage, and non-secret selection persistence. It requires the profile-operation lock
 before an interactive transaction and holds that lock through selection/credential persistence and any rollback. A busy
 lock returns without mutating provider state; a recovered lock is internal recovery metadata only. The production plugin
-now owns this provider behind a lifecycle wrapper that performs saved-state restoration and exposes a tested internal
-local-disconnect transaction. It exposes none of the interactive methods or the disconnect action to the dock or runtime.
+now owns this provider behind a lifecycle wrapper that performs saved-state restoration and exposes tested internal
+connection and local-disconnect transactions. Neither action is connected to the dock, plugin main, or streaming runtime.
+The connection snapshot contains copied labels and revision-bound candidate handles, not raw channel/stream IDs or secret
+material. Every operation first performs a non-mutating reread of the active profile and rejects a changed generation,
+binding, or connection mode before any browser or transport action.
 If native mutex release fails, the provider marks the account unavailable instead of exposing a usable connection. The
 destination preparer discards any resolved ingestion secret and reports a service failure before invoking its completion
 handler. If mutex ownership remains, both retain the claim fail-closed and retry incomplete port and lock cleanup on
@@ -150,8 +154,9 @@ release failure fail closed. Owner-thread destruction makes the provider termina
 complete; any retained ownership remains fail-closed until process teardown. Recovered ownership is accepted only
 for the locked reread and is not user-facing. The coordinator carries only copied non-secret profile/provider values;
 refresh tokens and stream keys remain in their existing secure boundaries. The wrapper is called automatically only for
-module/profile lifecycle events; its local-disconnect method is not yet connected to UI. It exposes no browser, network,
-or output start. Future remote revoke must use the same profile-operation boundary.
+module/profile lifecycle events; its connection and local-disconnect methods have no production caller. The empty
+production OAuth configuration makes connection start fail before browser, listener, or network work, and neither
+internal seam can start an output. Future remote revoke must use the same profile-operation boundary.
 
 The YouTube output owns a private RTMP service and output while retaining explicit references to the native H.264 and main AAC encoders. It never starts or stops the native OBS stream. A YouTube error closes only the YouTube output, leaves Twitch running, and exposes a separate retry action after teardown completes.
 
