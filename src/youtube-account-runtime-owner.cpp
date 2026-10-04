@@ -135,6 +135,38 @@ connectionStatusForLostRestore(YouTubeAccountProfileRestoreStatus status) noexce
 	return YouTubeAccountConnectionOperationStatus::OperationFailed;
 }
 
+YouTubeAccountRemoteRevokeStartStatus
+remoteStatusForConnectionPreflight(YouTubeAccountConnectionOperationStatus status) noexcept
+{
+	switch (status) {
+	case YouTubeAccountConnectionOperationStatus::Accepted:
+		return YouTubeAccountRemoteRevokeStartStatus::Started;
+	case YouTubeAccountConnectionOperationStatus::Busy:
+		return YouTubeAccountRemoteRevokeStartStatus::Busy;
+	case YouTubeAccountConnectionOperationStatus::WrongThread:
+		return YouTubeAccountRemoteRevokeStartStatus::WrongThread;
+	case YouTubeAccountConnectionOperationStatus::Closed:
+		return YouTubeAccountRemoteRevokeStartStatus::Closed;
+	case YouTubeAccountConnectionOperationStatus::NotRestored:
+	case YouTubeAccountConnectionOperationStatus::NotConfigured:
+		return YouTubeAccountRemoteRevokeStartStatus::NotRestored;
+	case YouTubeAccountConnectionOperationStatus::NotAccountMode:
+		return YouTubeAccountRemoteRevokeStartStatus::NotAccountMode;
+	case YouTubeAccountConnectionOperationStatus::ProfileUnavailable:
+		return YouTubeAccountRemoteRevokeStartStatus::ProfileUnavailable;
+	case YouTubeAccountConnectionOperationStatus::ProfileChanged:
+		return YouTubeAccountRemoteRevokeStartStatus::ProfileChanged;
+	case YouTubeAccountConnectionOperationStatus::Cancelled:
+	case YouTubeAccountConnectionOperationStatus::NoActiveAttempt:
+	case YouTubeAccountConnectionOperationStatus::StaleAttempt:
+	case YouTubeAccountConnectionOperationStatus::UnknownCandidate:
+	case YouTubeAccountConnectionOperationStatus::WrongPhase:
+	case YouTubeAccountConnectionOperationStatus::OperationFailed:
+		return YouTubeAccountRemoteRevokeStartStatus::OperationFailed;
+	}
+	return YouTubeAccountRemoteRevokeStartStatus::OperationFailed;
+}
+
 } // namespace
 
 YouTubeAccountRuntimeOwner::YouTubeAccountRuntimeOwner(ProfilePathReader profilePathReader, ConfigReader configReader)
@@ -147,7 +179,8 @@ YouTubeAccountRuntimeOwner::YouTubeAccountRuntimeOwner(ProfilePathReader profile
 YouTubeAccountRuntimeOwner::YouTubeAccountRuntimeOwner(
 	ProfilePathReader profilePathReader, ConfigReader configReader, QString clientId,
 	GoogleOAuthAuthorizationSession::BrowserOpener browserOpener, std::unique_ptr<WinCredentialApi> credentialApi,
-	std::unique_ptr<YouTubeAccountProfileOperationLockApi> profileLockApi)
+	std::unique_ptr<YouTubeAccountProfileOperationLockApi> profileLockApi,
+	std::unique_ptr<YouTubeAccountRemoteRevokePort> remoteRevokePort)
 	: context_(std::move(profilePathReader), std::move(configReader)),
 	  credentialApi_(std::move(credentialApi)),
 	  refreshTokenStore_(requireDependency(credentialApi_)),
@@ -162,14 +195,22 @@ YouTubeAccountRuntimeOwner::YouTubeAccountRuntimeOwner(
 		});
 	restoreCoordinator_ =
 		std::make_unique<YouTubeAccountProfileRestoreCoordinator>(context_, *provider_, profileLockProvider_);
+	if (remoteRevokePort != nullptr) {
+		remoteRevokeCoordinator_.reset(new YouTubeAccountRemoteRevokeCoordinator(
+			context_, *provider_, refreshTokenStore_, profileLockProvider_, std::move(remoteRevokePort), nullptr));
+	} else {
+		remoteRevokeCoordinator_ = std::make_unique<YouTubeAccountRemoteRevokeCoordinator>(
+			context_, *provider_, refreshTokenStore_, profileLockProvider_);
+	}
 }
 
 YouTubeAccountRuntimeOwner::~YouTubeAccountRuntimeOwner()
 {
 	assert(QThread::currentThread() == (provider_ != nullptr ? provider_->thread() : QThread::currentThread()));
 	(void)shutdown();
-	// The coordinator references the provider and must be destroyed first. It
-	// also owns the final owner-thread retry for a native lock cleanup failure.
+	// Both coordinators reference the provider. Remote revoke owns the outermost
+	// asynchronous transaction and therefore receives the first cleanup retry.
+	remoteRevokeCoordinator_.reset();
 	restoreCoordinator_.reset();
 	provider_.reset();
 }
@@ -215,6 +256,21 @@ bool YouTubeAccountRuntimeOwner::isAcceptedDisconnect(const YouTubeAccountProfil
 	}
 	const auto &snapshot = result.profile.snapshot;
 	return isUsableProfile(snapshot) && !snapshot.selection.has_value();
+}
+
+bool YouTubeAccountRuntimeOwner::isAcceptedRemoteRevoke(
+	const YouTubeAccountRemoteRevokeCompletion &completion) noexcept
+{
+	if (completion.status != YouTubeAccountRemoteRevokeStatus::Revoked &&
+	    completion.status != YouTubeAccountRemoteRevokeStatus::AlreadyRevoked) {
+		return false;
+	}
+	if (!completion.remoteRevokeAccepted || !completion.credentialErased || !completion.selectionCleared ||
+	    completion.lockCleanupPending) {
+		return false;
+	}
+	return completion.profile.status == YouTubeAccountProfileContext::LoadStatus::SetupRequired &&
+	       isUsableProfile(completion.profile.snapshot) && !completion.profile.snapshot.selection.has_value();
 }
 
 YouTubeAccountProfileRestoreStatus
@@ -271,6 +327,16 @@ YouTubeAccountProfileRestoreResult YouTubeAccountRuntimeOwner::restoreActiveProf
 		result.providerStatus = YouTubeAccountProviderRestoreStatus::Closed;
 		return result;
 	}
+	if (remoteRevokeBusy()) {
+		// PROFILE_CHANGED is delivered only once. If the previous profile's
+		// revoke completion is still queued, remember this request and restore
+		// the then-current profile after that transaction is fully released.
+		profileRestorePending_ = true;
+		result.status = YouTubeAccountProfileRestoreStatus::Busy;
+		result.providerStatus = YouTubeAccountProviderRestoreStatus::Busy;
+		return result;
+	}
+	profileRestorePending_ = false;
 	try {
 		// A repeated lifecycle notification must not orphan an interactive
 		// attempt by clearing the binding that its cancellation facade requires.
@@ -341,6 +407,9 @@ YouTubeAccountConnectionOperationStatus YouTubeAccountRuntimeOwner::preflightCon
 {
 	if (closed_) {
 		return YouTubeAccountConnectionOperationStatus::Closed;
+	}
+	if (remoteRevokeBusy()) {
+		return YouTubeAccountConnectionOperationStatus::Busy;
 	}
 	if (!restored_ || restoredGeneration_ == 0 || restoredBinding_.empty()) {
 		return YouTubeAccountConnectionOperationStatus::NotRestored;
@@ -572,6 +641,201 @@ YouTubeAccountConnectionSnapshot YouTubeAccountRuntimeOwner::connectionSnapshot(
 	return value;
 }
 
+bool YouTubeAccountRuntimeOwner::remoteRevokeBusy() const noexcept
+{
+	if (remoteRevokeCoordinator_ == nullptr) {
+		return false;
+	}
+	return remoteRevokeCoordinator_->activeAttempt().has_value() || remoteRevokeCoordinator_->lockHeld();
+}
+
+YouTubeAccountRemoteRevokeStartStatus YouTubeAccountRuntimeOwner::startRemoteRevoke(
+	YouTubeAccountRemoteRevokeCoordinator::CompletionHandler completionHandler) noexcept
+{
+	if (!onOwnerThread()) {
+		return YouTubeAccountRemoteRevokeStartStatus::WrongThread;
+	}
+	if (closed_ || remoteRevokeCoordinator_ == nullptr) {
+		return YouTubeAccountRemoteRevokeStartStatus::Closed;
+	}
+	if (!completionHandler) {
+		return YouTubeAccountRemoteRevokeStartStatus::OperationFailed;
+	}
+	if (remoteRevokeBusy()) {
+		return YouTubeAccountRemoteRevokeStartStatus::Busy;
+	}
+
+	const auto preflight = preflightConnection();
+	if (preflight != YouTubeAccountConnectionOperationStatus::Accepted) {
+		return remoteStatusForConnectionPreflight(preflight);
+	}
+
+	try {
+		const auto activeProfile = context_.snapshot();
+		if (!activeProfile.selection.has_value()) {
+			// A successfully disconnected account profile is a valid setup state,
+			// not an owner failure. There is no scoped account to revoke again.
+			return YouTubeAccountRemoteRevokeStartStatus::InvalidSelection;
+		}
+		const std::uint64_t expectedGeneration = restoredGeneration_;
+		const std::string expectedBinding = restoredBinding_;
+		const YouTubeAccountRemoteRevokeRequest request{restoredGeneration_, restoredBinding_};
+		auto status = remoteRevokeCoordinator_->start(
+			request,
+			[this, handler = std::move(completionHandler)](
+				YouTubeAccountRemoteRevokeCompletion completion) mutable {
+				updateAfterRemoteRevoke(completion);
+				retryPendingProfileRestore();
+				if (handler) {
+					try {
+						handler(std::move(completion));
+					} catch (...) {
+					}
+				}
+			});
+		// Credential and transport boundaries are injected in tests and may run
+		// nested event loops in production. A re-entrant profile change or
+		// shutdown wins over the coordinator's otherwise valid Started result.
+		if (closed_) {
+			return YouTubeAccountRemoteRevokeStartStatus::Closed;
+		}
+		if (!restored_) {
+			return remoteStatusForConnectionPreflight(connectionStatusForLostRestore(restoreStatus_));
+		}
+		if (restoredGeneration_ != expectedGeneration || restoredBinding_ != expectedBinding) {
+			return YouTubeAccountRemoteRevokeStartStatus::ProfileChanged;
+		}
+		if (status == YouTubeAccountRemoteRevokeStartStatus::Closed) {
+			closed_ = true;
+			clearRestoredBinding();
+			restoreStatus_ = YouTubeAccountProfileRestoreStatus::Closed;
+		} else if (status == YouTubeAccountRemoteRevokeStartStatus::ProfileChanged) {
+			(void)invalidateConnectionContext(YouTubeAccountProfileRestoreStatus::ProfileChanged);
+		} else if (status == YouTubeAccountRemoteRevokeStartStatus::NotAccountMode) {
+			(void)invalidateConnectionContext(YouTubeAccountProfileRestoreStatus::NotAccountMode);
+		} else if (status == YouTubeAccountRemoteRevokeStartStatus::ProfileUnavailable) {
+			(void)invalidateConnectionContext(YouTubeAccountProfileRestoreStatus::ProfileUnavailable);
+		} else if (status == YouTubeAccountRemoteRevokeStartStatus::NotRestored ||
+			   status == YouTubeAccountRemoteRevokeStartStatus::InvalidSelection ||
+			   status == YouTubeAccountRemoteRevokeStartStatus::InvalidProfileBinding ||
+			   status == YouTubeAccountRemoteRevokeStartStatus::OperationFailed) {
+			// OperationFailed can include a native profile-lock release failure.
+			// Never leave the owner advertising a usable restored binding when the
+			// lower transaction could not prove that its boundary was cleaned up.
+			clearRestoredBinding();
+			restoreStatus_ = YouTubeAccountProfileRestoreStatus::OperationFailed;
+		}
+		return status;
+	} catch (...) {
+		return YouTubeAccountRemoteRevokeStartStatus::OperationFailed;
+	}
+}
+
+void YouTubeAccountRuntimeOwner::retryPendingProfileRestore() noexcept
+{
+	if (!profileRestorePending_) {
+		return;
+	}
+	if (closed_) {
+		profileRestorePending_ = false;
+		return;
+	}
+	if (remoteRevokeBusy()) {
+		return;
+	}
+
+	profileRestorePending_ = false;
+	(void)restoreActiveProfile();
+}
+
+bool YouTubeAccountRuntimeOwner::cancelRemoteRevoke(YouTubeAccountRemoteRevokeAttempt attempt) noexcept
+{
+	return onOwnerThread() && !closed_ && remoteRevokeCoordinator_ != nullptr &&
+	       remoteRevokeCoordinator_->cancel(attempt);
+}
+
+YouTubeAccountRemoteRevokeSnapshot YouTubeAccountRuntimeOwner::remoteRevokeSnapshot() const
+{
+	YouTubeAccountRemoteRevokeSnapshot value;
+	if (!onOwnerThread()) {
+		return value;
+	}
+	value.restored = restored_;
+	value.closed = closed_;
+	if (remoteRevokeCoordinator_ != nullptr) {
+		value.state = remoteRevokeCoordinator_->state();
+		value.activeAttempt = remoteRevokeCoordinator_->activeAttempt();
+		value.lockCleanupPending = remoteRevokeCoordinator_->lockHeld();
+	}
+	return value;
+}
+
+void YouTubeAccountRuntimeOwner::updateAfterRemoteRevoke(
+	YouTubeAccountRemoteRevokeCompletion &completion) noexcept
+{
+	try {
+		if (completion.lockCleanupPending) {
+			completion.status = YouTubeAccountRemoteRevokeStatus::OperationFailed;
+			clearRestoredBinding();
+			restoreStatus_ = YouTubeAccountProfileRestoreStatus::OperationFailed;
+			return;
+		}
+		if (isAcceptedRemoteRevoke(completion)) {
+			restored_ = true;
+			restoredGeneration_ = completion.profile.snapshot.generation;
+			restoredBinding_ = completion.profile.snapshot.profileBinding;
+			restoreStatus_ = YouTubeAccountProfileRestoreStatus::SetupRequired;
+			return;
+		}
+
+		switch (completion.status) {
+		case YouTubeAccountRemoteRevokeStatus::Revoked:
+		case YouTubeAccountRemoteRevokeStatus::AlreadyRevoked:
+			completion.status = YouTubeAccountRemoteRevokeStatus::OperationFailed;
+			clearRestoredBinding();
+			restoreStatus_ = YouTubeAccountProfileRestoreStatus::OperationFailed;
+			break;
+		case YouTubeAccountRemoteRevokeStatus::CredentialUnavailable:
+		case YouTubeAccountRemoteRevokeStatus::RemoteRejected:
+		case YouTubeAccountRemoteRevokeStatus::NetworkFailure:
+		case YouTubeAccountRemoteRevokeStatus::ServiceUnavailable:
+		case YouTubeAccountRemoteRevokeStatus::InvalidResponse:
+		case YouTubeAccountRemoteRevokeStatus::CredentialEraseFailed:
+			// No local durable mutation completed. Keep the restored binding so the
+			// same profile can retry. Destination preparation still refreshes the
+			// token before any output can start.
+			break;
+		case YouTubeAccountRemoteRevokeStatus::Cancelled:
+			if (completion.credentialErased || completion.selectionCleared) {
+				clearRestoredBinding();
+				restoreStatus_ = YouTubeAccountProfileRestoreStatus::OperationFailed;
+			}
+			break;
+		case YouTubeAccountRemoteRevokeStatus::ProfileSaveFailed:
+		case YouTubeAccountRemoteRevokeStatus::OperationFailed:
+			clearRestoredBinding();
+			restoreStatus_ = YouTubeAccountProfileRestoreStatus::OperationFailed;
+			break;
+		case YouTubeAccountRemoteRevokeStatus::ProfileChanged:
+			clearRestoredBinding();
+			restoreStatus_ = YouTubeAccountProfileRestoreStatus::ProfileChanged;
+			if (!closed_ && restoreCoordinator_ != nullptr) {
+				(void)restoreCoordinator_->invalidate();
+			}
+			break;
+		case YouTubeAccountRemoteRevokeStatus::Closed:
+			closed_ = true;
+			clearRestoredBinding();
+			restoreStatus_ = YouTubeAccountProfileRestoreStatus::Closed;
+			break;
+		}
+	} catch (...) {
+		completion.status = YouTubeAccountRemoteRevokeStatus::OperationFailed;
+		clearRestoredBinding();
+		restoreStatus_ = YouTubeAccountProfileRestoreStatus::OperationFailed;
+	}
+}
+
 YouTubeAccountProfileDisconnectResult YouTubeAccountRuntimeOwner::disconnectActiveProfile() noexcept
 {
 	YouTubeAccountProfileDisconnectResult result;
@@ -583,6 +847,11 @@ YouTubeAccountProfileDisconnectResult YouTubeAccountRuntimeOwner::disconnectActi
 	if (closed_ || restoreCoordinator_ == nullptr) {
 		result.status = YouTubeAccountProfileDisconnectStatus::Closed;
 		result.providerStatus = YouTubeAccountProviderDisconnectStatus::Closed;
+		return result;
+	}
+	if (remoteRevokeBusy()) {
+		result.status = YouTubeAccountProfileDisconnectStatus::Busy;
+		result.providerStatus = YouTubeAccountProviderDisconnectStatus::Busy;
 		return result;
 	}
 
@@ -636,14 +905,16 @@ bool YouTubeAccountRuntimeOwner::invalidateForProfileChange() noexcept
 	if (!onOwnerThread()) {
 		return false;
 	}
-	clearRestoredBinding();
 	if (closed_ || restoreCoordinator_ == nullptr) {
 		return false;
 	}
 	try {
-		const bool result = restoreCoordinator_->invalidate();
+		const bool remoteInvalidated = remoteRevokeCoordinator_ == nullptr ||
+					       remoteRevokeCoordinator_->invalidateContext();
+		clearRestoredBinding();
+		const bool restoreInvalidated = restoreCoordinator_->invalidate();
 		restoreStatus_ = YouTubeAccountProfileRestoreStatus::ProfileChanged;
-		return result;
+		return remoteInvalidated && restoreInvalidated;
 	} catch (...) {
 		restoreStatus_ = YouTubeAccountProfileRestoreStatus::OperationFailed;
 		return false;
@@ -659,10 +930,15 @@ bool YouTubeAccountRuntimeOwner::shutdown() noexcept
 		return true;
 	}
 	closed_ = true;
+	profileRestorePending_ = false;
 	clearRestoredBinding();
 	bool coordinatorClosed = true;
+	bool remoteClosed = true;
 	bool providerClosed = true;
 	try {
+		if (remoteRevokeCoordinator_ != nullptr) {
+			remoteClosed = remoteRevokeCoordinator_->shutdown();
+		}
 		if (restoreCoordinator_ != nullptr) {
 			coordinatorClosed = restoreCoordinator_->shutdown();
 		}
@@ -674,13 +950,13 @@ bool YouTubeAccountRuntimeOwner::shutdown() noexcept
 		providerClosed = false;
 	}
 	restoreStatus_ = YouTubeAccountProfileRestoreStatus::Closed;
-	shutdownComplete_ = coordinatorClosed && providerClosed;
+	shutdownComplete_ = remoteClosed && coordinatorClosed && providerClosed;
 	return shutdownComplete_;
 }
 
 bool YouTubeAccountRuntimeOwner::commitSelection(const std::optional<YouTubeAccountSelection> &selection) noexcept
 {
-	if (closed_ || !restored_ || restoredGeneration_ == 0 || restoredBinding_.empty()) {
+	if (closed_ || remoteRevokeBusy() || !restored_ || restoredGeneration_ == 0 || restoredBinding_.empty()) {
 		return false;
 	}
 	try {

@@ -72,7 +72,7 @@ Google-validated, missing becomes reauthorization-required, and credential-servi
 with no selection does not inspect or delete any account credential. Restoration advances the account generation
 and starts no browser, listener, HTTP request, discovery operation, or output. The provider lifecycle integration is
 active, but account mode remains fail-closed until destination preparation and output handoff are integrated; it cannot
-consume the manual URL/key destination. Production client configuration, browser opening, refresh/remote revoke,
+consume the manual URL/key destination. Production client configuration, browser opening, refresh/output preparation,
 interactive output integration, and user-facing account controls remain release-gated.
 
 The manual YouTube stream key remains intentionally shared by all OBS profiles, but the Google refresh token uses a
@@ -88,8 +88,8 @@ profile cannot read or write another profile's credential. Before any output can
 and resolve the exact saved channel and stream. If profile selection is persisted before a new token is written and that
 write fails, the selection is rolled back. The profile-operation lock derives a non-secret `Local\\` mutex name from the
 same validated binding, rejects both other-process ownership and same-process recursive acquisition without waiting, and
-reports recovered ownership only as an internal result. Local disconnect already uses this same boundary; future remote
-revoke must use it as well. Interactive authorization and destination preparation
+reports recovered ownership only as an internal result. Local disconnect and the headless remote-revoke transaction use
+this same boundary. Interactive authorization and destination preparation
 remain detached from the production dock and runtime even though the account lifecycle owner is now part of the plugin.
 
 The `YouTubeAccountProfileRestoreCoordinator` supplies the outer profile transaction used by the production lifecycle
@@ -112,7 +112,11 @@ after deletion, the credential is not reconstructed and the provider becomes una
 release failure still overrides success and remains fail-closed. The owner rebinds successful results to the resulting
 profile generation. Its internal connection facade re-reads the active path and profile settings before every operation
 and invalidates an attempt if the profile, generation, or connection mode no longer matches. No production caller invokes
-that facade. Remote revoke must use the same profile-operation boundary.
+that facade. The same owner now contains a headless remote-revoke transaction that holds the profile-operation lock from
+the exact credential read through Google acknowledgement and local cleanup. If `PROFILE_CHANGED` arrives while the old
+profile's revoke completion is still queued, the owner retains that one restore request and applies it only after the old
+transaction has released its lock; stale completion data cannot overwrite the newly active profile. The transaction is
+not connected to the dock or output runtime.
 
 The profile path/config readers are a frontend-thread contract: both must observe the same stable active profile and
 must not process events. OBS emits `PROFILE_CHANGING` before activation, swaps `activeConfiguration` and the current

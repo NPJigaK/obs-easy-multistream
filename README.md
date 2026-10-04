@@ -59,7 +59,7 @@ The accepted direction is to make account connection the normal setup experience
 
 The RTMPS URL and stream key are then obtained through the official YouTube API instead of being copied by the user. The manual fields remain available under advanced settings and are never silently selected after an account-connection failure.
 
-This is not enabled in the current build. It will only be shown after the complete browser callback, token storage and revocation, channel/stream selection, profile-change cancellation, and YouTube endpoint-resolution paths are implemented and tested. Public builds also require an appropriate Google Cloud project, consent screen, privacy policy, OAuth verification decision, and quota plan. See [the accepted account-connection design](docs/youtube-account-connection.md).
+This is not enabled in the current build. The internal browser, token, selection, profile-lifecycle, destination-resolution, and remote-revocation boundaries are being completed and tested before any account control is shown in the dock. Public builds also require an appropriate Google Cloud project, consent screen, privacy policy, OAuth verification decision, and quota plan. See [the accepted account-connection design](docs/youtube-account-connection.md).
 
 ## Current manual YouTube setup
 
