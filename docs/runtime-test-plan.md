@@ -208,7 +208,7 @@ generation invalidation / new work拒否
 - [x] 現在のCTestがすべて通る。
 - [x] start acceptedとstart signalを分けた状態機械テストが通る。
 - [x] リポジトリ内の隔離portable OBS 32.2.2で、0.1.0基礎buildのload、Startup complete、clean unload、memory leaks 0を確認した。
-- [ ] 0.3.0で初回dock表示、表示済みmarker保存、2回目の非表示、トレイ復帰後の表示、compact表示、Toolsメニューからの再表示を確認した。
+- [ ] 0.4.0で初回dock表示、YouTube Studioリンク、表示済みmarker保存、2回目の非表示、トレイ復帰後の表示、compact表示、Toolsメニューからの再表示を確認した。
 - [ ] `obs_output_start()`同期拒否とnative StartStreaming同期拒否を別々にテストした。
 - [ ] output error、YouTube-only disconnect、credential failure、missing URL/key、unsupported codecをテストした。
 - [ ] stop、duplicate stop、rapid stop-start、profile change、EXITをテストした。
