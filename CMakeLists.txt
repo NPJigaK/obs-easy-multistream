@@ -32,6 +32,7 @@ add_library(${CMAKE_PROJECT_NAME}-youtube-account-profile-lock STATIC)
 # Keep this implementation in one final module. Its in-process registry is
 # intentionally module-local and complements the cross-process named mutex.
 add_library(${CMAKE_PROJECT_NAME}-youtube-account-provider STATIC)
+add_library(${CMAKE_PROJECT_NAME}-youtube-account-remote-revoke STATIC)
 add_library(${CMAKE_PROJECT_NAME}-youtube-account-destination-preparer STATIC)
 add_library(${CMAKE_PROJECT_NAME}-youtube-account-profile-restore STATIC)
 add_library(${CMAKE_PROJECT_NAME}-youtube-account-runtime-owner STATIC)
@@ -214,6 +215,26 @@ target_link_libraries(
     ${CMAKE_PROJECT_NAME}-oauth-token-transport
     ${CMAKE_PROJECT_NAME}-youtube-discovery-pager
     ${CMAKE_PROJECT_NAME}-secure-core
+    Qt6::Core
+)
+
+target_sources(
+  ${CMAKE_PROJECT_NAME}-youtube-account-remote-revoke
+  PRIVATE
+    src/youtube-account-remote-revoke.cpp
+    src/youtube-account-remote-revoke.hpp
+)
+target_include_directories(
+  ${CMAKE_PROJECT_NAME}-youtube-account-remote-revoke
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+target_link_libraries(
+  ${CMAKE_PROJECT_NAME}-youtube-account-remote-revoke
+  PUBLIC
+    ${CMAKE_PROJECT_NAME}-core
+    ${CMAKE_PROJECT_NAME}-youtube-account-provider
+    ${CMAKE_PROJECT_NAME}-youtube-account-profile-lock
+    ${CMAKE_PROJECT_NAME}-oauth-token-transport
     Qt6::Core
 )
 
@@ -527,6 +548,33 @@ if(BUILD_TESTING)
     COMMAND ${CMAKE_PROJECT_NAME}-youtube-account-provider-tests
   )
 
+  add_executable(${CMAKE_PROJECT_NAME}-youtube-account-remote-revoke-tests)
+  target_sources(
+    ${CMAKE_PROJECT_NAME}-youtube-account-remote-revoke-tests
+    PRIVATE tests/youtube-account-remote-revoke-tests.cpp
+  )
+  target_link_libraries(
+    ${CMAKE_PROJECT_NAME}-youtube-account-remote-revoke-tests
+    PRIVATE ${CMAKE_PROJECT_NAME}-youtube-account-remote-revoke
+  )
+
+  add_custom_command(
+    TARGET ${CMAKE_PROJECT_NAME}-youtube-account-remote-revoke-tests
+    POST_BUILD
+    COMMAND
+      "${CMAKE_COMMAND}" -E copy_if_different
+      $<TARGET_RUNTIME_DLLS:${CMAKE_PROJECT_NAME}-youtube-account-remote-revoke-tests>
+      $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}-youtube-account-remote-revoke-tests>
+    COMMAND_EXPAND_LISTS
+    COMMENT "Copy remote revoke test runtime dependencies"
+    VERBATIM
+  )
+
+  add_test(
+    NAME ${CMAKE_PROJECT_NAME}-youtube-account-remote-revoke
+    COMMAND ${CMAKE_PROJECT_NAME}-youtube-account-remote-revoke-tests
+  )
+
   add_executable(${CMAKE_PROJECT_NAME}-youtube-stream-resolver-tests)
   target_sources(
     ${CMAKE_PROJECT_NAME}-youtube-stream-resolver-tests
@@ -767,6 +815,7 @@ if(BUILD_TESTING)
     ${CMAKE_PROJECT_NAME}-youtube-discovery
     ${CMAKE_PROJECT_NAME}-youtube-discovery-pager
     ${CMAKE_PROJECT_NAME}-youtube-account-provider
+    ${CMAKE_PROJECT_NAME}-youtube-account-remote-revoke
     ${CMAKE_PROJECT_NAME}-youtube-stream-resolver
     ${CMAKE_PROJECT_NAME}-youtube-account-destination-preparer
     ${CMAKE_PROJECT_NAME}-youtube-account-profile-context
