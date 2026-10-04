@@ -51,6 +51,20 @@ enum class YouTubeAccountConnectionOperationStatus {
 	OperationFailed,
 };
 
+enum class YouTubeAccountConnectionStage {
+	Idle,
+	Connecting,
+	SelectingChannel,
+	SelectingStream,
+	Saving,
+	Stored,
+	Connected,
+	NeedsReauthorization,
+	Unavailable,
+	Failed,
+	Closed,
+};
+
 struct YouTubeAccountConnectionAttempt final {
 	std::uint64_t generation = 0;
 	std::uint64_t attempt = 0;
@@ -62,13 +76,23 @@ constexpr bool operator==(const YouTubeAccountConnectionAttempt &left,
 	return left.generation == right.generation && left.attempt == right.attempt;
 }
 
-struct YouTubeAccountCandidateHandle final {
+struct YouTubeAccountChannelCandidateHandle final {
 	std::uint64_t revision = 0;
 	std::size_t index = 0;
 };
 
-struct YouTubeAccountConnectionCandidate final {
-	YouTubeAccountCandidateHandle handle;
+struct YouTubeAccountStreamCandidateHandle final {
+	std::uint64_t revision = 0;
+	std::size_t index = 0;
+};
+
+struct YouTubeAccountChannelCandidate final {
+	YouTubeAccountChannelCandidateHandle handle;
+	std::string label;
+};
+
+struct YouTubeAccountStreamCandidate final {
+	YouTubeAccountStreamCandidateHandle handle;
 	std::string label;
 };
 
@@ -77,12 +101,11 @@ struct YouTubeAccountConnectionCandidate final {
 // revision; labels are copied display values.
 struct YouTubeAccountConnectionSnapshot final {
 	std::uint64_t revision = 0;
-	YouTubeAccountProviderStage stage = YouTubeAccountProviderStage::Idle;
-	YouTubeAccountState state = YouTubeAccountState::Disconnected;
+	YouTubeAccountConnectionStage stage = YouTubeAccountConnectionStage::Idle;
 	YouTubeAccountFailure failure = YouTubeAccountFailure::None;
 	std::optional<YouTubeAccountConnectionAttempt> activeAttempt;
-	std::vector<YouTubeAccountConnectionCandidate> channels;
-	std::vector<YouTubeAccountConnectionCandidate> streams;
+	std::vector<YouTubeAccountChannelCandidate> channels;
+	std::vector<YouTubeAccountStreamCandidate> streams;
 	std::string channelLabel;
 	std::string streamLabel;
 	bool restored = false;
@@ -120,9 +143,9 @@ public:
 	YouTubeAccountConnectionOperationStatus
 	startConnection(GoogleOAuthConsentMode consentMode = GoogleOAuthConsentMode::Standard) noexcept;
 	YouTubeAccountConnectionOperationStatus selectChannel(YouTubeAccountConnectionAttempt attempt,
-							      YouTubeAccountCandidateHandle candidate) noexcept;
+							      YouTubeAccountChannelCandidateHandle candidate) noexcept;
 	YouTubeAccountConnectionOperationStatus selectStream(YouTubeAccountConnectionAttempt attempt,
-							     YouTubeAccountCandidateHandle candidate) noexcept;
+							     YouTubeAccountStreamCandidateHandle candidate) noexcept;
 	YouTubeAccountConnectionOperationStatus cancelConnection(YouTubeAccountConnectionAttempt attempt) noexcept;
 	YouTubeAccountConnectionSnapshot connectionSnapshot() const;
 	// Erases the active profile's saved account selection and credential while

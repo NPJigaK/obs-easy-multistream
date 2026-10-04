@@ -76,6 +76,65 @@ YouTubeAccountConnectionOperationStatus mapSelectionStatus(YouTubeAccountProvide
 	return YouTubeAccountConnectionOperationStatus::OperationFailed;
 }
 
+YouTubeAccountConnectionStage mapConnectionStage(YouTubeAccountProviderStage stage) noexcept
+{
+	switch (stage) {
+	case YouTubeAccountProviderStage::Idle:
+		return YouTubeAccountConnectionStage::Idle;
+	case YouTubeAccountProviderStage::Authorizing:
+	case YouTubeAccountProviderStage::ExchangingCode:
+	case YouTubeAccountProviderStage::ListingChannels:
+	case YouTubeAccountProviderStage::ListingStreams:
+		return YouTubeAccountConnectionStage::Connecting;
+	case YouTubeAccountProviderStage::AwaitingChannelSelection:
+		return YouTubeAccountConnectionStage::SelectingChannel;
+	case YouTubeAccountProviderStage::AwaitingStreamSelection:
+		return YouTubeAccountConnectionStage::SelectingStream;
+	case YouTubeAccountProviderStage::PersistingCredential:
+		return YouTubeAccountConnectionStage::Saving;
+	case YouTubeAccountProviderStage::Configured:
+		return YouTubeAccountConnectionStage::Stored;
+	case YouTubeAccountProviderStage::Connected:
+		return YouTubeAccountConnectionStage::Connected;
+	case YouTubeAccountProviderStage::NeedsReauthorization:
+		return YouTubeAccountConnectionStage::NeedsReauthorization;
+	case YouTubeAccountProviderStage::Unavailable:
+		return YouTubeAccountConnectionStage::Unavailable;
+	case YouTubeAccountProviderStage::Failed:
+		return YouTubeAccountConnectionStage::Failed;
+	case YouTubeAccountProviderStage::Closed:
+		return YouTubeAccountConnectionStage::Closed;
+	}
+	return YouTubeAccountConnectionStage::Unavailable;
+}
+
+YouTubeAccountConnectionOperationStatus
+connectionStatusForLostRestore(YouTubeAccountProfileRestoreStatus status) noexcept
+{
+	switch (status) {
+	case YouTubeAccountProfileRestoreStatus::NotAccountMode:
+		return YouTubeAccountConnectionOperationStatus::NotAccountMode;
+	case YouTubeAccountProfileRestoreStatus::ProfileUnavailable:
+		return YouTubeAccountConnectionOperationStatus::ProfileUnavailable;
+	case YouTubeAccountProfileRestoreStatus::ProfileChanged:
+		return YouTubeAccountConnectionOperationStatus::ProfileChanged;
+	case YouTubeAccountProfileRestoreStatus::Closed:
+		return YouTubeAccountConnectionOperationStatus::Closed;
+	case YouTubeAccountProfileRestoreStatus::Restored:
+	case YouTubeAccountProfileRestoreStatus::SetupRequired:
+	case YouTubeAccountProfileRestoreStatus::ReauthorizationRequired:
+	case YouTubeAccountProfileRestoreStatus::CredentialUnavailable:
+	case YouTubeAccountProfileRestoreStatus::InvalidSettings:
+	case YouTubeAccountProfileRestoreStatus::UnsupportedFutureSettings:
+	case YouTubeAccountProfileRestoreStatus::Busy:
+	case YouTubeAccountProfileRestoreStatus::WrongThread:
+	case YouTubeAccountProfileRestoreStatus::Unavailable:
+	case YouTubeAccountProfileRestoreStatus::OperationFailed:
+		return YouTubeAccountConnectionOperationStatus::OperationFailed;
+	}
+	return YouTubeAccountConnectionOperationStatus::OperationFailed;
+}
+
 } // namespace
 
 YouTubeAccountRuntimeOwner::YouTubeAccountRuntimeOwner(ProfilePathReader profilePathReader, ConfigReader configReader)
@@ -212,6 +271,35 @@ YouTubeAccountProfileRestoreResult YouTubeAccountRuntimeOwner::restoreActiveProf
 		result.providerStatus = YouTubeAccountProviderRestoreStatus::Closed;
 		return result;
 	}
+	try {
+		// A repeated lifecycle notification must not orphan an interactive
+		// attempt by clearing the binding that its cancellation facade requires.
+		// A missed PROFILE_CHANGING is still detected by the fresh preflight and
+		// cancels the old attempt before the new profile is restored.
+		if (provider_ != nullptr && provider_->snapshot().account.lease.has_value()) {
+			const auto preflight = preflightConnection();
+			if (preflight == YouTubeAccountConnectionOperationStatus::Accepted) {
+				result.status = YouTubeAccountProfileRestoreStatus::Busy;
+				result.providerStatus = YouTubeAccountProviderRestoreStatus::Busy;
+				return result;
+			}
+			if (preflight == YouTubeAccountConnectionOperationStatus::Closed) {
+				result.status = YouTubeAccountProfileRestoreStatus::Closed;
+				result.providerStatus = YouTubeAccountProviderRestoreStatus::Closed;
+				return result;
+			}
+			if (preflight == YouTubeAccountConnectionOperationStatus::OperationFailed ||
+			    preflight == YouTubeAccountConnectionOperationStatus::NotRestored) {
+				result.status = YouTubeAccountProfileRestoreStatus::OperationFailed;
+				result.providerStatus = YouTubeAccountProviderRestoreStatus::OperationFailed;
+				return result;
+			}
+		}
+	} catch (...) {
+		result.status = YouTubeAccountProfileRestoreStatus::OperationFailed;
+		result.providerStatus = YouTubeAccountProviderRestoreStatus::OperationFailed;
+		return result;
+	}
 
 	clearRestoredBinding();
 	try {
@@ -299,18 +387,53 @@ YouTubeAccountRuntimeOwner::startConnection(GoogleOAuthConsentMode consentMode) 
 	if (preflight != YouTubeAccountConnectionOperationStatus::Accepted) {
 		return preflight;
 	}
+	const std::uint64_t expectedGeneration = restoredGeneration_;
 	const auto providerStatus = provider_->startConnection(consentMode);
+	// The system browser opener may run a nested event loop. Revalidate every
+	// owner invariant before interpreting the provider's immediate result so a
+	// reentrant profile change or shutdown wins over a stale start status.
+	if (closed_) {
+		return YouTubeAccountConnectionOperationStatus::Closed;
+	}
+	if (!restored_) {
+		return connectionStatusForLostRestore(restoreStatus_);
+	}
+	if (restoredGeneration_ != expectedGeneration) {
+		return YouTubeAccountConnectionOperationStatus::ProfileChanged;
+	}
+	const auto postflight = preflightConnection();
+	if (postflight != YouTubeAccountConnectionOperationStatus::Accepted) {
+		return postflight;
+	}
 	if (providerStatus == YouTubeAccountProviderStartStatus::InvalidProfileBinding) {
 		return invalidateConnectionContext(YouTubeAccountProfileRestoreStatus::ProfileChanged)
 			       ? YouTubeAccountConnectionOperationStatus::ProfileChanged
 			       : YouTubeAccountConnectionOperationStatus::OperationFailed;
 	}
-	return mapStartStatus(providerStatus);
+	if (providerStatus != YouTubeAccountProviderStartStatus::Started) {
+		return mapStartStatus(providerStatus);
+	}
+	try {
+		const auto snapshot = provider_->snapshot();
+		if (snapshot.account.lease.has_value()) {
+			return YouTubeAccountConnectionOperationStatus::Started;
+		}
+		// A nested event loop can, in principle, complete the whole OAuth and
+		// discovery sequence before the browser opener returns.  That is still a
+		// successfully accepted start.  Every other lease-less state means the
+		// operation was cancelled or failed while startConnection() was re-entered.
+		return snapshot.stage == YouTubeAccountProviderStage::Connected &&
+				       snapshot.account.failure == YouTubeAccountFailure::None
+			       ? YouTubeAccountConnectionOperationStatus::Started
+			       : YouTubeAccountConnectionOperationStatus::OperationFailed;
+	} catch (...) {
+		return YouTubeAccountConnectionOperationStatus::OperationFailed;
+	}
 }
 
 YouTubeAccountConnectionOperationStatus
 YouTubeAccountRuntimeOwner::selectChannel(YouTubeAccountConnectionAttempt attempt,
-					  YouTubeAccountCandidateHandle candidate) noexcept
+					  YouTubeAccountChannelCandidateHandle candidate) noexcept
 {
 	if (!onOwnerThread()) {
 		return YouTubeAccountConnectionOperationStatus::WrongThread;
@@ -342,7 +465,7 @@ YouTubeAccountRuntimeOwner::selectChannel(YouTubeAccountConnectionAttempt attemp
 
 YouTubeAccountConnectionOperationStatus
 YouTubeAccountRuntimeOwner::selectStream(YouTubeAccountConnectionAttempt attempt,
-					 YouTubeAccountCandidateHandle candidate) noexcept
+					 YouTubeAccountStreamCandidateHandle candidate) noexcept
 {
 	if (!onOwnerThread()) {
 		return YouTubeAccountConnectionOperationStatus::WrongThread;
@@ -420,6 +543,9 @@ YouTubeAccountRuntimeOwner::cancelConnection(YouTubeAccountConnectionAttempt att
 YouTubeAccountConnectionSnapshot YouTubeAccountRuntimeOwner::connectionSnapshot() const
 {
 	YouTubeAccountConnectionSnapshot value;
+	if (!onOwnerThread()) {
+		return value;
+	}
 	value.restored = restored_;
 	value.closed = closed_;
 	if (provider_ == nullptr) {
@@ -428,8 +554,7 @@ YouTubeAccountConnectionSnapshot YouTubeAccountRuntimeOwner::connectionSnapshot(
 
 	const auto providerSnapshot = provider_->snapshot();
 	value.revision = providerSnapshot.revision;
-	value.stage = providerSnapshot.stage;
-	value.state = providerSnapshot.account.state;
+	value.stage = mapConnectionStage(providerSnapshot.stage);
 	value.failure = providerSnapshot.account.failure;
 	value.channelLabel = providerSnapshot.account.channelLabel;
 	value.streamLabel = providerSnapshot.account.streamLabel;

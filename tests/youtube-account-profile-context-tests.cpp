@@ -243,6 +243,14 @@ void testActiveAccountCheckIsFreshAndDoesNotAdvanceGeneration()
 	CHECK(context.snapshot().generation == before.generation);
 	CHECK(context.snapshot().profileBinding == before.profileBinding);
 
+	// A selection changed outside the owner is also stale even though the path,
+	// schema, and account mode still match.
+	setAccountSettings(config.get(), true);
+	CHECK(context.checkActiveAccount(loaded.snapshot.generation, loaded.snapshot.profileBinding) ==
+	      YouTubeAccountProfileContext::ActiveAccountStatus::Stale);
+	CHECK(context.snapshot().generation == before.generation);
+	setAccountSettings(config.get());
+
 	// The preflight rereads the config rather than trusting the last load.
 	setManualSettings(config.get());
 	CHECK(context.checkActiveAccount(loaded.snapshot.generation, loaded.snapshot.profileBinding) ==

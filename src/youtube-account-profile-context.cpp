@@ -10,6 +10,23 @@
 
 namespace easy_multistream {
 
+namespace {
+
+bool sameSelection(const std::optional<YouTubeAccountSelection> &left,
+		   const std::optional<YouTubeAccountSelection> &right) noexcept
+{
+	if (left.has_value() != right.has_value()) {
+		return false;
+	}
+	if (!left.has_value()) {
+		return true;
+	}
+	return left->channelId == right->channelId && left->channelLabel == right->channelLabel &&
+	       left->streamId == right->streamId && left->streamLabel == right->streamLabel;
+}
+
+} // namespace
+
 YouTubeAccountProfileContext::YouTubeAccountProfileContext(ProfilePathReader profilePathReader,
 							   ConfigReader configReader)
 	: profilePathReader_(std::move(profilePathReader)),
@@ -190,9 +207,12 @@ YouTubeAccountProfileContext::checkActiveAccount(std::uint64_t expectedGeneratio
 		case SettingsLoadStatus::Loaded:
 		case SettingsLoadStatus::Defaults:
 		case SettingsLoadStatus::SetupRequired:
-			return settings.settings.youtubeConnectionMode == YouTubeConnectionMode::Account
+			if (settings.settings.youtubeConnectionMode != YouTubeConnectionMode::Account) {
+				return ActiveAccountStatus::NotAccountMode;
+			}
+			return sameSelection(settings.settings.youtubeAccountSelection, snapshot_.selection)
 				       ? ActiveAccountStatus::Current
-				       : ActiveAccountStatus::NotAccountMode;
+				       : ActiveAccountStatus::Stale;
 		case SettingsLoadStatus::InvalidSchema:
 			return ActiveAccountStatus::InvalidSettings;
 		case SettingsLoadStatus::UnsupportedFutureSchema:
