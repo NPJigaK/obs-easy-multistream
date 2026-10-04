@@ -572,9 +572,11 @@ private:
 			Qt::QueuedConnection);
 		if (!queued) {
 			completionDeliveryQueued_ = false;
-			clearOperation();
-			state_ = YouTubeDestinationPreparerState::Completed;
-			releaseOperationLock();
+			// Every port and lifecycle entry point is owner-thread-only. If Qt
+			// cannot enqueue the normal deferral, deliver synchronously instead of
+			// returning Started for an operation whose completion was discarded.
+			// The runtime bridge explicitly supports synchronous completion.
+			deliverCompletion();
 		}
 	}
 

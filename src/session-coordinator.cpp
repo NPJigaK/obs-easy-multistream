@@ -198,6 +198,21 @@ SessionTransition SessionCoordinator::retryYouTube()
 	return result(start, start.has_value());
 }
 
+SessionTransition SessionCoordinator::youtubeSetupRequired(OutputLease lease)
+{
+	if (!accepts(lease)) {
+		return result();
+	}
+
+	// The preparation lease is logical state only; no OBS output exists yet.
+	// Clearing it directly avoids emitting StopYouTube and makes a subsequent
+	// configuration refresh/retry start from a clean output barrier.
+	snapshot_.youtubeLease.reset();
+	snapshot_.youtubeKeyAvailable = false;
+	snapshot_.youtube = YouTubeStreamState::SetupRequired;
+	return result(std::nullopt, true);
+}
+
 SessionTransition SessionCoordinator::youtubeReleased(OutputLease lease)
 {
 	if (retiringYouTubeLease_.has_value() && *retiringYouTubeLease_ == lease) {

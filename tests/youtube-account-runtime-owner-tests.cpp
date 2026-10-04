@@ -621,6 +621,7 @@ void testRuntimeOwnerDestinationPreparationSuccessReleasesLockBeforeHandler()
 	const int releasesBeforePreparation = fixture.lockApiRaw->releaseCount;
 	bool handlerCalled = false;
 	bool handlerSawReleasedLock = false;
+	std::optional<YouTubeDestinationPrepareAttempt> handlerUseAttempt;
 	YouTubeDestinationPrepareStatus receivedStatus = YouTubeDestinationPrepareStatus::InvalidResponse;
 	bool receivedIngestion = false;
 	std::string receivedServerUrl;
@@ -629,6 +630,7 @@ void testRuntimeOwnerDestinationPreparationSuccessReleasesLockBeforeHandler()
 	CHECK(fixture.owner->startDestinationPreparation([&](YouTubeDestinationPrepareCompletion completion) {
 		handlerCalled = true;
 		handlerSawReleasedLock = fixture.lockApiRaw->releaseCount == releasesBeforePreparation + 1;
+		handlerUseAttempt = fixture.owner->destinationSnapshot().activeUseAttempt;
 		receivedStatus = completion.status;
 		receivedIngestion = completion.ingestion.has_value();
 		if (completion.ingestion.has_value()) {
@@ -665,13 +667,167 @@ void testRuntimeOwnerDestinationPreparationSuccessReleasesLockBeforeHandler()
 	CHECK(receivedIngestion);
 	CHECK(receivedServerUrl == kOwnerDestinationServerUrl);
 	CHECK(receivedStreamKey == kOwnerDestinationStreamKey);
+	CHECK(handlerUseAttempt.has_value());
+	CHECK(handlerUseAttempt == active);
 	const auto destination = fixture.owner->destinationSnapshot();
 	CHECK(destination.state == YouTubeDestinationPreparerState::Completed);
 	CHECK(!destination.activeAttempt.has_value());
+	CHECK(destination.activeUseAttempt == active);
 	CHECK(!destination.lockCleanupPending);
 	CHECK(destination.lastStatus.has_value());
 	CHECK(destination.lastStatus == YouTubeDestinationPrepareStatus::Success);
 	CHECK(destination.restored);
+}
+
+void testRuntimeOwnerDestinationUseLeaseGuardsAccountMutationsAndReleasesExactly()
+{
+	DestinationOwnerFixture fixture("easy-multistream-runtime-owner-destination-use-lease.ini");
+	std::optional<YouTubeDestinationPrepareAttempt> handlerUseAttempt;
+	const auto start = fixture.owner->startDestinationPreparationWithAttempt(
+		[&](YouTubeDestinationPrepareCompletion completion) {
+			if (completion.succeeded()) {
+				handlerUseAttempt = fixture.owner->destinationSnapshot().activeUseAttempt;
+			}
+		});
+	CHECK(start.status == YouTubeAccountDestinationOperationStatus::Started);
+	CHECK(start.attempt.has_value());
+	if (!start.attempt.has_value() || !fixture.destinationRefreshPortRaw->lastAttempt.has_value()) {
+		return;
+	}
+	const auto attempt = *start.attempt;
+	CHECK(attempt.generation == fixture.destinationRefreshPortRaw->lastAttempt->generation);
+	CHECK(attempt.attempt == fixture.destinationRefreshPortRaw->lastAttempt->attempt);
+
+	fixture.destinationRefreshPortRaw->complete(
+		ownerDestinationRefreshSuccess(*fixture.destinationRefreshPortRaw->lastAttempt));
+	CHECK(fixture.destinationResolverPortRaw->lastAttempt.has_value());
+	if (!fixture.destinationResolverPortRaw->lastAttempt.has_value()) {
+		return;
+	}
+	fixture.destinationResolverPortRaw->complete(
+		ownerDestinationResolveSuccess(*fixture.destinationResolverPortRaw->lastAttempt));
+	processOwnerEvents();
+
+	CHECK(handlerUseAttempt == start.attempt);
+	CHECK(fixture.owner->destinationSnapshot().activeUseAttempt == start.attempt);
+	CHECK(fixture.owner->restoreActiveProfile().status == YouTubeAccountProfileRestoreStatus::Busy);
+	CHECK(YouTubeAccountRuntimeOwnerTestAccess::disconnect(*fixture.owner).status ==
+	      YouTubeAccountProfileDisconnectStatus::Busy);
+	CHECK(fixture.owner->startRemoteRevoke([](YouTubeAccountRemoteRevokeCompletion) {}) ==
+	      YouTubeAccountRemoteRevokeStartStatus::Busy);
+	CHECK(fixture.owner->startConnection() == YouTubeAccountConnectionOperationStatus::Busy);
+	CHECK(!YouTubeAccountRuntimeOwnerTestAccess::commitSelection(*fixture.owner, selectionB()));
+	CHECK(fixture.owner->startDestinationPreparation([](YouTubeDestinationPrepareCompletion) {}) ==
+	      YouTubeAccountDestinationOperationStatus::Busy);
+
+	const YouTubeDestinationPrepareAttempt stale{attempt.generation, attempt.attempt + 1};
+	CHECK(fixture.owner->releaseDestinationUse(stale) ==
+	      YouTubeAccountDestinationUseReleaseStatus::StaleAttempt);
+	CHECK(fixture.owner->destinationSnapshot().activeUseAttempt == start.attempt);
+	CHECK(fixture.owner->releaseDestinationUse(attempt) ==
+	      YouTubeAccountDestinationUseReleaseStatus::Released);
+	CHECK(!fixture.owner->destinationSnapshot().activeUseAttempt.has_value());
+	CHECK(fixture.owner->releaseDestinationUse(attempt) ==
+	      YouTubeAccountDestinationUseReleaseStatus::NoActiveUse);
+}
+
+void testRuntimeOwnerDestinationPreparationFailureDoesNotCreateUseLease()
+{
+	DestinationOwnerFixture fixture("easy-multistream-runtime-owner-destination-use-failure.ini");
+	YouTubeDestinationPrepareStatus receivedStatus = YouTubeDestinationPrepareStatus::InvalidResponse;
+	bool receivedIngestion = true;
+	const auto start = fixture.owner->startDestinationPreparationWithAttempt(
+		[&](YouTubeDestinationPrepareCompletion completion) {
+			receivedStatus = completion.status;
+			receivedIngestion = completion.ingestion.has_value();
+		});
+	CHECK(start.status == YouTubeAccountDestinationOperationStatus::Started);
+	CHECK(start.attempt.has_value());
+	if (!start.attempt.has_value() || !fixture.destinationRefreshPortRaw->lastAttempt.has_value()) {
+		return;
+	}
+	fixture.destinationRefreshPortRaw->complete(
+		ownerDestinationRefreshSuccess(*fixture.destinationRefreshPortRaw->lastAttempt));
+	CHECK(fixture.destinationResolverPortRaw->lastAttempt.has_value());
+	if (!fixture.destinationResolverPortRaw->lastAttempt.has_value()) {
+		return;
+	}
+	fixture.destinationResolverPortRaw->complete(
+		ownerDestinationResolveFailure(*fixture.destinationResolverPortRaw->lastAttempt));
+	processOwnerEvents();
+
+	CHECK(receivedStatus == YouTubeDestinationPrepareStatus::DestinationUnavailable);
+	CHECK(!receivedIngestion);
+	CHECK(!fixture.owner->destinationSnapshot().activeUseAttempt.has_value());
+	CHECK(fixture.owner->releaseDestinationUse(*start.attempt) ==
+	      YouTubeAccountDestinationUseReleaseStatus::NoActiveUse);
+}
+
+void testRuntimeOwnerDestinationUseReleaseRestoresChangedProfile()
+{
+	DestinationOwnerFixture fixture("easy-multistream-runtime-owner-destination-use-profile-change.ini");
+	const auto start = fixture.owner->startDestinationPreparationWithAttempt(
+		[](YouTubeDestinationPrepareCompletion) {});
+	CHECK(start.status == YouTubeAccountDestinationOperationStatus::Started);
+	CHECK(start.attempt.has_value());
+	if (!start.attempt.has_value() || !fixture.destinationRefreshPortRaw->lastAttempt.has_value()) {
+		return;
+	}
+	fixture.destinationRefreshPortRaw->complete(
+		ownerDestinationRefreshSuccess(*fixture.destinationRefreshPortRaw->lastAttempt));
+	CHECK(fixture.destinationResolverPortRaw->lastAttempt.has_value());
+	if (!fixture.destinationResolverPortRaw->lastAttempt.has_value()) {
+		return;
+	}
+	fixture.destinationResolverPortRaw->complete(
+		ownerDestinationResolveSuccess(*fixture.destinationResolverPortRaw->lastAttempt));
+	processOwnerEvents();
+	CHECK(fixture.owner->destinationSnapshot().activeUseAttempt == start.attempt);
+
+	saveCredential(*fixture.credentialApiRaw, kProfilePathB, selectionB());
+	fixture.currentPath = std::string(kProfilePathB);
+	setAccountSettings(fixture.config.get(), selectionB());
+	CHECK(fixture.owner->invalidateForProfileChange());
+	CHECK(fixture.owner->destinationSnapshot().activeUseAttempt == start.attempt);
+	CHECK(fixture.owner->restoreActiveProfile().status == YouTubeAccountProfileRestoreStatus::Busy);
+
+	CHECK(fixture.owner->releaseDestinationUse(*start.attempt) ==
+	      YouTubeAccountDestinationUseReleaseStatus::Released);
+	const auto bindingB = makeYouTubeAccountProfileBinding(kProfilePathB);
+	CHECK(bindingB.has_value());
+	const auto restored = fixture.owner->snapshot();
+	CHECK(restored.restored);
+	CHECK(restored.restoreStatus == YouTubeAccountProfileRestoreStatus::Restored);
+	CHECK(bindingB.has_value() && restored.profileBinding == *bindingB);
+}
+
+void testRuntimeOwnerDestinationUseShutdownRetiresLease()
+{
+	DestinationOwnerFixture fixture("easy-multistream-runtime-owner-destination-use-shutdown.ini");
+	const auto start = fixture.owner->startDestinationPreparationWithAttempt(
+		[](YouTubeDestinationPrepareCompletion) {});
+	CHECK(start.status == YouTubeAccountDestinationOperationStatus::Started);
+	CHECK(start.attempt.has_value());
+	if (!start.attempt.has_value() || !fixture.destinationRefreshPortRaw->lastAttempt.has_value()) {
+		return;
+	}
+	fixture.destinationRefreshPortRaw->complete(
+		ownerDestinationRefreshSuccess(*fixture.destinationRefreshPortRaw->lastAttempt));
+	CHECK(fixture.destinationResolverPortRaw->lastAttempt.has_value());
+	if (!fixture.destinationResolverPortRaw->lastAttempt.has_value()) {
+		return;
+	}
+	fixture.destinationResolverPortRaw->complete(
+		ownerDestinationResolveSuccess(*fixture.destinationResolverPortRaw->lastAttempt));
+	processOwnerEvents();
+	CHECK(fixture.owner->destinationSnapshot().activeUseAttempt == start.attempt);
+
+	CHECK(fixture.owner->shutdown());
+	const auto destination = fixture.owner->destinationSnapshot();
+	CHECK(destination.closed);
+	CHECK(!destination.activeUseAttempt.has_value());
+	CHECK(fixture.owner->releaseDestinationUse(*start.attempt) ==
+	      YouTubeAccountDestinationUseReleaseStatus::Closed);
 }
 
 void testRuntimeOwnerDestinationPreparationBlocksOtherAccountOperations()
@@ -2066,6 +2222,10 @@ int main(int argc, char **argv)
 {
 	QCoreApplication application(argc, argv);
 	testRuntimeOwnerDestinationPreparationSuccessReleasesLockBeforeHandler();
+	testRuntimeOwnerDestinationUseLeaseGuardsAccountMutationsAndReleasesExactly();
+	testRuntimeOwnerDestinationPreparationFailureDoesNotCreateUseLease();
+	testRuntimeOwnerDestinationUseReleaseRestoresChangedProfile();
+	testRuntimeOwnerDestinationUseShutdownRetiresLease();
 	testRuntimeOwnerDestinationPreparationBlocksOtherAccountOperations();
 	testRuntimeOwnerDestinationCompletionRejectsChangedProfileAndRestoresNewOne();
 	testRuntimeOwnerDestinationProfileChangeRetriesNativeCleanupBeforeRestore();

@@ -118,6 +118,11 @@ public:
 	SessionTransition youtubeReconnecting(OutputLease lease);
 	SessionTransition youtubeReconnectSucceeded(OutputLease lease);
 	SessionTransition retryYouTube();
+	// Ends an account/manual preparation that never created an OBS output.  It
+	// is intentionally distinct from youtubeReleased(): SetupRequired must not
+	// be rendered as a transient transport failure, and it must not call the
+	// output adapter's stop path.
+	SessionTransition youtubeSetupRequired(OutputLease lease);
 
 	// This is the single terminal event for every outcome, including a rejected
 	// start. The adapter may call it only after the OBS output signal callback has
