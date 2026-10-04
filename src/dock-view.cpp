@@ -234,7 +234,7 @@ void DockView::applyState(const DockState &state)
 	const bool compactEligible = state.settingsEditable && !setupIncomplete;
 	if (!compactEligible) {
 		setupExpanded_ = true;
-	} else if (!compactEligible_ || profileChanged) {
+	} else if (profileChanged) {
 		setupExpanded_ = false;
 	}
 	compactEligible_ = compactEligible;
