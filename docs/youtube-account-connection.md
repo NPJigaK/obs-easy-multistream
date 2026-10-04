@@ -239,11 +239,14 @@ only locally configured and remains unverified against Google, while missing and
 restore creates a new generation, and a profile without a selection remains setup-required without touching any
 credential. The production plugin now owns the account provider and profile-operation coordinator behind a lifecycle-only
 wrapper: it restores during module/profile load, invalidates before a profile switch, shuts down during exit, and exposes
-an internal local-disconnect transaction that is not connected to the dock or plugin main. A future
+internal connection and local-disconnect transactions that are not connected to the dock or plugin main. The connection
+facade rechecks the active profile without changing its generation, uses attempt-scoped operations, and converts channel
+and stream candidates to revision-bound handles plus copied labels so raw Google IDs do not cross into a future UI. A future
 selection commit must match both the generation and profile binding from the last accepted restore, and it cannot
 silently change a manual profile into account mode. The provider's network adapters are constructed, so the module now
-depends on Qt Network, but the wrapper supplies no client ID or browser opener and exposes no connection-start method.
-It therefore opens no browser or listener, emits no OAuth/API request, does not copy the refresh token out of the
+depends on Qt Network, but the wrapper supplies no client ID or browser opener and no production caller invokes its
+connection-start method. It therefore returns not-configured before opening a browser or listener, emits no OAuth/API
+request, does not copy the refresh token out of the
 Credential Manager status buffer, and cannot change the dock or start an output. The destination preparer remains
 detached. Production client configuration, browser
 opening, refresh/remote revoke, interactive output handoff, and all later items stay gated, so a partial connection path cannot appear in
