@@ -3,7 +3,7 @@
 
 #include "runtime-controller.hpp"
 
-#include "settings.hpp"
+#include "youtube-destination.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -18,8 +18,7 @@ namespace {
 
 bool hasManualYouTubeDestination(const RuntimeSettings &settings) noexcept
 {
-	return settings.youtubeConnectionMode == YouTubeConnectionMode::Manual && settings.youtubeKeyAvailable &&
-	       isValidRtmpsUrl(settings.youtubeServerUrl);
+	return settings.youtubeConnectionMode == YouTubeConnectionMode::Manual && settings.youtubeKeyAvailable;
 }
 
 } // namespace
@@ -661,7 +660,7 @@ void RuntimeController::startYouTube(OutputLease lease)
 
 	// start() is noexcept by contract.  A synchronous rejection must still be
 	// reported by the adapter as Released after it has completed its own cleanup.
-	adapter_.start(YouTubeStartRequest{lease, settings_.youtubeServerUrl, std::move(key)});
+	adapter_.start(YouTubeStartRequest{lease, kDefaultYouTubeServerUrl, std::move(key)});
 }
 
 void RuntimeController::onDestinationCompletion(RuntimeYouTubeDestinationCompletion completion) noexcept

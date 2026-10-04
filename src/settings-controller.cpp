@@ -65,32 +65,6 @@ DockNotice validationNotice(StreamKeyValidationError error) noexcept
 	return DockNotice::InternalError;
 }
 
-DockNotice validationNotice(YouTubeServerUrlValidationError error) noexcept
-{
-	switch (error) {
-	case YouTubeServerUrlValidationError::None:
-		return DockNotice::Preview;
-	case YouTubeServerUrlValidationError::Empty:
-		return DockNotice::MissingServerUrl;
-	case YouTubeServerUrlValidationError::TooLong:
-		return DockNotice::ServerUrlTooLong;
-	case YouTubeServerUrlValidationError::EmbeddedNull:
-	case YouTubeServerUrlValidationError::WhitespaceOrControlCharacter:
-	case YouTubeServerUrlValidationError::InvalidUtf8:
-	case YouTubeServerUrlValidationError::InvalidScheme:
-	case YouTubeServerUrlValidationError::MissingHostname:
-	case YouTubeServerUrlValidationError::UnsupportedHostname:
-	case YouTubeServerUrlValidationError::UserInfoNotAllowed:
-	case YouTubeServerUrlValidationError::InvalidPort:
-	case YouTubeServerUrlValidationError::QueryNotAllowed:
-	case YouTubeServerUrlValidationError::FragmentNotAllowed:
-	case YouTubeServerUrlValidationError::InvalidPath:
-		return DockNotice::InvalidServerUrl;
-	}
-
-	return DockNotice::InternalError;
-}
-
 QString currentProfileName()
 {
 	char *rawName = obs_frontend_get_current_profile();
@@ -128,14 +102,6 @@ SettingsController::SettingsController(DockView *view, QObject *parent)
 				blog(LOG_ERROR,
 				     "[obs-easy-multistream] Updating the profile setting failed unexpectedly");
 					renderInternalError();
-			}
-		},
-		[this](QByteArray serverUrl) {
-			try {
-				handleSaveServerUrl(std::move(serverUrl));
-			} catch (...) {
-				blog(LOG_ERROR, "[obs-easy-multistream] Saving the server URL failed unexpectedly");
-				renderInternalError();
 			}
 		},
 		[this](QByteArray streamKey) {
@@ -198,7 +164,6 @@ void SettingsController::loadCurrentProfile(DockNotice successNotice, bool profi
 	case SettingsLoadStatus::Defaults:
 		break;
 	case SettingsLoadStatus::SetupRequired:
-		notice = DockNotice::MissingServerUrl;
 		break;
 	case SettingsLoadStatus::InvalidSchema:
 		notice = DockNotice::InvalidSettings;
@@ -213,9 +178,6 @@ void SettingsController::loadCurrentProfile(DockNotice successNotice, bool profi
 
 	const bool mayReplaceSuccessNotice = notice == DockNotice::Preview || notice == DockNotice::ProfileSaved;
 	if (mayReplaceSuccessNotice && settingsEditable_ && settings_.youtubeEnabled &&
-	    settings_.youtubeServerUrl.empty()) {
-		notice = DockNotice::MissingServerUrl;
-	} else if (mayReplaceSuccessNotice && settingsEditable_ && settings_.youtubeEnabled &&
 	    credentialState_ == CredentialDisplayState::Missing) {
 		notice = DockNotice::MissingKey;
 	} else if (mayReplaceSuccessNotice && settingsEditable_ && settings_.youtubeEnabled &&
@@ -316,10 +278,6 @@ void SettingsController::handleEnabledChanged(bool enabled)
 	settingsEditable_ = true;
 	credentialState_ = refreshCredentialState();
 
-	if (enabled && settings_.youtubeServerUrl.empty()) {
-		render(DockNotice::MissingServerUrl);
-		return;
-	}
 	if (enabled && credentialState_ != CredentialDisplayState::Present) {
 		render(credentialState_ == CredentialDisplayState::Unavailable ? DockNotice::CredentialUnavailable
 									       : DockNotice::MissingKey);
@@ -335,51 +293,6 @@ void SettingsController::handleEnabledChanged(bool enabled)
 	}
 
 	loadCurrentProfile(DockNotice::ProfileSaved);
-}
-
-void SettingsController::handleSaveServerUrl(QByteArray serverUrlBytes)
-{
-	if (closing_) {
-		return;
-	}
-
-	config_t *config = obs_frontend_get_profile_config();
-	const SettingsLoadResult loaded = loadProfileSettings(config);
-	if (loaded.status == SettingsLoadStatus::Unavailable) {
-		loadCurrentProfile(DockNotice::ProfileUnavailable);
-		return;
-	}
-	if (loaded.status != SettingsLoadStatus::Loaded && loaded.status != SettingsLoadStatus::Defaults &&
-	    loaded.status != SettingsLoadStatus::SetupRequired) {
-		loadCurrentProfile(loaded.status == SettingsLoadStatus::UnsupportedFutureSchema
-					   ? DockNotice::FutureSettings
-					   : DockNotice::InvalidSettings);
-		return;
-	}
-
-	settings_ = loaded.settings;
-	profileName_ = currentProfileName();
-	loadStatus_ = loaded.status;
-	settingsEditable_ = true;
-	credentialState_ = refreshCredentialState();
-
-	const std::string_view serverUrl(serverUrlBytes.constData(),
-					 static_cast<std::size_t>(serverUrlBytes.size()));
-	const YouTubeServerUrlValidationError validation = validateYouTubeServerUrl(serverUrl);
-	if (validation != YouTubeServerUrlValidationError::None) {
-		render(validationNotice(validation));
-		return;
-	}
-
-	Settings desired = settings_;
-	desired.youtubeServerUrl.assign(serverUrl.data(), serverUrl.size());
-	if (saveProfileSettings(config, desired) != CONFIG_SUCCESS) {
-		blog(LOG_WARNING, "[obs-easy-multistream] Failed to save the YouTube server URL");
-		loadCurrentProfile(DockNotice::SettingsSaveFailed);
-		return;
-	}
-
-	loadCurrentProfile(DockNotice::ServerUrlSaved);
 }
 
 void SettingsController::handleSaveKey(QByteArray streamKeyBytes)
@@ -511,8 +424,6 @@ void SettingsController::render(DockNotice notice)
 	DockState state;
 	lastNotice_ = notice;
 	state.profileName = profileName_;
-	state.youtubeServerUrl = QString::fromUtf8(settings_.youtubeServerUrl.data(),
-					  static_cast<qsizetype>(settings_.youtubeServerUrl.size()));
 	state.settingsEditable = settingsEditable_;
 	state.youtubeEnabled = settings_.youtubeEnabled;
 	state.credential = credentialState_;

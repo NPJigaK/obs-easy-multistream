@@ -14,12 +14,12 @@
 
 namespace easy_multistream {
 
-inline constexpr std::uint64_t kSettingsSchemaVersion = 3;
+inline constexpr std::uint64_t kSettingsSchemaVersion = 4;
 
 struct Settings {
 	bool youtubeEnabled = false;
 	YouTubeConnectionMode youtubeConnectionMode = YouTubeConnectionMode::Manual;
-	std::string youtubeServerUrl;
+	std::string youtubeServerUrl = kDefaultYouTubeServerUrl;
 	std::optional<YouTubeAccountSelection> youtubeAccountSelection;
 };
 

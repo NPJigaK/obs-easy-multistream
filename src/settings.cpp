@@ -193,18 +193,17 @@ SelectionLoadResult loadAccountSelection(config_t *config)
 	return {SelectionLoadState::Loaded, std::move(selection)};
 }
 
-bool isValidServerUrlValue(const std::string &serverUrl) noexcept
-{
-	return serverUrl.empty() || validateYouTubeServerUrl(serverUrl) == YouTubeServerUrlValidationError::None;
-}
-
 bool canSave(const Settings &settings) noexcept
 {
 	if (settings.youtubeConnectionMode != YouTubeConnectionMode::Manual &&
 	    settings.youtubeConnectionMode != YouTubeConnectionMode::Account) {
 		return false;
 	}
-	if (!isValidServerUrlValue(settings.youtubeServerUrl)) {
+	// The manual destination is deliberately not user-configurable.  Account
+	// mode obtains its destination from the YouTube API and never consumes this
+	// compatibility field.
+	if (settings.youtubeConnectionMode == YouTubeConnectionMode::Manual &&
+	    settings.youtubeServerUrl != kDefaultYouTubeServerUrl) {
 		return false;
 	}
 	if (settings.youtubeAccountSelection.has_value() &&
@@ -255,19 +254,14 @@ SettingsLoadResult loadProfileSettings(config_t *config) noexcept
 			return {{}, SettingsLoadStatus::InvalidSchema, schema};
 		}
 
-		const bool hasServerUrl = config_has_user_value(config, kSection, kYouTubeServerUrl);
-		const char *rawServerUrl = hasServerUrl ? config_get_string(config, kSection, kYouTubeServerUrl)
-							: nullptr;
-		if (rawServerUrl != nullptr) {
-			settings.youtubeServerUrl = rawServerUrl;
-		}
+		// Schema 1-3 stored a user-entered URL.  It was easy to paste the RTMP
+		// address shown by Studio even though the plugin only accepted RTMPS.  The
+		// standard secure ingestion endpoint is now an internal invariant, so old,
+		// missing, or malformed URL values are ignored rather than blocking setup.
+		settings.youtubeServerUrl = kDefaultYouTubeServerUrl;
 
 		if (settings.youtubeConnectionMode == YouTubeConnectionMode::Account) {
-			// The unused manual URL cannot invalidate or become a fallback for an
-			// account selection. Preserve it only when it is independently safe.
-			if (!isValidServerUrlValue(settings.youtubeServerUrl)) {
-				settings.youtubeServerUrl.clear();
-			}
+			settings.youtubeServerUrl.clear();
 			SelectionLoadResult selection = loadAccountSelection(config);
 			if (selection.state == SelectionLoadState::Invalid) {
 				return {{}, SettingsLoadStatus::InvalidSchema, schema};
@@ -279,9 +273,6 @@ SettingsLoadResult loadProfileSettings(config_t *config) noexcept
 			return {std::move(settings), SettingsLoadStatus::Loaded, schema};
 		}
 
-		if (!isValidServerUrlValue(settings.youtubeServerUrl)) {
-			return {{}, SettingsLoadStatus::InvalidSchema, schema};
-		}
 		if (schema >= 3) {
 			// A damaged inactive account selection must not disable a valid manual
 			// destination. A later successful save removes incomplete fields.
@@ -289,9 +280,6 @@ SettingsLoadResult loadProfileSettings(config_t *config) noexcept
 			if (selection.state == SelectionLoadState::Loaded) {
 				settings.youtubeAccountSelection = std::move(selection.selection);
 			}
-		}
-		if (!hasServerUrl || settings.youtubeServerUrl.empty()) {
-			return {std::move(settings), SettingsLoadStatus::SetupRequired, schema};
 		}
 		return {std::move(settings), SettingsLoadStatus::Loaded, schema};
 	} catch (...) {
@@ -312,7 +300,11 @@ void writeProfileSettings(config_t *config, const Settings &settings) noexcept
 	config_set_uint(config, kSection, kSchemaVersion, kSettingsSchemaVersion);
 	config_set_bool(config, kSection, kYouTubeEnabled, settings.youtubeEnabled);
 	config_set_string(config, kSection, kConnectionMode, serializedMode(settings.youtubeConnectionMode));
-	config_set_string(config, kSection, kYouTubeServerUrl, settings.youtubeServerUrl.c_str());
+	if (settings.youtubeConnectionMode == YouTubeConnectionMode::Manual) {
+		config_set_string(config, kSection, kYouTubeServerUrl, kDefaultYouTubeServerUrl);
+	} else {
+		config_remove_value(config, kSection, kYouTubeServerUrl);
+	}
 
 	if (settings.youtubeAccountSelection.has_value()) {
 		const YouTubeAccountSelection &selection = *settings.youtubeAccountSelection;

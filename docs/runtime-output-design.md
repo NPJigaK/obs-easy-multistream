@@ -22,8 +22,8 @@ The adapter may prepare and start YouTube only after `OBS_FRONTEND_EVENT_STREAMI
 1. Obtain a strong reference from `obs_frontend_get_streaming_output()`.
 2. Read the native video and first audio encoder, then take explicit encoder references.
 3. Reject unsupported or missing encoders without changing the native stream.
-4. Read and validate the saved YouTube RTMPS Stream URL and saved YouTube key immediately before use. The URL is copied from YouTube Studio, remains user-editable, and is restricted to a single-label host under `*.rtmps.youtube.com`.
-5. Create one `rtmp_custom` service with the validated user-provided RTMPS Stream URL and the temporary key.
+4. Read the saved YouTube key immediately before use and pair it with the plugin's fixed, validated manual destination, `rtmps://a.rtmps.youtube.com/live2`. Profile data and user input cannot redirect the manual key.
+5. Create one `rtmp_custom` service with that secure RTMPS destination and the temporary key.
 6. Create one `rtmp_output`, attach the native encoders, attach the service, and connect signals.
 7. Call `obs_output_start()` and treat its `true` return only as an accepted asynchronous start, not as a successful connection. The session remains Connecting until the output's `start` signal is observed.
 
@@ -43,7 +43,7 @@ OBS 32.2.2 does not emit `OBS_FRONTEND_EVENT_STREAMING_STOPPED` when its native 
 
 ## Account destination handoff
 
-The account destination path has a tested internal handoff into the same output adapter, but the production capability gate is deliberately false until the official OAuth client, consent/verification, and account UI are ready. The current manual RTMPS URL/key path therefore remains the only user-visible and active account configuration path; no browser, OAuth request, account output, or account secret is used by the shipped plugin.
+The account destination path has a tested internal handoff into the same output adapter, but the production capability gate is deliberately false until the official OAuth client, consent/verification, and account UI are ready. The current manual key path with its fixed RTMPS destination therefore remains the only user-visible and active configuration path; no browser, OAuth request, account output, or account secret is used by the shipped plugin.
 
 When the capability is eventually enabled, `RuntimeController` starts account preparation only after a recognized native stream is `Streaming`. It records the current `OutputLease` and `NativeLease` as a composite identity. `YouTubeAccountRuntimeDestinationProvider` maps that runtime lease explicitly to the exact `YouTubeDestinationPrepareAttempt` returned by `YouTubeAccountRuntimeOwner`; the two lease types have independent generators and are never converted or assumed to have matching numeric fields. A completion is accepted only while the output lease, native lease, profile generation, connection mode, settings, and native streaming state still match. A stale or mismatched completion is discarded and any successful owner use is released without reaching the adapter.
 

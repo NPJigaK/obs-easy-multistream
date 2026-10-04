@@ -12,6 +12,7 @@ namespace easy_multistream {
 // destination validation used by both settings and API-facing code.
 inline constexpr std::size_t kMaxCredentialSecretBytes = 5U * 512U;
 inline constexpr std::size_t kMaxYouTubeServerUrlBytes = 2048U;
+inline constexpr char kDefaultYouTubeServerUrl[] = "rtmps://a.rtmps.youtube.com/live2";
 
 enum class StreamKeyValidationError {
 	None,

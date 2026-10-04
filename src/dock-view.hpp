@@ -44,9 +44,6 @@ struct DockText {
 	QString openYouTubeStudio;
 	QString profileLabel;
 	QString enableYouTube;
-	QString serverUrlLabel;
-	QString serverUrlPlaceholder;
-	QString saveServerUrl;
 	QString credentialLabel;
 	QString streamKeyLabel;
 	QString saveKey;
@@ -59,7 +56,6 @@ struct DockText {
 	QString credentialUnavailable;
 	QString youtubeDisabled;
 	QString youtubeReady;
-	QString youtubeMissingServerUrl;
 	QString youtubeMissingKey;
 	QString youtubeUnavailable;
 	QString youtubeRequiresTwitch;
@@ -73,10 +69,6 @@ struct DockText {
 	QString retryYouTube;
 	QString noticePreview;
 	QString noticeProfileSaved;
-	QString noticeServerUrlSaved;
-	QString noticeMissingServerUrl;
-	QString noticeInvalidServerUrl;
-	QString noticeServerUrlTooLong;
 	QString noticeKeySaved;
 	QString noticeKeyRemoved;
 	QString noticeMissingKey;
@@ -106,10 +98,6 @@ enum class CredentialDisplayState {
 enum class DockNotice {
 	Preview,
 	ProfileSaved,
-	ServerUrlSaved,
-	MissingServerUrl,
-	InvalidServerUrl,
-	ServerUrlTooLong,
 	KeySaved,
 	KeyRemoved,
 	MissingKey,
@@ -129,7 +117,6 @@ enum class DockNotice {
 
 struct DockState {
 	QString profileName;
-	QString youtubeServerUrl;
 	bool settingsEditable = false;
 	bool youtubeEnabled = false;
 	CredentialDisplayState credential = CredentialDisplayState::Unavailable;
@@ -141,7 +128,6 @@ struct DockState {
 class DockView final : public QWidget {
 public:
 	using EnabledHandler = std::function<void(bool)>;
-	using SaveServerUrlHandler = std::function<void(QByteArray)>;
 	using SaveKeyHandler = std::function<void(QByteArray)>;
 	using RemoveKeyHandler = std::function<void()>;
 	using RetryYouTubeHandler = std::function<void()>;
@@ -149,8 +135,8 @@ public:
 
 	explicit DockView(DockText text, QWidget *parent = nullptr);
 
-	void bindActions(QObject *context, EnabledHandler enabledHandler, SaveServerUrlHandler saveServerUrlHandler,
-			 SaveKeyHandler saveKeyHandler, RemoveKeyHandler removeKeyHandler,
+	void bindActions(QObject *context, EnabledHandler enabledHandler, SaveKeyHandler saveKeyHandler,
+			 RemoveKeyHandler removeKeyHandler,
 			 RetryYouTubeHandler retryYouTubeHandler,
 			 OpenYouTubeStudioHandler openYouTubeStudioHandler);
 	void applyState(const DockState &state);
@@ -175,8 +161,6 @@ private:
 	QCheckBox *youtubeEnabledCheckBox_ = nullptr;
 	QPushButton *toggleSettingsButton_ = nullptr;
 	QPushButton *openYouTubeStudioButton_ = nullptr;
-	QLineEdit *serverUrlEdit_ = nullptr;
-	QPushButton *saveServerUrlButton_ = nullptr;
 	QLabel *credentialStatusLabel_ = nullptr;
 	QLineEdit *streamKeyEdit_ = nullptr;
 	QPushButton *saveKeyButton_ = nullptr;

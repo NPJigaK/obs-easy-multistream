@@ -31,7 +31,6 @@ public:
 
 private:
 	void handleEnabledChanged(bool enabled);
-	void handleSaveServerUrl(QByteArray serverUrl);
 	void handleSaveKey(QByteArray streamKey);
 	void handleRemoveKey();
 	void commitRemoveKey(std::uint64_t generation, QString profileName);
