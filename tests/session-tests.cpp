@@ -299,6 +299,30 @@ void testSecondaryFailureIsolatedFromNativeOutput()
 	CHECK(coordinator.snapshot().youtube == YouTubeStreamState::Failed);
 }
 
+void testSetupRequiredEndsLogicalPreparationWithoutTransportFailure()
+{
+	SessionCoordinator coordinator;
+	const OutputLease lease = startTwitchYouTube(coordinator);
+
+	const auto setupRequired = coordinator.youtubeSetupRequired(lease);
+	checkNoEffect(setupRequired);
+	CHECK(setupRequired.snapshot.native == NativeStreamState::Streaming);
+	CHECK(setupRequired.snapshot.youtube == YouTubeStreamState::SetupRequired);
+	CHECK(!setupRequired.snapshot.youtubeLease.has_value());
+	CHECK(!setupRequired.snapshot.youtubeKeyAvailable);
+
+	const std::uint64_t revision = coordinator.snapshot().revision;
+	checkNoEffect(coordinator.youtubeSetupRequired(lease));
+	CHECK(coordinator.snapshot().revision == revision);
+
+	// A later settings/account refresh explicitly restores availability and
+	// receives a new lease; the old preparation cannot be reused.
+	const auto configured = coordinator.configure(NativeDestination::Twitch, true, true);
+	const OutputLease retryLease = checkEffect(configured, SessionEffectKind::StartYouTube);
+	CHECK(retryLease != lease);
+	CHECK(configured.snapshot.youtube == YouTubeStreamState::Connecting);
+}
+
 void testUnexpectedYouTubeStopDoesNotLoop()
 {
 	SessionCoordinator coordinator;
@@ -495,6 +519,7 @@ int main()
 	testDuplicateStopAndRapidRestart();
 	testStaleNativeStopCannotStopRestartedSession();
 	testSecondaryFailureIsolatedFromNativeOutput();
+	testSetupRequiredEndsLogicalPreparationWithoutTransportFailure();
 	testUnexpectedYouTubeStopDoesNotLoop();
 	testLateStartCannotEscapeStopping();
 	testStartFailureCompletesARequestedStop();

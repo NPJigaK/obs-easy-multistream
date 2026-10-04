@@ -742,9 +742,10 @@ bool YouTubeAccountRuntimeOwner::remoteRevokeBusy() const noexcept
 bool YouTubeAccountRuntimeOwner::destinationPreparationBusy() const noexcept
 {
 	if (destinationPreparer_ == nullptr) {
-		return false;
+		return activeDestinationUseAttempt_.has_value();
 	}
-	return destinationPreparer_->activeAttempt().has_value() || destinationPreparer_->lockHeld();
+	return activeDestinationUseAttempt_.has_value() || destinationPreparer_->activeAttempt().has_value() ||
+	       destinationPreparer_->lockHeld();
 }
 
 bool YouTubeAccountRuntimeOwner::accountOperationBusy() const noexcept
@@ -875,38 +876,53 @@ YouTubeAccountRemoteRevokeSnapshot YouTubeAccountRuntimeOwner::remoteRevokeSnaps
 YouTubeAccountDestinationOperationStatus YouTubeAccountRuntimeOwner::startDestinationPreparation(
 	YouTubeAccountDestinationPreparer::CompletionHandler completionHandler) noexcept
 {
+	return startDestinationPreparationWithAttempt(std::move(completionHandler)).status;
+}
+
+YouTubeAccountDestinationStartResult YouTubeAccountRuntimeOwner::startDestinationPreparationWithAttempt(
+	YouTubeAccountDestinationPreparer::CompletionHandler completionHandler) noexcept
+{
+	YouTubeAccountDestinationStartResult result;
 	if (!onOwnerThread()) {
-		return YouTubeAccountDestinationOperationStatus::WrongThread;
+		result.status = YouTubeAccountDestinationOperationStatus::WrongThread;
+		return result;
 	}
 	if (closed_ || destinationPreparer_ == nullptr) {
-		return YouTubeAccountDestinationOperationStatus::Closed;
+		result.status = YouTubeAccountDestinationOperationStatus::Closed;
+		return result;
 	}
 	if (!completionHandler) {
-		return YouTubeAccountDestinationOperationStatus::OperationFailed;
+		result.status = YouTubeAccountDestinationOperationStatus::OperationFailed;
+		return result;
 	}
 	if (accountOperationBusy()) {
-		return YouTubeAccountDestinationOperationStatus::Busy;
+		result.status = YouTubeAccountDestinationOperationStatus::Busy;
+		return result;
 	}
 
 	const auto preflight = preflightConnection();
 	if (preflight != YouTubeAccountConnectionOperationStatus::Accepted) {
-		return destinationStatusForConnectionPreflight(preflight);
+		result.status = destinationStatusForConnectionPreflight(preflight);
+		return result;
 	}
 
 	try {
 		const auto providerSnapshot = provider_->snapshot();
 		if (providerSnapshot.account.lease.has_value()) {
-			return YouTubeAccountDestinationOperationStatus::Busy;
+			result.status = YouTubeAccountDestinationOperationStatus::Busy;
+			return result;
 		}
 
 		const auto profile = context_.snapshot();
 		if (profile.generation != restoredGeneration_ || profile.profileBinding != restoredBinding_ ||
 		    profile.connectionMode != YouTubeConnectionMode::Account) {
 			(void)invalidateConnectionContext(YouTubeAccountProfileRestoreStatus::ProfileChanged);
-			return YouTubeAccountDestinationOperationStatus::ProfileChanged;
+			result.status = YouTubeAccountDestinationOperationStatus::ProfileChanged;
+			return result;
 		}
 		if (!profile.selection.has_value()) {
-			return YouTubeAccountDestinationOperationStatus::NoSelection;
+			result.status = YouTubeAccountDestinationOperationStatus::NoSelection;
+			return result;
 		}
 
 		const std::uint64_t expectedGeneration = restoredGeneration_;
@@ -938,30 +954,38 @@ YouTubeAccountDestinationOperationStatus YouTubeAccountRuntimeOwner::startDestin
 		// profile change or shutdown. The lifecycle mutation wins over a stale
 		// immediate start result.
 		if (closed_) {
-			return YouTubeAccountDestinationOperationStatus::Closed;
+			result.status = YouTubeAccountDestinationOperationStatus::Closed;
+			return result;
 		}
 		if (!restored_) {
-			return destinationStatusForConnectionPreflight(connectionStatusForLostRestore(restoreStatus_));
+			result.status = destinationStatusForConnectionPreflight(connectionStatusForLostRestore(restoreStatus_));
+			return result;
 		}
 		if (restoredGeneration_ != expectedGeneration || restoredBinding_ != expectedBinding) {
-			return YouTubeAccountDestinationOperationStatus::ProfileChanged;
+			result.status = YouTubeAccountDestinationOperationStatus::ProfileChanged;
+			return result;
 		}
 
-		const auto mapped = mapDestinationStartStatus(status);
-		if (mapped == YouTubeAccountDestinationOperationStatus::Started) {
+		result.status = mapDestinationStartStatus(status);
+		if (result.status == YouTubeAccountDestinationOperationStatus::Started) {
+			// This is the immutable preparation attempt, returned from the same
+			// owner operation that accepted the request. It is deliberately not
+			// obtained by taking a second snapshot after start().
+			result.attempt = expectedAttempt;
 			lastDestinationStatus_.reset();
 		} else if (status == YouTubeDestinationPrepareStartStatus::OperationFailed &&
 			   destinationPreparer_->lockHeld()) {
 			clearRestoredBinding();
 			restoreStatus_ = YouTubeAccountProfileRestoreStatus::OperationFailed;
 		}
-		return mapped;
+		return result;
 	} catch (...) {
 		if (destinationPreparer_ != nullptr && destinationPreparer_->lockHeld()) {
 			clearRestoredBinding();
 			restoreStatus_ = YouTubeAccountProfileRestoreStatus::OperationFailed;
 		}
-		return YouTubeAccountDestinationOperationStatus::OperationFailed;
+		result.status = YouTubeAccountDestinationOperationStatus::OperationFailed;
+		return result;
 	}
 }
 
@@ -1006,6 +1030,27 @@ YouTubeAccountRuntimeOwner::cancelDestinationPreparation(YouTubeDestinationPrepa
 	}
 }
 
+YouTubeAccountDestinationUseReleaseStatus
+YouTubeAccountRuntimeOwner::releaseDestinationUse(YouTubeDestinationPrepareAttempt attempt) noexcept
+{
+	if (!onOwnerThread()) {
+		return YouTubeAccountDestinationUseReleaseStatus::WrongThread;
+	}
+	if (closed_) {
+		return YouTubeAccountDestinationUseReleaseStatus::Closed;
+	}
+	if (!activeDestinationUseAttempt_.has_value()) {
+		return YouTubeAccountDestinationUseReleaseStatus::NoActiveUse;
+	}
+	if (!(*activeDestinationUseAttempt_ == attempt)) {
+		return YouTubeAccountDestinationUseReleaseStatus::StaleAttempt;
+	}
+
+	activeDestinationUseAttempt_.reset();
+	retryPendingProfileRestore();
+	return YouTubeAccountDestinationUseReleaseStatus::Released;
+}
+
 YouTubeAccountDestinationSnapshot YouTubeAccountRuntimeOwner::destinationSnapshot() const
 {
 	YouTubeAccountDestinationSnapshot value;
@@ -1016,6 +1061,7 @@ YouTubeAccountDestinationSnapshot YouTubeAccountRuntimeOwner::destinationSnapsho
 	value.generation = restoredGeneration_;
 	value.restored = restored_;
 	value.closed = closed_;
+	value.activeUseAttempt = activeDestinationUseAttempt_;
 	if (destinationPreparer_ != nullptr) {
 		value.state = destinationPreparer_->state();
 		value.activeAttempt = destinationPreparer_->activeAttempt();
@@ -1074,6 +1120,19 @@ void YouTubeAccountRuntimeOwner::updateAfterDestinationPreparation(
 		}
 
 		lastDestinationStatus_ = completion.status;
+		if (completion.succeeded()) {
+			// The preparer has released its operation lock before invoking this
+			// callback. From this point until the output layer reports Released,
+			// the exact preparation attempt is the destination-use lease.
+			if (activeDestinationUseAttempt_.has_value() &&
+			    !(*activeDestinationUseAttempt_ == expectedAttempt)) {
+				completion.status = YouTubeDestinationPrepareStatus::ServiceUnavailable;
+				completion.ingestion.reset();
+				lastDestinationStatus_ = completion.status;
+				return;
+			}
+			activeDestinationUseAttempt_ = expectedAttempt;
+		}
 	} catch (...) {
 		completion.status = YouTubeDestinationPrepareStatus::ServiceUnavailable;
 		completion.ingestion.reset();
@@ -1288,6 +1347,10 @@ bool YouTubeAccountRuntimeOwner::shutdown() noexcept
 	closed_ = true;
 	profileRestorePending_ = false;
 	destinationCleanupRetryScheduled_ = false;
+	// The destination-use lease is a lifecycle guard, not an owner of the OBS
+	// output itself. Once shutdown begins no further account mutation or release
+	// can be accepted, so retire the guard together with the closed owner.
+	activeDestinationUseAttempt_.reset();
 	clearRestoredBinding();
 	bool coordinatorClosed = true;
 	bool remoteClosed = true;

@@ -1,6 +1,6 @@
 # OBS output integration contract
 
-This note records the ownership and event rules implemented by the YouTube RTMPS adapter. The session state library remains free of OBS calls and network behavior; OBS-specific ownership is confined to the runtime bridge and adapter.
+This note records the ownership and event rules implemented by the YouTube RTMPS adapter and the account-destination handoff that feeds it. The session state library remains free of OBS calls and network behavior; OBS-specific ownership is confined to the runtime bridge, account bridge, and adapter.
 
 ## Pinned source basis
 
@@ -40,6 +40,16 @@ The adapter does not select YouTube's `Encoder` mode for the vertical preview an
 The Frontend bridge assigns a `NativeLease` when `STREAMING_STARTING` is accepted and passes that same value to the corresponding Started, Stopping, and Stopped state events. If a new native attempt begins before an older stop notification is delivered, the bridge retains the stopping lease separately. A late stop for the older lease must never be labeled as belonging to the new attempt. Profile changes invalidate the native generation before new service values are loaded.
 
 OBS 32.2.2 does not emit `OBS_FRONTEND_EVENT_STREAMING_STOPPED` when its native `StartStreaming()` call rejects synchronously. During `STREAMING_STARTING`, the bridge therefore takes a guarded reference to the native output and observes its synchronous `starting` signal. After the frontend callback returns, one queued reconciliation step reports `nativeStartFailed(lease)` if that signal was not observed and the same native lease is still Starting. The reconciliation owns no raw pointer, is generation-checked, and must not infer failure merely from a slow asynchronous connection. A later OBS retry receives a fresh `NativeLease`.
+
+## Account destination handoff
+
+The account destination path has a tested internal handoff into the same output adapter, but the production capability gate is deliberately false until the official OAuth client, consent/verification, and account UI are ready. The current manual RTMPS URL/key path therefore remains the only user-visible and active account configuration path; no browser, OAuth request, account output, or account secret is used by the shipped plugin.
+
+When the capability is eventually enabled, `RuntimeController` starts account preparation only after a recognized native stream is `Streaming`. It records the current `OutputLease` and `NativeLease` as a composite identity. `YouTubeAccountRuntimeDestinationProvider` maps that runtime lease explicitly to the exact `YouTubeDestinationPrepareAttempt` returned by `YouTubeAccountRuntimeOwner`; the two lease types have independent generators and are never converted or assumed to have matching numeric fields. A completion is accepted only while the output lease, native lease, profile generation, connection mode, settings, and native streaming state still match. A stale or mismatched completion is discarded and any successful owner use is released without reaching the adapter.
+
+Pending preparation and active output use are different lifetimes. If Stop, a profile change, or EXIT arrives before an OBS output exists, the bridge cancels the owner preparation and completes the runtime lease without sending an adapter stop request. After preparation succeeds, the account owner holds a destination-use lease while the adapter owns the resolved URL/key. That owner lease is released only after the adapter has emitted `Released` following complete output/service/encoder teardown, and account mutations remain busy while it is held. Switching between manual and account modes also goes through this same output-release barrier before a new mode can start.
+
+The lifecycle order is intentional: `PROFILE_CHANGING` first invalidates/cancels the runtime output-side work, then invalidates the account owner; `PROFILE_CHANGED` loads the new profile after the old lease is no longer usable. During `EXIT`, runtime shutdown and the output release barrier run before the account bridge/provider is shut down, then the owner is made terminal. Worker-originated adapter events enter an owner-thread mailbox before a queued wake-up is requested; a rejected wake-up leaves the event for the next owner-thread operation, so `Released` cannot be silently discarded. Queued callbacks carry only value data plus lifetime/generation guards. Runtime snapshots, profile settings, diagnostics, and logs never contain OAuth tokens, refresh tokens, authorization codes, PKCE values, or resolved stream keys.
 
 ## Ownership
 

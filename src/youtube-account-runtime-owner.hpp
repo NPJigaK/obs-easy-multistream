@@ -140,12 +140,35 @@ enum class YouTubeAccountDestinationOperationStatus {
 	OperationFailed,
 };
 
+// The preparation start result carries the immutable attempt selected by the
+// owner.  Callers must keep this value rather than taking a later snapshot:
+// preparation may complete synchronously or re-enter the owner lifecycle.
+struct YouTubeAccountDestinationStartResult final {
+	YouTubeAccountDestinationOperationStatus status = YouTubeAccountDestinationOperationStatus::OperationFailed;
+	std::optional<YouTubeDestinationPrepareAttempt> attempt;
+};
+
+// A successful preparation can be handed to the OBS output layer.  While that
+// output is using the resolved destination, the owner keeps this exact lease
+// and rejects account/profile mutations.  Release is intentionally separate
+// from preparation cancellation because the preparer has already completed by
+// the time the output owns the destination.
+enum class YouTubeAccountDestinationUseReleaseStatus {
+	Released,
+	NoActiveUse,
+	StaleAttempt,
+	WrongThread,
+	Closed,
+	OperationFailed,
+};
+
 // Secret-free observation of the account destination transaction. A resolved
 // RTMPS URL and stream key exist only in the move-only completion passed to the
 // caller; they are never retained in this snapshot.
 struct YouTubeAccountDestinationSnapshot final {
 	YouTubeDestinationPreparerState state = YouTubeDestinationPreparerState::Idle;
 	std::optional<YouTubeDestinationPrepareAttempt> activeAttempt;
+	std::optional<YouTubeDestinationPrepareAttempt> activeUseAttempt;
 	std::optional<YouTubeDestinationPrepareStatus> lastStatus;
 	std::uint64_t generation = 0;
 	bool lockCleanupPending = false;
@@ -200,11 +223,18 @@ public:
 	YouTubeAccountRemoteRevokeSnapshot remoteRevokeSnapshot() const;
 	// Resolves the currently restored account selection just in time. The owner,
 	// not the caller, supplies the active profile generation, binding, and saved
-	// selection so an obsolete profile cannot be prepared by value.
+	// selection so an obsolete profile cannot be prepared by value. A successful
+	// completion transfers the exact attempt as a destination-use lease; handlers
+	// must not throw and must release that attempt after the output teardown
+	// barrier.
 	YouTubeAccountDestinationOperationStatus
 	startDestinationPreparation(YouTubeAccountDestinationPreparer::CompletionHandler completionHandler) noexcept;
+	YouTubeAccountDestinationStartResult
+	startDestinationPreparationWithAttempt(YouTubeAccountDestinationPreparer::CompletionHandler completionHandler) noexcept;
 	YouTubeAccountDestinationOperationStatus
 	cancelDestinationPreparation(YouTubeDestinationPrepareAttempt attempt) noexcept;
+	YouTubeAccountDestinationUseReleaseStatus
+	releaseDestinationUse(YouTubeDestinationPrepareAttempt attempt) noexcept;
 	YouTubeAccountDestinationSnapshot destinationSnapshot() const;
 	// Erases the active profile's saved account selection and credential while
 	// keeping an account-mode profile ready for a later connection. The
@@ -254,6 +284,7 @@ private:
 	std::uint64_t restoredGeneration_ = 0;
 	std::uint64_t destinationAttemptCounter_ = 0;
 	std::string restoredBinding_;
+	std::optional<YouTubeDestinationPrepareAttempt> activeDestinationUseAttempt_;
 	std::optional<YouTubeDestinationPrepareStatus> lastDestinationStatus_;
 	YouTubeAccountProfileRestoreStatus restoreStatus_ = YouTubeAccountProfileRestoreStatus::Unavailable;
 	bool restored_ = false;

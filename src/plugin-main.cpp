@@ -8,6 +8,7 @@
 #include "settings-controller.hpp"
 #include "version.hpp"
 #include "windows-credential-vault.hpp"
+#include "youtube-account-runtime-destination-provider.hpp"
 #include "youtube-account-runtime-owner.hpp"
 #include "youtube-output-adapter.hpp"
 
@@ -68,6 +69,8 @@ struct PluginState {
 	QPointer<QAction> toolsMenuAction;
 	std::unique_ptr<easy_multistream::SettingsController> settingsController;
 	std::unique_ptr<easy_multistream::YouTubeAccountRuntimeOwner> youtubeAccountRuntimeOwner;
+	std::unique_ptr<easy_multistream::YouTubeAccountRuntimeOwnerForwarder> youtubeAccountRuntimeForwarder;
+	std::unique_ptr<easy_multistream::YouTubeAccountRuntimeDestinationProvider> youtubeAccountDestinationProvider;
 	QObject runtimeContext;
 	easy_multistream::NativeWinCredentialApi credentialApi;
 	easy_multistream::WindowsCredentialVault credentialVault;
@@ -423,6 +426,12 @@ void applyRuntimeSettings(PluginState &state, easy_multistream::Settings setting
 	runtimeSettings.youtubeEnabled = settings.youtubeEnabled;
 	runtimeSettings.youtubeConnectionMode = settings.youtubeConnectionMode;
 	runtimeSettings.youtubeKeyAvailable = credentialState == easy_multistream::CredentialDisplayState::Present;
+	// The account bridge is lifecycle-integrated below, but the public account
+	// setup remains deliberately unavailable until the official OAuth client,
+	// consent/verification, and complete dock flow are ready. Keeping this false
+	// prevents imported account-mode settings from opening a browser, reading a
+	// refresh token, making an API request, or starting an output.
+	runtimeSettings.youtubeAccountDestinationAvailable = false;
 	runtimeSettings.youtubeServerUrl = std::move(settings.youtubeServerUrl);
 	if (profileChanged) {
 		state.runtime->onProfileChanged(std::move(runtimeSettings));
@@ -461,11 +470,13 @@ void onFrontendEvent(enum obs_frontend_event event, void *privateData) noexcept
 			}
 			break;
 		case OBS_FRONTEND_EVENT_PROFILE_CHANGING:
-			invalidateYouTubeAccountProfile(*state);
 			clearNativeStartingProbe(*state);
 			if (state->runtime != nullptr) {
 				state->runtime->onProfileChanging();
 			}
+			// Retire/cancel the output-side lease before invalidating the account
+			// profile that owns its preparation attempt.
+			invalidateYouTubeAccountProfile(*state);
 			if (state->settingsController != nullptr) {
 				state->settingsController->beginProfileChange();
 			}
@@ -521,18 +532,23 @@ void removeFrontendObjects(PluginState &state) noexcept
 	}
 
 	clearNativeStartingProbe(state);
-	if (state.youtubeAccountRuntimeOwner != nullptr) {
-		if (!state.youtubeAccountRuntimeOwner->shutdown()) {
-			blog(LOG_WARNING, "[obs-easy-multistream] YouTube account owner shutdown needs cleanup retry");
-		}
-		state.youtubeAccountRuntimeOwner.reset();
-	}
 	if (state.runtime != nullptr) {
 		state.runtime->onExit();
 		// RuntimeController's destructor is the final callback barrier.  It
 		// disables its weak sink and joins the adapter before the dock can be
 		// removed or the plugin state can be destroyed.
 		state.runtime.reset();
+	}
+	if (state.youtubeAccountDestinationProvider != nullptr) {
+		state.youtubeAccountDestinationProvider->shutdown();
+		state.youtubeAccountDestinationProvider.reset();
+	}
+	state.youtubeAccountRuntimeForwarder.reset();
+	if (state.youtubeAccountRuntimeOwner != nullptr) {
+		if (!state.youtubeAccountRuntimeOwner->shutdown()) {
+			blog(LOG_WARNING, "[obs-easy-multistream] YouTube account owner shutdown needs cleanup retry");
+		}
+		state.youtubeAccountRuntimeOwner.reset();
 	}
 	if (state.youtubeAdapter != nullptr) {
 		state.youtubeAdapter->shutdown();
@@ -583,6 +599,12 @@ bool obs_module_load(void)
 		state->dock = dock.get();
 		state->youtubeAccountRuntimeOwner = std::make_unique<easy_multistream::YouTubeAccountRuntimeOwner>(
 			[]() { return currentProfilePath(); }, []() { return obs_frontend_get_profile_config(); });
+		state->youtubeAccountRuntimeForwarder =
+			std::make_unique<easy_multistream::YouTubeAccountRuntimeOwnerForwarder>(
+				*state->youtubeAccountRuntimeOwner);
+		state->youtubeAccountDestinationProvider =
+			std::make_unique<easy_multistream::YouTubeAccountRuntimeDestinationProvider>(
+				*state->youtubeAccountRuntimeForwarder);
 		state->settingsController = std::make_unique<easy_multistream::SettingsController>(dock.get());
 		PluginState *statePointer = state.get();
 		state->youtubeAdapter = std::make_unique<easy_multistream::YouTubeOutputAdapter>();
@@ -596,8 +618,9 @@ bool obs_module_load(void)
 				return std::move(result.secret);
 			},
 			[context = &state->runtimeContext](std::function<void()> callback) noexcept {
-				(void)postToRuntime(context, std::move(callback));
-			});
+				return postToRuntime(context, std::move(callback));
+			},
+			state->youtubeAccountDestinationProvider.get());
 		const QPointer<easy_multistream::SettingsController> settingsGuard(state->settingsController.get());
 		state->runtime->setSnapshotSink([settingsGuard](easy_multistream::SessionSnapshot snapshot) mutable {
 			if (settingsGuard != nullptr) {

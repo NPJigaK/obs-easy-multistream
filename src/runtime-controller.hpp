@@ -25,6 +25,11 @@ struct RuntimeSettings {
 	bool youtubeEnabled = false;
 	YouTubeConnectionMode youtubeConnectionMode = YouTubeConnectionMode::Manual;
 	bool youtubeKeyAvailable = false;
+	// Account mode is considered ready only when the concrete account bridge
+	// says that a saved selection can be prepared.  This is deliberately a
+	// value-only capability bit; RuntimeController never knows about OAuth,
+	// profiles, or the account owner implementation.
+	bool youtubeAccountDestinationAvailable = false;
 	std::string youtubeServerUrl;
 };
 
@@ -88,6 +93,80 @@ public:
 	virtual void shutdown() noexcept = 0;
 };
 
+// Account destination preparation is an intentionally small runtime port.
+// The implementation may use OAuth, a credential store, or another provider,
+// but it must not make those details visible to RuntimeController.  A
+// successful completion owns a destination-use lease until release() is
+// called after the output adapter's Released barrier.
+enum class RuntimeYouTubeDestinationStartStatus {
+	Started,
+	SetupRequired,
+	Failed,
+	Cancelled,
+	Busy,
+	Closed,
+};
+
+enum class RuntimeYouTubeDestinationCancelStatus {
+	Cancelled,
+	NoActiveAttempt,
+	Closed,
+	Failed,
+};
+
+enum class RuntimeYouTubeDestinationCompletionStatus {
+	Success,
+	SetupRequired,
+	Failed,
+	Cancelled,
+};
+
+struct RuntimeYouTubeDestinationCompletion final {
+	OutputLease lease;
+	RuntimeYouTubeDestinationCompletionStatus status = RuntimeYouTubeDestinationCompletionStatus::Failed;
+	std::string serverUrl;
+	SecureBuffer streamKey;
+
+	RuntimeYouTubeDestinationCompletion() = default;
+	RuntimeYouTubeDestinationCompletion(OutputLease outputLease,
+						RuntimeYouTubeDestinationCompletionStatus completionStatus,
+						std::string url = {}, SecureBuffer key = {}) noexcept
+			: lease(outputLease), status(completionStatus), serverUrl(std::move(url)), streamKey(std::move(key))
+	{
+	}
+
+	RuntimeYouTubeDestinationCompletion(const RuntimeYouTubeDestinationCompletion &) = delete;
+	RuntimeYouTubeDestinationCompletion &operator=(const RuntimeYouTubeDestinationCompletion &) = delete;
+	RuntimeYouTubeDestinationCompletion(RuntimeYouTubeDestinationCompletion &&) noexcept = default;
+	RuntimeYouTubeDestinationCompletion &operator=(RuntimeYouTubeDestinationCompletion &&) noexcept = default;
+
+	bool succeeded() const noexcept
+	{
+		return status == RuntimeYouTubeDestinationCompletionStatus::Success;
+	}
+};
+
+class IRuntimeYouTubeDestinationProvider {
+public:
+	using CompletionHandler = std::function<void(RuntimeYouTubeDestinationCompletion)>;
+
+	virtual ~IRuntimeYouTubeDestinationProvider() = default;
+
+	// start() is called on the RuntimeController owner thread.  If Started is
+	// returned, exactly one completion is expected on that same owner thread
+	// (possibly synchronously).
+	// cancel() is a synchronous barrier: after it returns, the provider must
+	// not invoke the handler with usable secret material for that preparation.
+	virtual RuntimeYouTubeDestinationStartStatus start(OutputLease lease,
+								CompletionHandler completionHandler) noexcept = 0;
+	virtual RuntimeYouTubeDestinationCancelStatus cancel(OutputLease lease) noexcept = 0;
+	// release() relinquishes a successful destination-use lease.  It is called
+	// only after the output adapter has emitted Released, or after adapter
+	// shutdown has completed as a last-resort controller teardown path.
+	virtual void release(OutputLease lease) noexcept = 0;
+	virtual void shutdown() noexcept = 0;
+};
+
 class RuntimeController final {
 public:
 	// Every public event method is an owner-thread operation.  The post
@@ -96,11 +175,18 @@ public:
 	// dispatcher (for example QMetaObject::invokeMethod); tests can provide a
 	// deterministic queue.  An empty dispatcher runs inline and is suitable
 	// only when the caller can prove that no queued ordering is required.
-	using Post = std::function<void(std::function<void()>)>;
+	// The dispatcher reports whether it accepted the callback.  A false/throw
+	// result means the callback was not executed and will never run. A true
+	// result guarantees exactly one invocation while its context remains alive;
+	// context teardown is followed by RuntimeController destruction, whose
+	// shutdown barrier reconciles unconsumed provider leases. Production uses a
+	// queued UI dispatcher; tests use a deterministic queue.
+	using Post = std::function<bool(std::function<void()>)>;
 	using ReadYouTubeKey = std::function<SecureBuffer()>;
 	using SnapshotSink = std::function<void(SessionSnapshot)>;
 
-	RuntimeController(IRuntimeYouTubeOutputAdapter &adapter, ReadYouTubeKey readYouTubeKey, Post post = {});
+	RuntimeController(IRuntimeYouTubeOutputAdapter &adapter, ReadYouTubeKey readYouTubeKey, Post post = {},
+				  IRuntimeYouTubeDestinationProvider *destinationProvider = nullptr);
 	~RuntimeController();
 
 	RuntimeController(const RuntimeController &) = delete;
@@ -109,8 +195,9 @@ public:
 	void setSnapshotSink(SnapshotSink sink);
 
 	// The settings controller calls setSettings after a successful profile load
-	// or after an enabled/key change.  The stream key itself is never passed
-	// here; it is read just before a StartYouTube effect is executed.
+	// or after an enabled/destination change. A manual stream key is never passed
+	// here; it is read just before its StartYouTube effect. Account-mode secrets
+	// arrive only in the move-only destination completion.
 	void setSettings(RuntimeSettings settings);
 
 	// Profile transitions invalidate all old leases before accepting new values.
@@ -155,27 +242,42 @@ private:
 	void applyTransition(SessionTransition transition);
 	void applyEffect(const SessionEffect &effect);
 	void startYouTube(OutputLease lease);
+	void onDestinationCompletion(RuntimeYouTubeDestinationCompletion completion) noexcept;
+	void onDestinationDispatchFailed(OutputLease lease) noexcept;
+	void drainPostedOutputEvents() noexcept;
 	void reconcileNativeStart(NativeLease lease);
 	void maybeShutdownAdapter() noexcept;
+	void maybeShutdownDestinationProvider() noexcept;
 	void publish(SessionSnapshot snapshot);
 	void completeRejectedStart(OutputLease lease) noexcept;
 	void clearNativeLeaseAfterStop(NativeLease lease) noexcept;
+	void cancelPendingDestinationPreparation(OutputLease lease) noexcept;
+	void releaseDestinationLease(OutputLease lease) noexcept;
+	bool hasConfiguredYouTubeDestination(const RuntimeSettings &settings) const noexcept;
 
 	IRuntimeYouTubeOutputAdapter &adapter_;
 	ReadYouTubeKey readYouTubeKey_;
 	Post post_;
 	SnapshotSink snapshotSink_;
+	IRuntimeYouTubeDestinationProvider *destinationProvider_ = nullptr;
 	SessionCoordinator coordinator_;
 	RuntimeSettings settings_;
 	std::optional<NativeLease> activeNativeLease_;
 	std::optional<NativeLease> stoppingNativeLease_;
 	std::optional<NativeLease> pendingNativeStartCheck_;
 	std::optional<OutputLease> pendingOutputStop_;
+	struct PendingDestinationPreparation final {
+		OutputLease outputLease;
+		NativeLease nativeLease;
+	};
+	std::optional<PendingDestinationPreparation> pendingDestinationPreparation_;
+	std::optional<OutputLease> activeDestinationLease_;
 	std::shared_ptr<CallbackState> callbackState_;
 	std::uint64_t publishedRevision_ = 0;
 	bool nativeOutputStartingObserved_ = false;
 	bool exitSeen_ = false;
 	bool adapterShutdownCalled_ = false;
+	bool destinationProviderShutdownCalled_ = false;
 };
 
 } // namespace easy_multistream

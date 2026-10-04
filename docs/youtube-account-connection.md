@@ -1,8 +1,10 @@
 # YouTube account connection
 
-Status: accepted product and architecture direction. The repository contains a headless state, protocol, and
-destination-preparation foundation plus production saved-state lifecycle restoration, but interactive account connection
-is not yet integrated or exposed in the current build.
+Status: accepted product and architecture direction. The repository contains a headless state, protocol,
+destination-preparation foundation, production saved-state lifecycle restoration, and a tested internal handoff from
+account destination preparation to the existing output runtime. Interactive account connection is not exposed in the
+current build, and the production account capability remains deliberately disabled: no Google client ID, browser,
+account network request, or account output is active.
 
 ## Decision
 
@@ -53,7 +55,9 @@ PluginState
   │   ├─ Google token exchange/refresh/revoke
   │   ├─ YouTube channel/stream discovery
   │   └─ profile/channel-scoped refresh-token store
-  ├─ RuntimeController               OBS event serialization
+  ├─ YouTubeAccountRuntimeOwner      lifecycle and destination-use ownership
+  ├─ AccountRuntimeDestinationBridge explicit owner-attempt/output-lease mapping
+  ├─ RuntimeController               OBS event serialization and lease validation
   └─ YouTubeOutputAdapter            validated RTMPS URL + ephemeral key only
 ```
 
@@ -63,7 +67,7 @@ The output adapter never receives an OAuth access or refresh token. The account 
 
 Account connection and output delivery are separate states. A channel may be connected while YouTube is not streaming, and a YouTube output may fail without disconnecting the account.
 
-The lifecycle-owned `YouTubeAccountDestinationPreparer` is the boundary immediately before future output integration. For one
+The lifecycle-owned `YouTubeAccountDestinationPreparer` is the boundary immediately before account output start. For one
 selected channel/stream it captures an immutable profile/channel scope and acquires the injected profile-operation lock
 before reading the saved refresh credential. It retains that owner-thread lock while refreshing an access token, persisting
 a provider-rotated refresh token in the same scope, resolving the selected stream, and finalizing queued completion state.
@@ -75,8 +79,10 @@ stale-callback rejection, and queued value-only completion. A busy lock returns 
 recovered lock is internal recovery metadata and is not user-facing.
 `YouTubeAccountRuntimeOwner` constructs and owns it with the same profile-scoped credential store and operation-lock
 provider as restore, connection, and revoke. Its narrow headless facade derives generation, binding, and selection from
-the last accepted active-profile restore rather than accepting them from a caller. It is not invoked by `PluginState`,
-`RuntimeController`, the dock, or the output adapter.
+the last accepted active-profile restore rather than accepting them from a caller. A separate runtime bridge maps the
+exact owner preparation attempt to the current `OutputLease` and `NativeLease`, and passes only a validated URL plus a
+move-only key to the existing adapter. The bridge is covered by tests, but the production availability gate is false,
+so no current `RuntimeController`, dock action, or output path invokes account preparation.
 
 ## Desktop authorization
 
@@ -109,8 +115,9 @@ The profile codec now implements this non-secret boundary. Older manual profiles
 accepts either a complete, strictly validated channel/stream selection or an explicit setup-required state with no
 selection, and does not require a saved ingestion URL. Saving the latter removes stale selection fields without changing
 the mode or touching any refresh-token credential. Although the headless provider is now wired through the plugin
-lifecycle for restore and local disconnect, the current output path deliberately treats account mode as unavailable
-until destination preparation and output handoff are integrated. A partially implemented or imported account profile
+lifecycle for restore and local disconnect. The destination preparation and output handoff are now integrated and tested
+internally, but the production account capability remains unavailable behind an explicit gate until the official client,
+authorization UI, policy, and release requirements are complete. A partially implemented or imported account profile
 therefore cannot silently use the manual URL/key instead.
 
 Windows Credential Manager uses separate boundaries for:
@@ -160,6 +167,26 @@ before restoring the current profile; shutdown retries any cleanup that still re
 only the coordinator, ports, or lock steps that did not previously finish.
 Local disconnect and remote revoke use the same profile-scoped boundary for selection and credential changes. Ambiguous network, rate-limit, and service failures retain the local state for an explicit retry. A remote success followed by a local deletion or profile-save failure is never reported as a completed disconnect and remains fail-closed.
 
+### Runtime handoff and release barrier
+
+The account-to-output bridge is an internal, tested adapter boundary. It records the exact relationship between the
+runtime's `OutputLease`, the native OBS `NativeLease`, and the owner's `YouTubeDestinationPrepareAttempt`; those values
+are validated independently and are never treated as interchangeable counters. A completion is usable only when the
+profile generation, connection mode, settings, native streaming state, and both current leases still match. A stale
+completion is discarded and a successful owner use is released without passing its key to OBS.
+
+Cancellation before an output exists is not the same operation as releasing an active destination. Stop, profile change,
+or EXIT cancels a pending owner attempt and completes the runtime lease without sending a stop request to the output
+adapter. Once preparation succeeds, the owner retains a destination-use lease until the adapter reports `Released` after
+complete output/service/encoder teardown. Account disconnect, reconnect, selection, and profile-restore mutations are
+busy while that use lease is held. This ordering keeps account state and OBS output lifetime from crossing during a
+rapid stop, retry, profile switch, or shutdown.
+
+The lifecycle follows the same order: `PROFILE_CHANGING` invalidates runtime/output work before invalidating the account
+owner, `PROFILE_CHANGED` restores only after the old work is unusable, and `EXIT` completes runtime output teardown before
+the bridge/provider shutdown and owner teardown. Queued callbacks carry value data and lifetime guards only; no secret is
+placed in settings, runtime snapshots, diagnostics, or logs.
+
 The provider:
 
 - owns no raw OBS pointer;
@@ -207,7 +234,8 @@ The internal implementation order is intentionally not shown in the user interfa
 2. implement and test PKCE/state generation, the authorization URL, and exact loopback-callback validation;
 3. implement the loopback listener, system-browser launch, and fixed-origin HTTPS transport using Qt Network;
 4. implement token exchange, refresh/revoke, and YouTube channel/stream discovery;
-5. resolve the selected stream into the current RTMPS output boundary;
+5. resolve the selected stream into the current RTMPS output boundary and connect the owner attempt to the runtime's
+   `OutputLease`/`NativeLease` handoff;
 6. test cancellation, stale callbacks, profile transitions, shutdown, and Twitch failure isolation;
 7. add the account UI and keep manual configuration under advanced settings;
 8. complete Google policy, verification, privacy, quota, and signed-release gates before recommending it to general users.
@@ -240,9 +268,10 @@ lease, and persists the non-secret selection before the scoped refresh token, re
 token write fails. It can also restore a persisted selection from credential status alone: present is
 only locally configured and remains unverified against Google, while missing and unavailable remain distinct. Every
 restore creates a new generation, and a profile without a selection remains setup-required without touching any
-credential. The production plugin now owns the account provider, destination preparer, and profile-operation coordinator behind a lifecycle-only
-wrapper: it restores during module/profile load, invalidates before a profile switch, shuts down during exit, and exposes
-internal connection, destination-preparation, local-disconnect, and remote-revoke transactions that are not connected to the dock or plugin main. The connection
+credential. The production plugin now owns the account provider, destination preparer, profile-operation coordinator, and the tested
+account-to-runtime destination bridge behind a lifecycle-only wrapper: plugin main restores it during module/profile load,
+invalidates it before a profile switch, and shuts it down during exit. Its internal connection, destination-preparation,
+local-disconnect, and remote-revoke operations have no current dock action, and the account-output capability remains disabled. The connection
 facade rechecks the active profile without changing its generation, uses attempt-scoped operations, and converts channel
 and stream candidates to revision-bound handles plus copied labels so raw Google IDs do not cross into a future UI. A future
 selection commit must match both the generation and profile binding from the last accepted restore, and it cannot
@@ -250,17 +279,17 @@ silently change a manual profile into account mode. The provider's network adapt
 depends on Qt Network, but the wrapper supplies no client ID or browser opener and no production caller invokes its
 connection-start method. It therefore returns not-configured before opening a browser or listener, emits no OAuth/API
 request, does not copy the refresh token out of the
-Credential Manager status buffer, and cannot change the dock or start an output. The destination preparer is lifecycle-owned,
-but no production caller starts it. Production client configuration, browser opening, the user-facing revoke action,
-interactive output handoff, and all later items stay gated, so a partial connection path cannot appear in
-the user interface.
+Credential Manager status buffer, and cannot change the dock or start an output. The destination preparer and runtime bridge
+are lifecycle-owned and fully exercised by contract tests, but the production availability gate is false, so no production
+caller starts account preparation. Production client configuration, browser opening, the user-facing revoke action,
+interactive account UI, and the account capability stay gated, so this internal path cannot appear in the user interface.
 
 The manual stream-key credential remains shared across OBS profiles. The refresh-token credential is scoped to the SHA-256
 binding of the exact active profile path and to the selected channel's SHA-256 `UserName` binding. Restoration therefore
 never labels credential presence as a verified connection. A profile duplicate, import, rename, or portable path move has
 a different binding and must reconnect; no automatic transfer or cleanup is attempted, and the old fixed target is never
-read, migrated, or deleted. Before this path is connected to runtime or UI, these profile lifecycle rules and exact
-scope tests must remain covered. The local-disconnect transaction preserves the provider's single-owner serialization
+read, migrated, or deleted. Before this path is enabled in production or connected to the UI, these profile lifecycle
+rules, exact scope tests, and the runtime handoff tests must remain covered. The local-disconnect transaction preserves the provider's single-owner serialization
 rule: the Windows API cannot conditionally delete a credential by its channel metadata, so two OBS processes must not
 mutate the same profile binding concurrently. It deletes the exact scoped credential before clearing the non-secret
 selection. A delete failure leaves both stores unchanged and retryable; a profile-save failure after deletion never
@@ -295,8 +324,8 @@ only copied non-secret selection/provider values. Active-profile restore/invalid
 disconnect and remote-revoke seams are now wired. The remote path keeps the same profile lock from the exact scoped
 credential read through Google's fixed revoke endpoint and local cleanup; ambiguous remote failures preserve local
 state, while a local cleanup or lock-release failure remains fail-closed. A profile restore that collides with a queued
-old-profile revoke completion is retained and retried after the transaction releases its lock. Interactive connection, account UI, a
-user-facing revoke action, and account-output handoff remain release-gated. No current user action calls either
-disconnect path.
+old-profile revoke completion is retained and retried after the transaction releases its lock. Interactive connection, account UI, and a
+user-facing revoke action remain release-gated. The account-output handoff is integrated internally but remains dormant
+behind the production capability gate. No current user action calls either disconnect path.
 
 No account UI is added merely to advertise unfinished functionality. A build without a complete configured provider continues to show only the working manual setup.

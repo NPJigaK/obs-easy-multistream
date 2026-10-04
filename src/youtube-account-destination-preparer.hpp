@@ -130,8 +130,9 @@ public:
 // stores any rotated refresh token, and resolves a fresh RTMPS destination.
 // Only the move-only successful completion can contain a stream key.
 //
-// This layer intentionally remains detached from PluginState, RuntimeController,
-// docks, and the OBS module until its lifecycle is independently verified.
+// This layer remains independent of docks and OBS objects. PluginState owns it
+// through the lifecycle owner, and a narrow lease bridge may consume its
+// completion without exposing account or credential details to RuntimeController.
 class YouTubeAccountDestinationPreparer final : public QObject {
 public:
 	using CompletionHandler = std::function<void(YouTubeDestinationPrepareCompletion)>;
