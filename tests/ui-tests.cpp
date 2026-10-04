@@ -217,35 +217,43 @@ void testStateAndActions()
 	state.youtubeEnabled = true;
 	state.youtubeServerUrl = QStringLiteral("rtmps://a.example/live2");
 	state.credential = easy_multistream::CredentialDisplayState::Present;
+	state.notice = easy_multistream::DockNotice::KeySaved;
 	view.applyState(state);
 	CHECK(!enabledCalled);
 	CHECK(youtubeStatus->text() == QStringLiteral("Ready"));
 	CHECK(remove->isEnabled());
 	CHECK(gettingStarted->isHidden());
-	CHECK(setup->isHidden());
+	CHECK(!setup->isHidden());
 	CHECK(!toggleSettings->isHidden());
+	CHECK(toggleSettings->text() == QStringLiteral("Hide settings"));
+	CHECK(!notice->isHidden());
+	CHECK(notice->text() == QStringLiteral("Key saved"));
+	CHECK(!openYouTubeStudio->isHidden());
+	view.applyState(state);
+	CHECK(!setup->isHidden());
+	toggleSettings->click();
+	CHECK(setup->isHidden());
 	CHECK(toggleSettings->text() == QStringLiteral("Change settings"));
 	CHECK(notice->isHidden());
 	toggleSettings->click();
 	CHECK(!setup->isHidden());
-	CHECK(!openYouTubeStudio->isHidden());
 	CHECK(toggleSettings->text() == QStringLiteral("Hide settings"));
 	CHECK(!notice->isHidden());
-	view.applyState(state);
-	CHECK(!setup->isHidden());
-	toggleSettings->click();
-	CHECK(setup->isHidden());
-	CHECK(notice->isHidden());
-	state.notice = easy_multistream::DockNotice::KeySaved;
-	view.applyState(state);
-	CHECK(notice->isHidden());
-	toggleSettings->click();
-	CHECK(!notice->isHidden());
 	CHECK(notice->text() == QStringLiteral("Key saved"));
-	toggleSettings->click();
-	CHECK(notice->isHidden());
 	remove->click();
 	CHECK(removeCalled);
+	toggleSettings->click();
+	CHECK(notice->isHidden());
+
+	easy_multistream::DockView reloadedView(testText());
+	auto *reloadedSetup = requiredChild<QGroupBox>(reloadedView, "easyMultistreamSetup");
+	auto *reloadedToggle = requiredChild<QPushButton>(reloadedView, "easyMultistreamToggleSettings");
+	if (reloadedSetup != nullptr && reloadedToggle != nullptr) {
+		reloadedView.applyState(state);
+		CHECK(reloadedSetup->isHidden());
+		CHECK(!reloadedToggle->isHidden());
+		CHECK(reloadedToggle->text() == QStringLiteral("Change settings"));
+	}
 
 	state.settingsEditable = false;
 	state.notice = easy_multistream::DockNotice::FutureSettings;

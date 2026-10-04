@@ -144,7 +144,7 @@ P0は安全性・所有権・秘密情報・native出力保護に関わる項目
 | OBS-M-07 | 事前にnativeのcodec/audio trackを対象外設定へ変更してStartする | YouTubeだけが設定不足として拒否され、native Twitchは変更されない。復元後は正常に開始できる |
 | OBS-M-08 | keyをRemoveしてからStart、またはCredential Managerを一時的に利用不可にしてStart | SetupRequired/Unavailable相当の表示になり、keyがログや設定ファイルへ現れず、Twitchは停止しない |
 | OBS-M-09 | Start中またはStreaming中にYouTube接続だけを切断する | YouTubeの状態が明確に失敗・再接続中・停止のいずれかになり、Twitchが継続する。停止後に次回Startできる |
-| OBS-M-10 | 設定完了後のcompact表示で「設定を変更」→「設定を閉じる」を操作し、OBSのDocksメニューとToolsメニューからdockを閉じて再表示する | Twitch/YouTubeの2行とYouTube有効設定は常に確認でき、詳細設定だけが開閉する。どの表示操作でも配信状態とoutput寿命は変わらない |
+| OBS-M-10 | URLまたはkeyの保存で設定が完了した直後に詳細が残ることを確認し、「設定を閉じる」→「設定を変更」を操作する。OBS再起動後はcompact表示になること、DocksメニューとToolsメニューからdockを閉じて再表示できることも確認する | 保存結果を確認する前に詳細が消えず、明示操作または次回load後だけcompactになる。Twitch/YouTubeの2行とYouTube有効設定は常に確認でき、表示操作で配信状態とoutput寿命は変わらない |
 | OBS-M-11 | OBS-M-01を専用のportable OBS 32.2.2でも繰り返す | 通常版とは別のprofile・credential境界で動作し、普段のOBS環境に設定を残さない |
 
 ### 実配信後の確認
@@ -208,7 +208,7 @@ generation invalidation / new work拒否
 - [x] 現在のCTestがすべて通る。
 - [x] start acceptedとstart signalを分けた状態機械テストが通る。
 - [x] リポジトリ内の隔離portable OBS 32.2.2で、0.1.0基礎buildのload、Startup complete、clean unload、memory leaks 0を確認した。
-- [ ] 0.4.0で初回dock表示、YouTube Studioリンク、表示済みmarker保存、2回目の非表示、トレイ復帰後の表示、compact表示、Toolsメニューからの再表示を確認した。
+- [ ] 0.4.1で初回dock表示、YouTube Studioリンク、保存直後の詳細維持、明示的なcompact化、表示済みmarker保存、2回目の非表示、トレイ復帰後の表示、Toolsメニューからの再表示を確認した。
 - [ ] `obs_output_start()`同期拒否とnative StartStreaming同期拒否を別々にテストした。
 - [ ] output error、YouTube-only disconnect、credential failure、missing URL/key、unsupported codecをテストした。
 - [ ] stop、duplicate stop、rapid stop-start、profile change、EXITをテストした。
