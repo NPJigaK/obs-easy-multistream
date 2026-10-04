@@ -1,7 +1,8 @@
 # YouTube account connection
 
 Status: accepted product and architecture direction. The repository contains a headless state, protocol, and
-destination-preparation foundation, but account connection is not yet integrated or exposed in the current build.
+destination-preparation foundation plus production saved-state lifecycle restoration, but interactive account connection
+is not yet integrated or exposed in the current build.
 
 ## Decision
 
@@ -235,15 +236,16 @@ lease, and persists the non-secret selection before the scoped refresh token, re
 token write fails. It can also restore a persisted selection from credential status alone: present is
 only locally configured and remains unverified against Google, while missing and unavailable remain distinct. Every
 restore creates a new generation, and a profile without a selection remains setup-required without touching any
-credential. None of the network-capable account libraries is linked into the OBS plugin, so the product still does not
-open a browser, listen on a port, make an OAuth/API network request, or read an account credential. The production
-plugin now keeps a value-only active-profile context: it copies the current profile path only long enough to derive the
-existing SHA-256 binding, copies the non-secret account selection, invalidates the context before a profile switch, and
-reloads it after the switch. A future selection commit must match both its generation and the freshly derived current
-binding, and it cannot silently change a manual profile into account mode. This context does not instantiate the account
-provider or destination preparer and cannot change the dock. Production browser opening, provider/preparer lifecycle,
-refresh/revoke, runtime handoff, and all later items stay gated, so a partial connection path cannot appear in the user
-interface.
+credential. The production plugin now owns the account provider and restore coordinator behind a lifecycle-only wrapper:
+it restores during module/profile load, invalidates before a profile switch, and shuts down during exit. A future
+selection commit must match both the generation and profile binding from the last accepted restore, and it cannot
+silently change a manual profile into account mode. The provider's network adapters are constructed, so the module now
+depends on Qt Network, but the wrapper supplies no client ID or browser opener and exposes no connection-start method.
+It therefore opens no browser or listener, emits no OAuth/API request, does not copy the refresh token out of the
+Credential Manager status buffer, and cannot change the dock or start an output. The destination preparer remains
+detached. Production client configuration, browser
+opening, refresh/revoke, runtime handoff, and all later items stay gated, so a partial connection path cannot appear in
+the user interface.
 
 The manual stream-key credential remains shared across OBS profiles. The refresh-token credential is scoped to the SHA-256
 binding of the exact active profile path and to the selected channel's SHA-256 `UserName` binding. Restoration therefore
@@ -261,11 +263,13 @@ non-blocking, so a busy result leaves provider/preparer state unchanged. A recov
 recovery result so durable state can be re-read before continuing; the recovery condition is not user-facing. A
 process-wide claim registry prevents Windows' same-thread recursive mutex behavior from admitting two local operations.
 The lock is owner-thread-bound, non-copyable, non-movable, and releases both the native handle and the local claim on every terminal
-path. Both detached account classes now require the lock provider and hold it across their complete asynchronous
-transactions, including rollback; the preparer releases it before invoking an external completion handler. These
-libraries remain test-linked/detached and are not linked into the OBS plugin or exposed in the dock.
+path. Both account classes require the lock provider and hold it across their complete asynchronous transactions,
+including rollback; the preparer releases it before invoking an external completion handler. Only the saved-state
+restore owner and its lock are active in production. Interactive paths remain unreachable from the OBS plugin and are
+not exposed in the dock.
 
-The detached `YouTubeAccountProfileRestoreCoordinator` now provides that outer restore transaction. It first reads a
+The `YouTubeAccountProfileRestoreCoordinator` provides that outer restore transaction and is called by the production
+lifecycle owner. It first reads a
 candidate profile binding without reading the profile config, acquires the matching lock without waiting, re-reads the
 active profile path and config while the lock is held, and rejects the transaction if the binding changed. It then calls
 the provider's held-lock restore path, so credential status and provider state are read or changed inside the same
@@ -276,8 +280,7 @@ synchronous callback cannot release that lock early: reentrant invalidation and 
 provider transition completes, while a nested restore returns busy. Busy or unavailable acquisition leaves
 context/provider state untouched; a profile race, invalid or future settings, and native release failure fail closed. A
 recovered mutex is treated as held for the reread but is retained only as internal metadata. The coordinator exposes
-only copied non-secret selection/provider values and remains
-detached/test-linked; the product OBS module does not instantiate it. Active-profile wiring and account UI are still
-release-gated, while future selection commit, disconnect, and revoke operations must use the same profile lock.
+only copied non-secret selection/provider values. Active-profile restore/invalidation/shutdown is now wired, while
+interactive connection, account UI, disconnect, and revoke remain release-gated and must use the same profile lock.
 
 No account UI is added merely to advertise unfinished functionality. A build without a complete configured provider continues to show only the working manual setup.

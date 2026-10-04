@@ -8,7 +8,7 @@
 #include "settings-controller.hpp"
 #include "version.hpp"
 #include "windows-credential-vault.hpp"
-#include "youtube-account-profile-context.hpp"
+#include "youtube-account-runtime-owner.hpp"
 #include "youtube-output-adapter.hpp"
 
 #include <obs.hpp>
@@ -67,7 +67,7 @@ struct PluginState {
 	QPointer<easy_multistream::DockView> dock;
 	QPointer<QAction> toolsMenuAction;
 	std::unique_ptr<easy_multistream::SettingsController> settingsController;
-	std::unique_ptr<easy_multistream::YouTubeAccountProfileContext> youtubeAccountProfileContext;
+	std::unique_ptr<easy_multistream::YouTubeAccountRuntimeOwner> youtubeAccountRuntimeOwner;
 	QObject runtimeContext;
 	easy_multistream::NativeWinCredentialApi credentialApi;
 	easy_multistream::WindowsCredentialVault credentialVault;
@@ -200,17 +200,24 @@ std::string currentProfilePath()
 	}
 }
 
-void loadYouTubeAccountProfileContext(PluginState &state) noexcept
+void restoreYouTubeAccountProfile(PluginState &state) noexcept
 {
-	if (state.youtubeAccountProfileContext != nullptr) {
-		(void)state.youtubeAccountProfileContext->load();
+	if (state.youtubeAccountRuntimeOwner != nullptr) {
+		const auto result = state.youtubeAccountRuntimeOwner->restoreActiveProfile();
+		if (result.status == easy_multistream::YouTubeAccountProfileRestoreStatus::OperationFailed ||
+		    result.status == easy_multistream::YouTubeAccountProfileRestoreStatus::ProfileUnavailable ||
+		    result.status == easy_multistream::YouTubeAccountProfileRestoreStatus::ProfileChanged) {
+			blog(LOG_WARNING, "[obs-easy-multistream] YouTube account profile restore was not applied");
+		}
 	}
 }
 
-void invalidateYouTubeAccountProfileContext(PluginState &state) noexcept
+void invalidateYouTubeAccountProfile(PluginState &state) noexcept
 {
-	if (state.youtubeAccountProfileContext != nullptr) {
-		state.youtubeAccountProfileContext->invalidate();
+	if (state.youtubeAccountRuntimeOwner != nullptr) {
+		if (!state.youtubeAccountRuntimeOwner->invalidateForProfileChange()) {
+			blog(LOG_WARNING, "[obs-easy-multistream] YouTube account profile invalidation needs cleanup retry");
+		}
 	}
 }
 
@@ -443,7 +450,7 @@ void onFrontendEvent(enum obs_frontend_event event, void *privateData) noexcept
 		switch (event) {
 		case OBS_FRONTEND_EVENT_FINISHED_LOADING:
 		case OBS_FRONTEND_EVENT_PROFILE_CHANGED:
-			loadYouTubeAccountProfileContext(*state);
+			restoreYouTubeAccountProfile(*state);
 			state->nativeDestination = currentNativeDestination();
 			if (state->settingsController != nullptr) {
 				state->settingsController->loadCurrentProfile(easy_multistream::DockNotice::Preview,
@@ -454,7 +461,7 @@ void onFrontendEvent(enum obs_frontend_event event, void *privateData) noexcept
 			}
 			break;
 		case OBS_FRONTEND_EVENT_PROFILE_CHANGING:
-			invalidateYouTubeAccountProfileContext(*state);
+			invalidateYouTubeAccountProfile(*state);
 			clearNativeStartingProbe(*state);
 			if (state->runtime != nullptr) {
 				state->runtime->onProfileChanging();
@@ -514,7 +521,12 @@ void removeFrontendObjects(PluginState &state) noexcept
 	}
 
 	clearNativeStartingProbe(state);
-	invalidateYouTubeAccountProfileContext(state);
+	if (state.youtubeAccountRuntimeOwner != nullptr) {
+		if (!state.youtubeAccountRuntimeOwner->shutdown()) {
+			blog(LOG_WARNING, "[obs-easy-multistream] YouTube account owner shutdown needs cleanup retry");
+		}
+		state.youtubeAccountRuntimeOwner.reset();
+	}
 	if (state.runtime != nullptr) {
 		state.runtime->onExit();
 		// RuntimeController's destructor is the final callback barrier.  It
@@ -569,7 +581,7 @@ bool obs_module_load(void)
 		auto state = std::make_unique<PluginState>();
 		auto dock = std::make_unique<easy_multistream::DockView>(loadDockText());
 		state->dock = dock.get();
-		state->youtubeAccountProfileContext = std::make_unique<easy_multistream::YouTubeAccountProfileContext>(
+		state->youtubeAccountRuntimeOwner = std::make_unique<easy_multistream::YouTubeAccountRuntimeOwner>(
 			[]() { return currentProfilePath(); }, []() { return obs_frontend_get_profile_config(); });
 		state->settingsController = std::make_unique<easy_multistream::SettingsController>(dock.get());
 		PluginState *statePointer = state.get();
@@ -631,7 +643,7 @@ bool obs_module_load(void)
 		// OBS is still loading modules here, so rtmp_common may not be
 		// registered yet.  FINISHED_LOADING performs the first destination
 		// classification and replaces this brief Unknown snapshot.
-		loadYouTubeAccountProfileContext(*pluginState);
+		restoreYouTubeAccountProfile(*pluginState);
 		pluginState->settingsController->loadCurrentProfile(easy_multistream::DockNotice::Preview, true);
 
 		blog(LOG_INFO, "[obs-easy-multistream] Loaded version %s", easy_multistream::kVersion);

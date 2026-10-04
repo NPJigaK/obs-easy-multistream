@@ -34,6 +34,7 @@ add_library(${CMAKE_PROJECT_NAME}-youtube-account-profile-lock STATIC)
 add_library(${CMAKE_PROJECT_NAME}-youtube-account-provider STATIC)
 add_library(${CMAKE_PROJECT_NAME}-youtube-account-destination-preparer STATIC)
 add_library(${CMAKE_PROJECT_NAME}-youtube-account-profile-restore STATIC)
+add_library(${CMAKE_PROJECT_NAME}-youtube-account-runtime-owner STATIC)
 
 find_package(libobs REQUIRED)
 find_package(obs-frontend-api REQUIRED)
@@ -44,6 +45,7 @@ target_link_libraries(
   PRIVATE
     ${CMAKE_PROJECT_NAME}-core
     ${CMAKE_PROJECT_NAME}-session-core
+    ${CMAKE_PROJECT_NAME}-youtube-account-runtime-owner
     ${CMAKE_PROJECT_NAME}-oauth-core
     OBS::libobs
     OBS::obs-frontend-api
@@ -252,6 +254,21 @@ target_link_libraries(
     ${CMAKE_PROJECT_NAME}-youtube-account-provider
     ${CMAKE_PROJECT_NAME}-youtube-account-profile-lock
     Qt6::Core
+)
+
+target_sources(
+  ${CMAKE_PROJECT_NAME}-youtube-account-runtime-owner
+  PRIVATE
+    src/youtube-account-runtime-owner.cpp
+    src/youtube-account-runtime-owner.hpp
+)
+target_include_directories(
+  ${CMAKE_PROJECT_NAME}-youtube-account-runtime-owner
+  PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+target_link_libraries(
+  ${CMAKE_PROJECT_NAME}-youtube-account-runtime-owner
+  PUBLIC ${CMAKE_PROJECT_NAME}-youtube-account-profile-restore
 )
 
 configure_file(src/version.hpp.in generated/version.hpp @ONLY)
@@ -617,6 +634,31 @@ if(BUILD_TESTING)
     COMMAND ${CMAKE_PROJECT_NAME}-youtube-account-profile-restore-tests
   )
 
+  add_executable(${CMAKE_PROJECT_NAME}-youtube-account-runtime-owner-tests)
+  target_sources(
+    ${CMAKE_PROJECT_NAME}-youtube-account-runtime-owner-tests
+    PRIVATE tests/youtube-account-runtime-owner-tests.cpp
+  )
+  target_link_libraries(
+    ${CMAKE_PROJECT_NAME}-youtube-account-runtime-owner-tests
+    PRIVATE ${CMAKE_PROJECT_NAME}-youtube-account-runtime-owner
+  )
+  add_custom_command(
+    TARGET ${CMAKE_PROJECT_NAME}-youtube-account-runtime-owner-tests
+    POST_BUILD
+    COMMAND
+      "${CMAKE_COMMAND}" -E copy_if_different
+      $<TARGET_RUNTIME_DLLS:${CMAKE_PROJECT_NAME}-youtube-account-runtime-owner-tests>
+      $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}-youtube-account-runtime-owner-tests>
+    COMMAND_EXPAND_LISTS
+    COMMENT "Copy YouTube account runtime owner test runtime dependencies"
+    VERBATIM
+  )
+  add_test(
+    NAME ${CMAKE_PROJECT_NAME}-youtube-account-runtime-owner
+    COMMAND ${CMAKE_PROJECT_NAME}-youtube-account-runtime-owner-tests
+  )
+
   add_executable(${CMAKE_PROJECT_NAME}-youtube-account-profile-lock-tests)
   target_sources(
     ${CMAKE_PROJECT_NAME}-youtube-account-profile-lock-tests
@@ -729,6 +771,7 @@ if(BUILD_TESTING)
     ${CMAKE_PROJECT_NAME}-youtube-account-destination-preparer
     ${CMAKE_PROJECT_NAME}-youtube-account-profile-context
     ${CMAKE_PROJECT_NAME}-youtube-account-profile-restore
+    ${CMAKE_PROJECT_NAME}-youtube-account-runtime-owner
     PROPERTIES ENVIRONMENT_MODIFICATION "${test_runtime_environment}"
   )
 endif()

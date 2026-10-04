@@ -50,13 +50,31 @@ The plugin uses the documented Generic Credential size limit, validates the key 
 
 The current OBS plugin performs no OAuth, HTTP API, update, telemetry, relay, or inbound-network operation. When YouTube is enabled and OBS confirms that a recognized native Twitch stream is running, the plugin opens one outbound RTMPS connection using OBS's `rtmp_output`. URL validation requires `rtmps://`, port 443 when a port is present, a single application path, and a host under `*.rtmps.youtube.com`; this prevents an imported profile from sending the saved YouTube key to an arbitrary RTMPS host.
 
-The repository also contains loopback-listener and authorization-session libraries that are built and exercised only by standalone development tests. They are not linked into the plugin module or instantiated by production code. The test listener binds only `127.0.0.1` on an OS-assigned port, sets `SO_EXCLUSIVEADDRUSE` before bind, accepts one strictly validated HTTP/1.1 callback, and enforces request-size, connection-count, per-client, and overall authorization limits. Wrong-state and malformed requests do not complete an authorization attempt; accepted and rejected browser pages contain no code, state, query, or provider description. The session binds and arms that listener before invoking an injected browser opener, catches opener failure, silently invalidates cancelled or shutdown attempts, and returns the authorization code plus PKCE verifier only in a move-only success result. Tests inject a fake opener and never launch a real browser.
+The loopback-listener and authorization-session libraries are now linked through the restore-only account owner, but no
+production call can start them: the owner supplies neither a client ID nor a browser opener and exposes no interactive
+connection method. Construction does not call `listen()`, bind a socket, or launch a browser. Standalone tests exercise
+the active path: it binds only `127.0.0.1` on an OS-assigned port, sets `SO_EXCLUSIVEADDRUSE` before bind, accepts one
+strictly validated HTTP/1.1 callback, and enforces request-size, connection-count, per-client, and overall authorization
+limits. Wrong-state and malformed requests do not complete an authorization attempt; accepted and rejected browser
+pages contain no code, state, query, or provider description. The session binds and arms that listener before invoking
+an injected browser opener, catches opener failure, silently invalidates cancelled or shutdown attempts, and returns the
+authorization code plus PKCE verifier only in a move-only success result. Tests inject a fake opener and never launch a
+real browser.
 
 PKCE, state validation, and exclusive binding prevent an unrelated local process from successfully completing or taking over an authorization attempt, but they cannot make the desktop resistant to denial by malware already running as the same Windows user. Such a process can repeatedly connect to the temporary port, consume the bounded connection budget, or keep bounded client slots busy until their timeout. The listener fails closed and requires a retry rather than accepting a callback after its limits are exhausted.
 
-The repository also contains a separate token-transport library used by the detached account-provider library and standalone development tests, but not by the OBS plugin module. It posts form data only to Google's fixed HTTPS token and revocation endpoints, never accepts an endpoint from settings, never sends a client secret, requires peer-verified TLS 1.2 or later, rejects redirects and missing encryption proof, disables credential and cookie reuse, and applies independent time and 64 KiB response limits. Responses are type-checked, known security fields cannot be duplicated, raw provider descriptions are not returned, and operation generations prevent a cancelled or replaced request from completing newer work. Authorization codes, PKCE verifiers, response bodies, and parsed token staging buffers are explicitly cleared where the involved API permits it. Qt and operating-system internals may still make transient copies under the in-memory limitations documented above.
+The token-transport library is linked and its network manager is constructed by the restore-only provider, but no token
+operation is reachable from the production plugin yet and construction emits no request. Its tested active path posts
+form data only to Google's fixed HTTPS token and revocation endpoints, never accepts an endpoint from settings, never
+sends a client secret, requires peer-verified TLS 1.2 or later, rejects redirects and missing encryption proof, disables
+credential and cookie reuse, and applies independent time and 64 KiB response limits. Responses are type-checked, known
+security fields cannot be duplicated, raw provider descriptions are not returned, and operation generations prevent a
+cancelled or replaced request from completing newer work. Authorization codes, PKCE verifiers, response bodies, and
+parsed token staging buffers are explicitly cleared where the involved API permits it. Qt and operating-system internals
+may still make transient copies under the in-memory limitations documented above.
 
-The repository also builds a separate read-only YouTube discovery transport only for standalone development tests.
+The read-only YouTube discovery transport is also linked and constructed by the restore-only provider, but no discovery
+request is reachable from the production plugin. Its active path is exercised by standalone development tests.
 It sends a move-only access-token buffer solely as a Bearer header to the fixed `channels.list` and
 `liveStreams.list` HTTPS endpoints. It requests one bounded page at a time, uses `mine=true`, strictly validates IDs,
 labels, page tokens, headers, JSON, TLS, and final URLs, and returns stable error enums rather than provider text. Its
@@ -69,8 +87,9 @@ into move-only buffers for the active page and are cleared with the aggregate op
 A separate headless account-provider library composes authorization, code exchange, bounded discovery, exact candidate
 selection, scoped refresh-token storage, and non-secret selection persistence. It requires the profile-operation lock
 before an interactive transaction and holds that lock through selection/credential persistence and any rollback. A busy
-lock returns without mutating provider state; a recovered lock is internal recovery metadata only. It is still not linked
-into the OBS plugin.
+lock returns without mutating provider state; a recovered lock is internal recovery metadata only. The production plugin
+now owns this provider behind a restore-only lifecycle wrapper; it exposes none of the interactive methods to the dock or
+runtime.
 If native mutex release fails, the provider marks the account unavailable instead of exposing a usable connection. The
 destination preparer discards any resolved ingestion secret and reports a service failure before invoking its completion
 handler. If mutex ownership remains, both retain the claim fail-closed and retry incomplete port and lock cleanup on
@@ -102,12 +121,13 @@ owning thread. Acquisition never waits, so a busy result leaves provider/prepare
 system failures fail closed. Recovered ownership is distinguished only internally so durable profile and credential state
 can be re-read before continuing. Both detached account classes require this lock provider and release their owner-thread
 lock after rollback or finalization, before calling an external completion handler. The lock does not authenticate another
-process or grant credential access, and the current OBS module does not instantiate the account classes or expose them in
-the dock.
+process or grant credential access. The current OBS module instantiates the lock and restore-only owner, but does not
+expose account actions in the dock.
 Support is limited to the current interactive Windows session; cross-session use of one OBS profile remains unsupported
 unless a later design adds a user-scoped `Global\\` object with an explicitly reviewed security descriptor.
 
-The detached `YouTubeAccountProfileRestoreCoordinator` closes the stale-selection gap for saved-account restoration.
+The `YouTubeAccountProfileRestoreCoordinator` closes the stale-selection gap for saved-account restoration and is now
+owned by the production profile lifecycle wrapper.
 On its owner thread it reads only a value-copy candidate binding, acquires the exact profile-operation lock without
 waiting, re-reads the active profile path and config while the lock is held, verifies the binding again, and then asks
 the provider to inspect credential status and restore its state through that same held lock. It checks the active
@@ -119,9 +139,9 @@ unavailable acquisition performs no context/provider mutation; a profile race, i
 release failure fail closed. Owner-thread destruction makes the provider terminal even if native handle cleanup cannot
 complete; any retained ownership remains fail-closed until process teardown. Recovered ownership is accepted only
 for the locked reread and is not user-facing. The coordinator carries only copied non-secret profile/provider values;
-refresh tokens and stream keys remain in their existing secure boundaries. It is detached/test-linked and is not linked
-into or instantiated by the production OBS module. Future selection commit, disconnect, and revoke operations must
-use the same profile-operation boundary.
+refresh tokens and stream keys remain in their existing secure boundaries. The wrapper calls it only during module/profile
+lifecycle events and exposes no browser, network, or output start. Future disconnect and revoke operations must use the
+same profile-operation boundary.
 
 The YouTube output owns a private RTMP service and output while retaining explicit references to the native H.264 and main AAC encoders. It never starts or stops the native OBS stream. A YouTube error closes only the YouTube output, leaves Twitch running, and exposes a separate retry action after teardown completes.
 
