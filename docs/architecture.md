@@ -16,7 +16,7 @@ The planned first useful release is intentionally narrow:
 - optional YouTube automatic Dual stream, where YouTube creates a vertical feed from the single horizontal input
 - a standard OBS dock using public Frontend and Qt APIs
 
-Browser-based YouTube account connection is the accepted next setup path, but it is not exposed until its complete authorization, secure token storage, endpoint resolution, cancellation, and release requirements are implemented. Automatically creating and managing YouTube broadcasts or scheduled events, three or more destinations, custom output scenes, encoder-controlled YouTube dual streaming, per-destination transcoding, and Twitch-as-secondary remain outside the current boundary.
+Browser-based YouTube account connection is the accepted next setup path, but it is not exposed until its complete authorization, secure token storage, endpoint resolution, cancellation, release, policy, and UI requirements are ready. The internal account-destination handoff into the existing output runtime is already integrated and tested, but the production capability gate remains deliberately false: the current build supplies no Google client ID, opens no browser, performs no account network request, and starts no account output. Automatically creating and managing YouTube broadcasts or scheduled events, three or more destinations, custom output scenes, encoder-controlled YouTube dual streaming, per-destination transcoding, and Twitch-as-secondary remain outside the current boundary.
 
 The current source tree includes an account state machine, Google desktop-authorization protocol core,
 a separate loopback-listener library, a browser-opener authorization-session layer, a fixed-origin HTTPS token
@@ -58,8 +58,12 @@ the destination owner queues one bounded cleanup retry before restoring the new 
 is retried again during shutdown. A production lifecycle owner now links the provider, destination
 preparer, and profile operation coordinator into the OBS plugin to restore saved local state during module load and `PROFILE_CHANGED`, invalidate
 it during `PROFILE_CHANGING`, close it during `EXIT`, and provide a tested local-disconnect seam for the future account UI.
-No current dock or plugin-main action invokes these internal seams. The owner now exposes headless connection and
-destination-preparation facades
+The ordering is part of the contract: `PROFILE_CHANGING` first invalidates runtime/output work and its leases, then
+invalidates the account owner; `PROFILE_CHANGED` restores only after the old work is no longer usable. On `EXIT`, the
+runtime completes its output stop/release barrier before the account bridge/provider is shut down and the owner is made
+terminal. This prevents a late account completion from starting an output or restoring state during teardown.
+No current dock action invokes connection, disconnect, or revoke. Plugin main owns only their lifecycle and the dormant
+account-output bridge while the production capability gate remains false. The owner exposes headless connection and destination-preparation facades
 that revalidate the active account-mode profile without advancing its generation, map provider details to stable
 operation results, uses attempt-scoped cancellation, and exposes candidates only through revision-bound handles and
 copied labels rather than raw Google resource IDs. The production owner still uses an empty client ID and browser opener,
@@ -72,10 +76,11 @@ so clearing or importing a profile never silently changes it to the manual-key p
 a saved selection by checking only the scoped Credential Manager entry: present becomes locally configured but not
 Google-validated, missing becomes reauthorization-required, and credential-service errors remain unavailable. A profile
 with no selection does not inspect or delete any account credential. Restoration advances the account generation
-and starts no browser, listener, HTTP request, discovery operation, or output. The lifecycle integration is active, but
-account mode remains fail-closed until the preparation completion is handed to the output runtime; it cannot consume the
-manual URL/key destination. Production client configuration, browser opening, output handoff,
-interactive output integration, and user-facing account controls remain release-gated.
+and starts no browser, listener, HTTP request, discovery operation, or output. The lifecycle integration and the
+owner-to-runtime destination handoff are active and covered by tests, but production account capability remains
+fail-closed behind the explicit availability gate. It can never consume the manual URL/key destination. Production
+client configuration, browser opening, interactive authorization, and user-facing account controls remain
+release-gated; the internal output handoff is not itself a user-visible feature.
 
 The manual YouTube stream key remains intentionally shared by all OBS profiles, but the Google refresh token uses a
 separate typed store scoped to the exact active OBS profile path and selected YouTube channel. The profile path is
@@ -91,8 +96,9 @@ and resolve the exact saved channel and stream. If profile selection is persiste
 write fails, the selection is rolled back. The profile-operation lock derives a non-secret `Local\\` mutex name from the
 same validated binding, rejects both other-process ownership and same-process recursive acquisition without waiting, and
 reports recovered ownership only as an internal result. Local disconnect, remote revoke, and destination preparation use
-this same boundary. Interactive authorization and destination preparation remain detached from the production dock and
-streaming runtime even though their lifecycle owner is now part of the plugin.
+this same boundary. Interactive authorization remains detached from the production dock. Destination preparation is
+connected to the streaming runtime through a tested internal bridge, but the production availability gate keeps that
+path dormant until the official account setup and policy requirements are complete.
 
 The `YouTubeAccountProfileRestoreCoordinator` supplies the outer profile transaction used by the production lifecycle
 owner for both restore and local disconnect. On its owner thread it first obtains only a value-copy candidate binding, then
@@ -206,7 +212,7 @@ User-visible text follows OBS and platform terminology. Internal milestone names
 6. Invalid and unknown future schemas are read-only and are never downgraded by this version.
 7. A failed safe-save restores the previous in-memory non-secret settings.
 8. Credential or YouTube output failure cannot alter the native OBS output.
-9. Account mode cannot read or start with the manual URL/key path; it remains unconfigured until the complete asynchronous account destination provider is integrated.
+9. Account mode cannot read or start with the manual URL/key path; it remains unavailable unless the production account capability is explicitly enabled and the current `OutputLease` plus `NativeLease` handoff is valid.
 10. Schema 1 and 2 profiles migrate in memory as manual mode. A normal settings save writes the current schema without placing any credential, token, authorization code, PKCE value, or resolved stream key in the profile.
 
 ## Runtime boundary
@@ -221,18 +227,28 @@ delayed failure from a replaced account cannot clear or relabel the current acco
 
 Each native OBS start attempt receives a `NativeLease`, and each YouTube start attempt receives an `OutputLease`. Both contain a profile/session generation and an attempt number. Callbacks for an old generation or attempt cannot update the current snapshot. Snapshot revisions advance only for accepted state changes. Profile changes and exit invalidate the current generation before delayed callbacks can be observed by a new session.
 
+The internal account handoff keeps the two leases separate and explicitly maps each `OutputLease` to the exact
+`YouTubeDestinationPrepareAttempt` returned by the account owner. A prepared destination is accepted only when the
+output lease, native lease, profile generation, connection mode, settings, and native streaming state still match.
+Preparation cancellation is distinct from release of an active destination use: before an OBS output exists, Stop or
+shutdown cancels the owner attempt and completes the runtime lease without asking the adapter to stop; after the
+adapter starts, the owner use lease remains held until the adapter's full `Released` event. Account mutations are
+busy while that use lease is held, and an old or mismatched completion can never reach the output adapter.
+Worker-originated output events enter an owner-thread mailbox before a queued wake-up is requested. If that wake-up is
+rejected, the next owner-thread operation drains the mailbox, so a `Released` teardown barrier is not silently lost.
+
 The destination classifier accepts only exact known OBS service values. A Twitch session is eligible only when the service type is `rtmp_common` and the provider name is exactly `Twitch`. Known YouTube names are recognized for future role-neutral behavior, while custom RTMP, relays, substring matches, and unknown services remain unsupported rather than being guessed from a URL or stream key.
 
 The OBS Frontend bridge and output adapter are owned by the plugin context, not by the dock or settings controller. The dock may be closed without affecting outputs. Raw OBS pointers and secret values never enter `SessionCoordinator` or its snapshots. The detailed ownership and callback rules are recorded in [the output integration contract](runtime-output-design.md).
 
-The YouTube output references the native video encoder and main live audio encoder but owns its own service and output. Its service uses the validated RTMPS Stream URL supplied by the user and the temporary key retrieved from Windows Credential Manager. Additional Twitch VOD audio is ignored rather than treated as an ambiguous layout; multiple video encoders remain unsupported.
+The YouTube output references the native video encoder and main live audio encoder but owns its own service and output. Its service uses the validated RTMPS Stream URL supplied by the user and the temporary key retrieved from Windows Credential Manager. Account preparation, when eventually enabled, supplies the same validated URL plus a move-only temporary key; neither path places secrets in settings, snapshots, diagnostics, or logs. Additional Twitch VOD audio is ignored rather than treated as an ambiguous layout; multiple video encoders remain unsupported.
 
 The output adapter does not automatically loop after a YouTube failure. Once the failed output has passed the full teardown barrier, the dock exposes an explicit YouTube-only retry action while Twitch continues.
 
 ## Session state invariants
 
 1. OBS remains the only owner of the native stream Start/Stop workflow.
-2. YouTube can start only while a recognized Twitch native stream is running and both the profile setting and saved-key status allow it.
+2. YouTube can start only while a recognized Twitch native stream is running and the selected manual or account destination is independently configured and accepted by its own lease boundary.
 3. Duplicate native Start/Stop events do not emit duplicate YouTube effects.
 4. A YouTube failure changes only the YouTube state; it cannot request that OBS stop streaming.
 5. An unexpected YouTube stop does not enter an immediate restart loop.
