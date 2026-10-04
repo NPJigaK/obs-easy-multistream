@@ -13,8 +13,8 @@ To set it up:
 3. Make sure live streaming is enabled for the channel. YouTube may require verification or an initial activation period before the first stream.
 4. Create a custom stream key, or select an existing reusable custom stream key.
 5. Enable YouTube **Auto-start** and **Auto-stop** for the stream.
-6. In **Stream settings**, use the lock control to show the encrypted RTMPS URL, then copy that **Stream URL** into Easy Multistream. For safety, the plugin accepts only YouTube RTMPS ingestion hosts and does not accept a stream key inside the URL.
-7. Enter the matching stream key in Easy Multistream. The key is stored as a secret and is not written to the OBS profile.
+6. Enter the matching stream key in Easy Multistream. The key is stored as a secret and is not written to the OBS profile. Do not copy the Stream URL: the plugin automatically uses YouTube's standard secure RTMPS destination.
+7. Enable **Also stream to YouTube** in the dock.
 8. If a vertical version should also appear in the YouTube Shorts feed, enable **Dual stream** in the Live Control Room before starting. For the initial workflow, leave the vertical preview set to **Auto**. YouTube creates the 9:16 feed from the horizontal input, normally using a centre crop.
 9. For the first test, set the YouTube visibility to **Private** or **Unlisted**, start OBS, and check both the horizontal player and the vertical preview before using a public stream.
 

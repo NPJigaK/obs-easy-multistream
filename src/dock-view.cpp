@@ -111,24 +111,6 @@ DockView::DockView(DockText text, QWidget *parent) : QWidget(parent), text_(std:
 	setupForm->addRow(text_.profileLabel, profileNameLabel_);
 	setupLayout->addLayout(setupForm);
 
-	setupForm = new QFormLayout();
-	setupForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
-	serverUrlEdit_ = new QLineEdit(setupGroup_);
-	serverUrlEdit_->setObjectName(QStringLiteral("easyMultistreamServerUrl"));
-	serverUrlEdit_->setAccessibleName(text_.serverUrlLabel);
-	serverUrlEdit_->setPlaceholderText(text_.serverUrlPlaceholder);
-	serverUrlEdit_->setMaxLength(2048);
-	auto *serverUrlLabel = new QLabel(text_.serverUrlLabel, setupGroup_);
-	serverUrlLabel->setBuddy(serverUrlEdit_);
-	auto *serverUrlRow = new QWidget(setupGroup_);
-	auto *serverUrlRowLayout = new QHBoxLayout(serverUrlRow);
-	serverUrlRowLayout->setContentsMargins(0, 0, 0, 0);
-	serverUrlRowLayout->addWidget(serverUrlEdit_);
-	saveServerUrlButton_ = new QPushButton(text_.saveServerUrl, serverUrlRow);
-	saveServerUrlButton_->setObjectName(QStringLiteral("easyMultistreamSaveServerUrl"));
-	serverUrlRowLayout->addWidget(saveServerUrlButton_);
-	setupForm->addRow(serverUrlLabel, serverUrlRow);
-
 	credentialStatusLabel_ = new QLabel(setupGroup_);
 	credentialStatusLabel_->setObjectName(QStringLiteral("easyMultistreamCredentialStatus"));
 	credentialStatusLabel_->setWordWrap(true);
@@ -180,8 +162,8 @@ DockView::DockView(DockText text, QWidget *parent) : QWidget(parent), text_(std:
 	applyState({});
 }
 
-void DockView::bindActions(QObject *context, EnabledHandler enabledHandler, SaveServerUrlHandler saveServerUrlHandler,
-			   SaveKeyHandler saveKeyHandler, RemoveKeyHandler removeKeyHandler,
+void DockView::bindActions(QObject *context, EnabledHandler enabledHandler, SaveKeyHandler saveKeyHandler,
+			   RemoveKeyHandler removeKeyHandler,
 			   RetryYouTubeHandler retryYouTubeHandler,
 			   OpenYouTubeStudioHandler openYouTubeStudioHandler)
 {
@@ -189,10 +171,6 @@ void DockView::bindActions(QObject *context, EnabledHandler enabledHandler, Save
 
 	QObject::connect(youtubeEnabledCheckBox_, &QCheckBox::toggled, context,
 			 [handler = std::move(enabledHandler)](bool enabled) mutable { handler(enabled); });
-	QObject::connect(saveServerUrlButton_, &QPushButton::clicked, context,
-			 [this, handler = std::move(saveServerUrlHandler)]() mutable {
-				 handler(serverUrlEdit_->text().toUtf8());
-			 });
 	QObject::connect(saveKeyButton_, &QPushButton::clicked, context,
 			 [this, handler = std::move(saveKeyHandler)]() mutable {
 				 handler(streamKeyEdit_->text().toUtf8());
@@ -218,9 +196,6 @@ void DockView::applyState(const DockState &state)
 	const QSignalBlocker blocker(youtubeEnabledCheckBox_);
 	const bool profileChanged = profileNameLabel_->text() != state.profileName;
 	profileNameLabel_->setText(state.profileName);
-	if (profileChanged || !serverUrlEdit_->hasFocus()) {
-		serverUrlEdit_->setText(state.youtubeServerUrl);
-	}
 	const bool nativeActive = state.runtimeAvailable && state.session.native != NativeStreamState::Stopped;
 	const bool youtubeActive = state.runtimeAvailable &&
 				   (state.session.youtube == YouTubeStreamState::Connecting ||
@@ -229,8 +204,7 @@ void DockView::applyState(const DockState &state)
 				    state.session.youtube == YouTubeStreamState::Stopping);
 	const bool streamActive = nativeActive || youtubeActive;
 	const bool youtubeFailed = state.runtimeAvailable && state.session.youtube == YouTubeStreamState::Failed;
-	const bool setupIncomplete = state.youtubeServerUrl.isEmpty() ||
-				     state.credential != CredentialDisplayState::Present;
+	const bool setupIncomplete = state.credential != CredentialDisplayState::Present;
 	const bool compactEligible = state.settingsEditable && !setupIncomplete;
 	if (!compactEligible) {
 		setupExpanded_ = true;
@@ -243,8 +217,6 @@ void DockView::applyState(const DockState &state)
 					 state.credential != CredentialDisplayState::Unavailable && setupIncomplete);
 	youtubeEnabledCheckBox_->setChecked(state.youtubeEnabled);
 	youtubeEnabledCheckBox_->setEnabled(state.settingsEditable && !streamActive);
-	serverUrlEdit_->setEnabled(state.settingsEditable && !streamActive);
-	saveServerUrlButton_->setEnabled(state.settingsEditable && !streamActive);
 	streamKeyEdit_->setEnabled(state.settingsEditable && !streamActive &&
 				   state.credential != CredentialDisplayState::Unavailable);
 
@@ -313,9 +285,7 @@ void DockView::applyState(const DockState &state)
 			youtubeStatusLabel_->setText(text_.youtubeDisabled);
 			break;
 		case YouTubeStreamState::SetupRequired:
-			if (state.youtubeServerUrl.isEmpty()) {
-				youtubeStatusLabel_->setText(text_.youtubeMissingServerUrl);
-			} else if (state.credential != CredentialDisplayState::Present) {
+			if (state.credential != CredentialDisplayState::Present) {
 				youtubeStatusLabel_->setText(text_.youtubeMissingKey);
 			} else {
 				youtubeStatusLabel_->setText(text_.youtubeSetupRequired);
@@ -344,8 +314,6 @@ void DockView::applyState(const DockState &state)
 		youtubeStatusLabel_->setText(text_.youtubeUnavailable);
 	} else if (!state.youtubeEnabled) {
 		youtubeStatusLabel_->setText(text_.youtubeDisabled);
-	} else if (state.youtubeServerUrl.isEmpty()) {
-		youtubeStatusLabel_->setText(text_.youtubeMissingServerUrl);
 	} else if (state.credential == CredentialDisplayState::Present) {
 		youtubeStatusLabel_->setText(text_.youtubeReady);
 	} else {
@@ -373,7 +341,7 @@ void DockView::updateNoticeVisibility()
 {
 	const bool routineNotice =
 		currentNotice_ == DockNotice::Preview || currentNotice_ == DockNotice::ProfileSaved ||
-		currentNotice_ == DockNotice::ServerUrlSaved || currentNotice_ == DockNotice::KeySaved;
+		currentNotice_ == DockNotice::KeySaved;
 	const bool compactIdle = compactEligible_ && !setupExpanded_;
 	noticeLabel_->setVisible(youtubeFailureNotice_ || !compactIdle || !routineNotice);
 }
@@ -446,14 +414,6 @@ QString DockView::noticeText(DockNotice notice) const
 		return text_.noticePreview;
 	case DockNotice::ProfileSaved:
 		return text_.noticeProfileSaved;
-	case DockNotice::ServerUrlSaved:
-		return text_.noticeServerUrlSaved;
-	case DockNotice::MissingServerUrl:
-		return text_.noticeMissingServerUrl;
-	case DockNotice::InvalidServerUrl:
-		return text_.noticeInvalidServerUrl;
-	case DockNotice::ServerUrlTooLong:
-		return text_.noticeServerUrlTooLong;
 	case DockNotice::KeySaved:
 		return text_.noticeKeySaved;
 	case DockNotice::KeyRemoved:

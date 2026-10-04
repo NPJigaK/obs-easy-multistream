@@ -8,11 +8,11 @@ The planned first useful release is intentionally narrow:
 
 - Windows x64 and OBS Studio 32
 - the native OBS Twitch output remains the primary output
-- one additional YouTube RTMPS output using the RTMPS Stream URL copied from YouTube Studio
+- one additional YouTube RTMPS output using a fixed secure YouTube destination
 - reuse of the primary H.264 and AAC encoders, with no second video encode
 - one OBS Start/Stop workflow
 - YouTube failure isolation: a secondary failure must not stop Twitch
-- one manually configured YouTube custom stream key and editable RTMPS Stream URL, with YouTube Auto-start and Auto-stop; this remains the current implementation and future advanced fallback
+- one manually configured YouTube custom stream key with YouTube Auto-start and Auto-stop; the secure RTMPS destination is fixed internally, and this remains the current implementation and future advanced fallback
 - optional YouTube automatic Dual stream, where YouTube creates a vertical feed from the single horizontal input
 - a standard OBS dock using public Frontend and Qt APIs
 
@@ -78,7 +78,7 @@ Google-validated, missing becomes reauthorization-required, and credential-servi
 with no selection does not inspect or delete any account credential. Restoration advances the account generation
 and starts no browser, listener, HTTP request, discovery operation, or output. The lifecycle integration and the
 owner-to-runtime destination handoff are active and covered by tests, but production account capability remains
-fail-closed behind the explicit availability gate. It can never consume the manual URL/key destination. Production
+fail-closed behind the explicit availability gate. It can never consume the manual-key destination. Production
 client configuration, browser opening, interactive authorization, and user-facing account controls remain
 release-gated; the internal output handoff is not itself a user-visible feature.
 
@@ -132,11 +132,11 @@ profile identity, and emits `PROFILE_CHANGED` only afterward; the plugin invalid
 latter. The initial module load also runs on that same frontend thread. A test adapter that returns a config from a
 different profile violates this boundary and is not an accepted dependency implementation.
 
-The recommended Dual stream mode is a YouTube-side feature. Easy Multistream sends one 16:9 H.264/AAC stream to the user-provided RTMPS URL; YouTube creates the 9:16 feed, normally as a centre crop. This keeps the local OBS pipeline to one YouTube output and one shared video encode. The vertical mode must be enabled in YouTube Studio before the stream starts. A separately composed 9:16 stream sent by the encoder would require a second video pipeline and is intentionally deferred.
+The recommended Dual stream mode is a YouTube-side feature. Easy Multistream sends one 16:9 H.264/AAC stream to its fixed secure YouTube RTMPS destination; YouTube creates the 9:16 feed, normally as a centre crop. This keeps the local OBS pipeline to one YouTube output and one shared video encode. The vertical mode must be enabled in YouTube Studio before the stream starts. A separately composed 9:16 stream sent by the encoder would require a second video pipeline and is intentionally deferred.
 
 ## Accepted YouTube connection direction
 
-The normal future setup is **Connect YouTube** in the dock, system-browser Google authorization, and selection of an existing reusable YouTube encoder stream. The current manual RTMPS URL and key remain an explicitly selected advanced fallback. A failed or revoked account connection must never silently switch to a saved manual destination.
+The normal future setup is **Connect YouTube** in the dock, system-browser Google authorization, and selection of an existing reusable YouTube encoder stream. The current manual key with its fixed RTMPS destination remains an explicitly selected advanced fallback. A failed or revoked account connection must never silently switch to a saved manual destination.
 
 The account connection is owned by a plugin-level provider, not by `DockView`, `SettingsController`, `SessionCoordinator`, or `YouTubeOutputAdapter`. It resolves an authenticated YouTube stream into the same validated RTMPS URL plus ephemeral stream-key boundary already consumed by the output adapter. OAuth tokens never enter session snapshots, OBS output settings snapshots, profile settings, UI state, or logs.
 
@@ -177,14 +177,14 @@ Windows Credential Manager
 
 Current OBS profile/basic.ini
   ├─ SchemaVersion + YouTubeEnabled + explicit connection mode
-  ├─ YouTubeServerUrl for the manual path
+  ├─ fixed YouTubeServerUrl compatibility value for the manual path
   └─ optional non-secret channel/stream IDs and display labels
 
 OBS user config/user.ini
   └─ one non-secret first-display marker for the dock
 ```
 
-The dock saves the non-secret enable setting and YouTube RTMPS Stream URL, and exposes a masked YouTube key editor. Its setup panel can open the fixed `https://www.youtube.com/live_dashboard` entry point in the default browser, allowing YouTube to reuse the browser's signed-in session and resolve the active channel. The plugin passes no token, key, profile value, or user-supplied URL to the browser. It renders immutable Twitch/YouTube status snapshots and a YouTube-only retry action after failure. Once the URL and key are present, the current setup interaction remains expanded so the save result does not disappear; the user can explicitly hide the details afterward. A later load of an already configured profile starts in the compact two-destination view, and **Change settings** reopens the details and Studio link without changing a streaming session. The key is intentionally shared across OBS profiles; the enabled setting and Stream URL are profile-specific. On first use, the dock is revealed once after OBS finishes loading. Its non-secret display marker is user-scoped rather than profile-scoped, so later profile changes and plugin updates continue to respect OBS's saved dock layout. A localized Tools-menu action only reveals this same dock; it does not own or control an output.
+The dock saves the non-secret enable setting and exposes a masked YouTube key editor. Its setup panel can open the fixed `https://www.youtube.com/live_dashboard` entry point in the default browser, allowing YouTube to reuse the browser's signed-in session and resolve the active channel. The plugin passes no token, key, profile value, or user-supplied URL to the browser. It renders immutable Twitch/YouTube status snapshots and a YouTube-only retry action after failure. Once the key is present, the current setup interaction remains expanded so the save result does not disappear; the user can explicitly hide the details afterward. A later load of an already configured profile starts in the compact two-destination view, and **Change settings** reopens the details and Studio link without changing a streaming session. The key is intentionally shared across OBS profiles; the enabled setting is profile-specific. On first use, the dock is revealed once after OBS finishes loading. Its non-secret display marker is user-scoped rather than profile-scoped, so later profile changes and plugin updates continue to respect OBS's saved dock layout. A localized Tools-menu action only reveals this same dock; it does not own or control an output.
 
 User-visible text follows OBS and platform terminology. Internal milestone names, schema versions, implementation roles such as primary/secondary output, and release codenames stay in code and engineering documentation rather than appearing in the dock.
 
@@ -203,7 +203,7 @@ User-visible text follows OBS and platform terminology. Internal milestone names
 
 ## Configuration and credential invariants
 
-1. `basic.ini` contains only the schema and enable value, an explicit connection mode, the non-secret manual `YouTubeServerUrl`, and optional non-secret account-selection IDs/labels under `[EasyMultistream]`.
+1. `basic.ini` contains only the schema and enable value, an explicit connection mode, the fixed non-secret manual `YouTubeServerUrl` compatibility value, and optional non-secret account-selection IDs/labels under `[EasyMultistream]`. Account mode removes that manual URL field.
 2. The stream key is written only to Windows Credential Manager and is never read back into the editor. This manual key
    remains shared across OBS profiles; account refresh credentials are separate and profile/channel-scoped.
 3. Saving a key and changing a profile's enabled flag are independent operations; there is no cross-store transaction to partially commit.
@@ -212,7 +212,7 @@ User-visible text follows OBS and platform terminology. Internal milestone names
 6. Invalid and unknown future schemas are read-only and are never downgraded by this version.
 7. A failed safe-save restores the previous in-memory non-secret settings.
 8. Credential or YouTube output failure cannot alter the native OBS output.
-9. Account mode cannot read or start with the manual URL/key path; it remains unavailable unless the production account capability is explicitly enabled and the current `OutputLease` plus `NativeLease` handoff is valid.
+9. Account mode cannot read or start with the manual-key path; it remains unavailable unless the production account capability is explicitly enabled and the current `OutputLease` plus `NativeLease` handoff is valid.
 10. Schema 1 and 2 profiles migrate in memory as manual mode. A normal settings save writes the current schema without placing any credential, token, authorization code, PKCE value, or resolved stream key in the profile.
 
 ## Runtime boundary
@@ -241,7 +241,7 @@ The destination classifier accepts only exact known OBS service values. A Twitch
 
 The OBS Frontend bridge and output adapter are owned by the plugin context, not by the dock or settings controller. The dock may be closed without affecting outputs. Raw OBS pointers and secret values never enter `SessionCoordinator` or its snapshots. The detailed ownership and callback rules are recorded in [the output integration contract](runtime-output-design.md).
 
-The YouTube output references the native video encoder and main live audio encoder but owns its own service and output. Its service uses the validated RTMPS Stream URL supplied by the user and the temporary key retrieved from Windows Credential Manager. Account preparation, when eventually enabled, supplies the same validated URL plus a move-only temporary key; neither path places secrets in settings, snapshots, diagnostics, or logs. Additional Twitch VOD audio is ignored rather than treated as an ambiguous layout; multiple video encoders remain unsupported.
+The YouTube output references the native video encoder and main live audio encoder but owns its own service and output. In manual mode its service uses the fixed `rtmps://a.rtmps.youtube.com/live2` destination and the temporary key retrieved from Windows Credential Manager. Account preparation, when eventually enabled, supplies its own validated API-returned URL plus a move-only temporary key; neither path places secrets in settings, snapshots, diagnostics, or logs. Additional Twitch VOD audio is ignored rather than treated as an ambiguous layout; multiple video encoders remain unsupported.
 
 The output adapter does not automatically loop after a YouTube failure. Once the failed output has passed the full teardown barrier, the dock exposes an explicit YouTube-only retry action while Twitch continues.
 

@@ -8,7 +8,7 @@ account network request, or account output is active.
 
 ## Decision
 
-Easy Multistream will make browser-based YouTube account connection the normal setup path while preserving the current manual RTMPS URL and stream-key path as an advanced fallback.
+Easy Multistream will make browser-based YouTube account connection the normal setup path while preserving the current manual stream-key path, paired with its fixed secure YouTube RTMPS destination, as an advanced fallback.
 
 The intended user experience is:
 
@@ -18,7 +18,7 @@ The intended user experience is:
 4. Return to OBS.
 5. Start and stop streaming only with OBS's existing controls.
 
-After setup, the dock shows the connected channel and independent Twitch/YouTube delivery status. It does not show OAuth terminology, internal provider names, schema versions, implementation phases, or release milestone names. Manual URL/key fields live under advanced settings.
+After setup, the dock shows the connected channel and independent Twitch/YouTube delivery status. It does not show OAuth terminology, internal provider names, schema versions, implementation phases, or release milestone names. The manual key control lives under advanced settings; there is no manual server-URL field.
 
 An account-connection failure never stops the native Twitch stream and never silently falls back to another saved destination. The user must explicitly select the manual connection path if they want to use it.
 
@@ -118,7 +118,7 @@ the mode or touching any refresh-token credential. Although the headless provide
 lifecycle for restore and local disconnect. The destination preparation and output handoff are now integrated and tested
 internally, but the production account capability remains unavailable behind an explicit gate until the official client,
 authorization UI, policy, and release requirements are complete. A partially implemented or imported account profile
-therefore cannot silently use the manual URL/key instead.
+therefore cannot silently use the manual key destination instead.
 
 Windows Credential Manager uses separate boundaries for:
 

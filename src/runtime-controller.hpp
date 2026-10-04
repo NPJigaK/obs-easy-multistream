@@ -30,14 +30,11 @@ struct RuntimeSettings {
 	// value-only capability bit; RuntimeController never knows about OAuth,
 	// profiles, or the account owner implementation.
 	bool youtubeAccountDestinationAvailable = false;
-	std::string youtubeServerUrl;
 };
 
-// The state machine currently calls its third boolean youtubeKeyAvailable.  At
-// this boundary it means "the complete secondary configuration is available":
-// a key is present *and* youtubeServerUrl passed isValidRtmpsUrl().  Keeping
-// the conversion here lets the session-core API be renamed later without
-// exposing this temporary compatibility name to the UI.
+// Account destinations remain dynamic and pass through this validator before
+// reaching the output adapter.  The manual destination is a separate fixed
+// invariant and is never accepted from RuntimeSettings.
 bool isValidRtmpsUrl(std::string_view value) noexcept;
 
 // RuntimeController's small port is intentionally named independently from

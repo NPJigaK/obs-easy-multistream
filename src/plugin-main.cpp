@@ -119,9 +119,6 @@ easy_multistream::DockText loadDockText()
 	text.openYouTubeStudio = moduleText("Dock.OpenYouTubeStudio");
 	text.profileLabel = moduleText("Dock.Profile");
 	text.enableYouTube = moduleText("Dock.EnableYouTube");
-	text.serverUrlLabel = moduleText("Dock.ServerUrl.Label");
-	text.serverUrlPlaceholder = moduleText("Dock.ServerUrl.Placeholder");
-	text.saveServerUrl = moduleText("Dock.SaveServerUrl");
 	text.credentialLabel = moduleText("Dock.Credential.Label");
 	text.streamKeyLabel = moduleText("Dock.StreamKey.Label");
 	text.saveKey = moduleText("Dock.SaveKey");
@@ -134,7 +131,6 @@ easy_multistream::DockText loadDockText()
 	text.credentialUnavailable = moduleText("Dock.Credential.Unavailable");
 	text.youtubeDisabled = moduleText("Dock.YouTube.Disabled");
 	text.youtubeReady = moduleText("Dock.YouTube.Ready");
-	text.youtubeMissingServerUrl = moduleText("Dock.YouTube.MissingServerUrl");
 	text.youtubeMissingKey = moduleText("Dock.YouTube.MissingKey");
 	text.youtubeUnavailable = moduleText("Dock.YouTube.Unavailable");
 	text.youtubeRequiresTwitch = moduleText("Dock.YouTube.RequiresTwitch");
@@ -148,10 +144,6 @@ easy_multistream::DockText loadDockText()
 	text.retryYouTube = moduleText("Dock.RetryYouTube");
 	text.noticePreview = moduleText("Dock.Notice.Preview");
 	text.noticeProfileSaved = moduleText("Dock.Notice.ProfileSaved");
-	text.noticeServerUrlSaved = moduleText("Dock.Notice.ServerUrlSaved");
-	text.noticeMissingServerUrl = moduleText("Dock.Notice.MissingServerUrl");
-	text.noticeInvalidServerUrl = moduleText("Dock.Notice.InvalidServerUrl");
-	text.noticeServerUrlTooLong = moduleText("Dock.Notice.ServerUrlTooLong");
 	text.noticeKeySaved = moduleText("Dock.Notice.KeySaved");
 	text.noticeKeyRemoved = moduleText("Dock.Notice.KeyRemoved");
 	text.noticeMissingKey = moduleText("Dock.Notice.MissingKey");
@@ -433,7 +425,6 @@ void applyRuntimeSettings(PluginState &state, easy_multistream::Settings setting
 	// prevents imported account-mode settings from opening a browser, reading a
 	// refresh token, making an API request, or starting an output.
 	runtimeSettings.youtubeAccountDestinationAvailable = false;
-	runtimeSettings.youtubeServerUrl = std::move(settings.youtubeServerUrl);
 	if (profileChanged) {
 		state.runtime->onProfileChanged(std::move(runtimeSettings));
 	} else {

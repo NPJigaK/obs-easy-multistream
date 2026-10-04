@@ -103,7 +103,7 @@ P0は安全性・所有権・秘密情報・native出力保護に関わる項目
 | RT-INPUT-01 | P1 | native service id/providerがTwitch以外、またはcustom RTMP・不明provider | YouTube outputを開始しない。URLやkeyの形からTwitchと推測しない | 自動＋手動 |
 | RT-INPUT-02 | P0 | 映像encoderが未設定、音声encoderが未設定、映像trackが複数、またはTwitch VOD用の第2音声trackがある | 欠落・複数映像はYouTube試行だけを安全に拒否する。VOD音声trackは許可し、main audio index 0だけをYouTubeへ送る。native Twitchは継続する | 自動＋手動 |
 | RT-INPUT-03 | P0 | H.264/AAC以外の第一実装対象外codec（AV1、HEVC、未対応HDR）を設定 | YouTubeへ接続せず、nativeのencoder設定を変更・再スケールしない。ユーザー向けエラーはcodec名など非秘密情報だけ | 自動＋手動 |
-| RT-INPUT-04 | P0 | URLが空、schemeがRTMPS/RTMP以外、hostなし、上限超過、keyをquery/pathに連結した不正URL | output/serviceを作らず、YouTubeをSetupRequired/Failedにする。native Twitchは継続 | 自動 |
+| RT-INPUT-04 | P0 | 手動モードのprofileに欠落・旧RTMP・任意host・不正URLを入れる。account resolverからscheme不正、hostなし、上限超過、keyをquery/pathに連結したURLを返す | 手動モードはprofile値を無視して固定RTMPS宛先だけを使う。account modeの不正URLはoutput/serviceを作らずYouTubeをFailedにし、native Twitchは継続 | 自動 |
 | RT-INPUT-05 | P0 | Credential Managerが未登録、read access denied、OSエラー、型不正、サイズ不正を返す | YouTube outputを作らず、資格情報の状態を表示する。Twitchを停止しない。秘密値を返り値・ログへ出さない | 自動＋手動 |
 | RT-INPUT-06 | P1 | Start直前にkeyを削除・resetし、古い設定を残した状態で開始 | 直前のread結果だけを使い、古いkeyを再利用しない。失敗後に自動的な無限retryをしない | 自動＋手動 |
 | RT-INPUT-07 | P1 | profile configがnull、設定のfuture schema、保存失敗、profile切り替え中に設定を読む | config pointerや`config_get_string()`の返却ポインターを保持しない。安全な未設定状態へ遷移し、native出力を触らない | 自動＋手動 |
@@ -135,7 +135,7 @@ P0は安全性・所有権・秘密情報・native出力保護に関わる項目
 | ID | 操作 | 確認すること |
 |---|---|---|
 | OBS-M-00 | cleanなOBSユーザー設定で初回起動し、案内を確認してdockを閉じ、OBSを再起動する | 初回だけEasy Multistream dockが自動表示され、未設定時の案内が読める。2回目は勝手に再表示せず、DocksメニューとToolsメニューのどちらからでも同じdockを再表示できる。profile切替・dock表示/非表示で配信状態は変わらない |
-| OBS-M-01 | テストprofileでTwitch nativeを設定し、Easy Multistreamを有効化。YouTube RTMPS server/keyを保存してOBSのStart Streamingを1回押す | TwitchとYouTubeがそれぞれ接続する。OBSのnative Start/Stopボタンを増やさない。YouTubeが接続中の間に送信中と表示しない |
+| OBS-M-01 | テストprofileでTwitch nativeを設定し、Easy MultistreamへYouTube keyを保存して有効化し、OBSのStart Streamingを1回押す | 固定RTMPS宛先でTwitchとYouTubeがそれぞれ接続する。OBSのnative Start/Stopボタンを増やさない。YouTubeが接続中の間に送信中と表示しない |
 | OBS-M-02 | OBS-M-01の状態でYouTube outputだけをテストfaultまたは接続失敗にする | YouTubeだけが失敗し、Twitchは送信を続ける。再接続ループやnative Stopがない |
 | OBS-M-03 | OBS-M-01でStopを押し、Twitch停止・YouTube停止・YouTube完全releaseの順序をログで確認する | 停止後にOBSを閉じてもクラッシュせず、次回Startで旧outputが残っていない |
 | OBS-M-04 | YouTube実配信ではなくfake/local test outputで、Start→Stopを完全release待ちなしで短時間に20回程度繰り返す。可能なら各回でStart/Stopイベントを遅延させる（実YouTubeでの反復は必要最小限の数回に留める） | outputが重複せず、映像停止・クラッシュ・OBS UIハング・ハンドルやスレッドの増加がない |
@@ -144,7 +144,7 @@ P0は安全性・所有権・秘密情報・native出力保護に関わる項目
 | OBS-M-07 | 事前にnativeのcodec/audio trackを対象外設定へ変更してStartする | YouTubeだけが設定不足として拒否され、native Twitchは変更されない。復元後は正常に開始できる |
 | OBS-M-08 | keyをRemoveしてからStart、またはCredential Managerを一時的に利用不可にしてStart | SetupRequired/Unavailable相当の表示になり、keyがログや設定ファイルへ現れず、Twitchは停止しない |
 | OBS-M-09 | Start中またはStreaming中にYouTube接続だけを切断する | YouTubeの状態が明確に失敗・再接続中・停止のいずれかになり、Twitchが継続する。停止後に次回Startできる |
-| OBS-M-10 | URLまたはkeyの保存で設定が完了した直後に詳細が残ることを確認し、「設定を閉じる」→「設定を変更」を操作する。OBS再起動後はcompact表示になること、DocksメニューとToolsメニューからdockを閉じて再表示できることも確認する | 保存結果を確認する前に詳細が消えず、明示操作または次回load後だけcompactになる。Twitch/YouTubeの2行とYouTube有効設定は常に確認でき、表示操作で配信状態とoutput寿命は変わらない |
+| OBS-M-10 | keyの保存で設定が完了した直後に詳細が残ることを確認し、「設定を閉じる」→「設定を変更」を操作する。OBS再起動後はcompact表示になること、DocksメニューとToolsメニューからdockを閉じて再表示できることも確認する | 保存結果を確認する前に詳細が消えず、明示操作または次回load後だけcompactになる。Twitch/YouTubeの2行とYouTube有効設定は常に確認でき、表示操作で配信状態とoutput寿命は変わらない |
 | OBS-M-11 | OBS-M-01を専用のportable OBS 32.2.2でも繰り返す | 通常版とは別のprofile・credential境界で動作し、普段のOBS環境に設定を残さない |
 
 ### 実配信後の確認
@@ -208,9 +208,9 @@ generation invalidation / new work拒否
 - [x] 現在のCTestがすべて通る。
 - [x] start acceptedとstart signalを分けた状態機械テストが通る。
 - [x] リポジトリ内の隔離portable OBS 32.2.2で、0.1.0基礎buildのload、Startup complete、clean unload、memory leaks 0を確認した。
-- [ ] 0.4.1で初回dock表示、YouTube Studioリンク、保存直後の詳細維持、明示的なcompact化、表示済みmarker保存、2回目の非表示、トレイ復帰後の表示、Toolsメニューからの再表示を確認した。
+- [ ] 0.4.2で初回dock表示、YouTube Studioリンク、URL入力欄が存在しないこと、キー保存直後の詳細維持、明示的なcompact化、表示済みmarker保存、2回目の非表示、トレイ復帰後の表示、Toolsメニューからの再表示を確認した。
 - [ ] `obs_output_start()`同期拒否とnative StartStreaming同期拒否を別々にテストした。
-- [ ] output error、YouTube-only disconnect、credential failure、missing URL/key、unsupported codecをテストした。
+- [ ] output error、YouTube-only disconnect、credential failure、missing/invalid key、unsupported codecをテストした。
 - [ ] stop、duplicate stop、rapid stop-start、profile change、EXITをテストした。
 - [ ] stale generation/lease/revisionのcallbackを破棄できる。
 - [ ] encoder/service/output/callback contextのrelease順序をtraceとASan等で確認した。

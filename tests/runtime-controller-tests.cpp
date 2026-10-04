@@ -2,6 +2,7 @@
 // Copyright (C) 2026 NPJigaK
 
 #include "runtime-controller.hpp"
+#include "youtube-destination.hpp"
 
 #include <cstdint>
 #include <deque>
@@ -41,6 +42,7 @@ using easy_multistream::RuntimeYouTubeDestinationCompletionStatus;
 using easy_multistream::RuntimeYouTubeDestinationStartStatus;
 using easy_multistream::YouTubeConnectionMode;
 using easy_multistream::YouTubeStreamState;
+using easy_multistream::kDefaultYouTubeServerUrl;
 
 struct FakeAdapter final : IRuntimeYouTubeOutputAdapter {
 	struct StartRecord {
@@ -150,14 +152,12 @@ struct Harness {
 	}
 };
 
-RuntimeSettings twitchSettings(bool enabled = true, bool keyAvailable = true,
-			       std::string server = "rtmps://a.rtmps.youtube.com/live2")
+RuntimeSettings twitchSettings(bool enabled = true, bool keyAvailable = true)
 {
 	RuntimeSettings settings;
 	settings.nativeDestination = NativeDestination::Twitch;
 	settings.youtubeEnabled = enabled;
 	settings.youtubeKeyAvailable = keyAvailable;
-	settings.youtubeServerUrl = std::move(server);
 	return settings;
 }
 
@@ -249,7 +249,7 @@ void testStartBoundaryAndNativeFailureReconciliation()
 	harness.drain();
 	CHECK(retryLease != lease);
 	CHECK(adapter.starts.size() == 1);
-	CHECK(adapter.starts.front().serverUrl == "rtmps://a.rtmps.youtube.com/live2");
+	CHECK(adapter.starts.front().serverUrl == kDefaultYouTubeServerUrl);
 	CHECK(adapter.starts.front().keySize == std::string("stream-key").size());
 	CHECK(controller.snapshot().native == easy_multistream::NativeStreamState::Streaming);
 	CHECK(controller.snapshot().youtube == YouTubeStreamState::Connecting);
@@ -375,14 +375,14 @@ void testProfileGenerationDropsOldCallbacks()
 	CHECK(adapter.shutdownCalled);
 }
 
-void testInvalidUrlAndCredentialReadFailureAreSecondaryOnly()
+void testCredentialReadFailureIsSecondaryOnly()
 {
 	FakeAdapter adapter;
 	Harness harness;
 	RuntimeController controller(
 		adapter, [] { return SecureBuffer{}; },
 		[&harness](std::function<void()> callback) { return harness.post(std::move(callback)); });
-	controller.setSettings(twitchSettings(true, true, "rtmp://not-rtmps.example/live"));
+	controller.setSettings(twitchSettings());
 	controller.onStreamingStarting(NativeDestination::Twitch);
 	const NativeLease lease = nativeLease(controller);
 	controller.onNativeOutputStarting(lease);
@@ -390,7 +390,7 @@ void testInvalidUrlAndCredentialReadFailureAreSecondaryOnly()
 	harness.drain();
 	CHECK(adapter.starts.empty());
 	CHECK(controller.snapshot().native == easy_multistream::NativeStreamState::Streaming);
-	CHECK(controller.snapshot().youtube == YouTubeStreamState::SetupRequired);
+	CHECK(controller.snapshot().youtube == YouTubeStreamState::Failed);
 
 	controller.onExit();
 	CHECK(adapter.shutdownCalled);
@@ -516,11 +516,13 @@ void testAccountDestinationSuccessUsesProviderAndReleasesAfterOutputBarrier()
 	startNativeForAccount(controller, provider, harness);
 
 	const OutputLease lease = provider.starts.front().lease;
-	provider.complete(0, successfulAccountCompletion(lease));
+	constexpr std::string_view accountDestination = "rtmps://b.rtmps.youtube.com:443/live2";
+	provider.complete(0, successfulAccountCompletion(lease, std::string(accountDestination)));
 	harness.drain();
 	CHECK(adapter.starts.size() == 1);
 	CHECK(adapter.starts.front().lease == lease);
-	CHECK(adapter.starts.front().serverUrl == "rtmps://a.rtmps.youtube.com/live2");
+	CHECK(adapter.starts.front().serverUrl == accountDestination);
+	CHECK(adapter.starts.front().serverUrl != kDefaultYouTubeServerUrl);
 	CHECK(adapter.starts.front().keySize == std::string("account-stream-key").size());
 	CHECK(manualKeyReads == 0);
 	CHECK(provider.releases.empty());
@@ -1021,7 +1023,7 @@ int main()
 	testSecondaryFailureDoesNotStopNative();
 	testReleaseBarrierBlocksRapidRestart();
 	testProfileGenerationDropsOldCallbacks();
-	testInvalidUrlAndCredentialReadFailureAreSecondaryOnly();
+	testCredentialReadFailureIsSecondaryOnly();
 	testAccountModeCannotUseManualDestination();
 	testSwitchingToAccountModeStopsManualOutputWithoutFallback();
 	testAccountModeProfileChangeCannotRestartOldManualOutput();

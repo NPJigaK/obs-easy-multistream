@@ -192,7 +192,7 @@ void testSettingsDefaults()
 	CHECK(loaded.status == easy_multistream::SettingsLoadStatus::Defaults);
 	CHECK(!loaded.settings.youtubeEnabled);
 	CHECK(loaded.settings.youtubeConnectionMode == easy_multistream::YouTubeConnectionMode::Manual);
-	CHECK(loaded.settings.youtubeServerUrl.empty());
+	CHECK(loaded.settings.youtubeServerUrl == easy_multistream::kDefaultYouTubeServerUrl);
 	CHECK(!loaded.settings.youtubeAccountSelection.has_value());
 	CHECK(loaded.sourceSchemaVersion == easy_multistream::kSettingsSchemaVersion);
 }
@@ -367,6 +367,24 @@ void testSettingsConnectionModesAndMigration()
 	CHECK(recoveredAccount.settings.youtubeConnectionMode == easy_multistream::YouTubeConnectionMode::Account);
 	CHECK(recoveredAccount.settings.youtubeServerUrl.empty());
 	CHECK(recoveredAccount.settings.youtubeAccountSelection.has_value());
+
+	Config studioRtmpUrl("[EasyMultistream]\nSchemaVersion=2\nYouTubeEnabled=true\n"
+			     "YouTubeServerUrl=rtmp://a.rtmp.youtube.com/live2\n");
+	const auto migratedStudioUrl = easy_multistream::loadProfileSettings(studioRtmpUrl.get());
+	CHECK(migratedStudioUrl.status == easy_multistream::SettingsLoadStatus::Loaded);
+	CHECK(migratedStudioUrl.settings.youtubeEnabled);
+	CHECK(migratedStudioUrl.settings.youtubeServerUrl == easy_multistream::kDefaultYouTubeServerUrl);
+	easy_multistream::writeProfileSettings(studioRtmpUrl.get(), migratedStudioUrl.settings);
+	CHECK(std::string(config_get_string(studioRtmpUrl.get(), "EasyMultistream", "YouTubeServerUrl")) ==
+	      easy_multistream::kDefaultYouTubeServerUrl);
+	CHECK(config_get_uint(studioRtmpUrl.get(), "EasyMultistream", "SchemaVersion") ==
+	      easy_multistream::kSettingsSchemaVersion);
+
+	Config untrustedLegacyUrl("[EasyMultistream]\nSchemaVersion=2\nYouTubeEnabled=true\n"
+				  "YouTubeServerUrl=rtmps://untrusted.example/live2\n");
+	const auto normalizedUntrustedUrl = easy_multistream::loadProfileSettings(untrustedLegacyUrl.get());
+	CHECK(normalizedUntrustedUrl.status == easy_multistream::SettingsLoadStatus::Loaded);
+	CHECK(normalizedUntrustedUrl.settings.youtubeServerUrl == easy_multistream::kDefaultYouTubeServerUrl);
 }
 
 void testAccountSettingsRoundTripAndSecretExclusion()
@@ -469,6 +487,7 @@ void testAccountSettingsSafeSaveAndReload()
 	const std::string contents{std::istreambuf_iterator<char>(savedFile), std::istreambuf_iterator<char>()};
 	savedFile.close();
 	CHECK(contents.find("ConnectionMode=account") != std::string::npos);
+	CHECK(contents.find("YouTubeServerUrl") == std::string::npos);
 	CHECK(contents.find("YouTubeChannelId") == std::string::npos);
 	CHECK(contents.find("YouTubeChannelLabel") == std::string::npos);
 	CHECK(contents.find("YouTubeStreamId") == std::string::npos);
@@ -666,13 +685,12 @@ void testSettingsSaveFailureRollsBackInMemoryValues()
 
 	easy_multistream::Settings desired;
 	desired.youtubeEnabled = true;
-	desired.youtubeServerUrl = "rtmps://b.rtmps.youtube.com/live2";
 	CHECK(easy_multistream::saveProfileSettings(config, desired) != CONFIG_SUCCESS);
 	const auto afterFailure = easy_multistream::loadProfileSettings(config);
 	CHECK(afterFailure.status == easy_multistream::SettingsLoadStatus::Loaded);
 	CHECK(!afterFailure.settings.youtubeEnabled);
 	CHECK(afterFailure.settings.youtubeConnectionMode == easy_multistream::YouTubeConnectionMode::Account);
-	CHECK(afterFailure.settings.youtubeServerUrl == kValidYouTubeServerUrl);
+	CHECK(afterFailure.settings.youtubeServerUrl.empty());
 	CHECK(afterFailure.settings.youtubeAccountSelection.has_value());
 	if (afterFailure.settings.youtubeAccountSelection.has_value()) {
 		CHECK(afterFailure.settings.youtubeAccountSelection->channelId == "UC-original");
@@ -740,14 +758,16 @@ void testInvalidSchemaAndUnavailableConfig()
 
 	Config missingServerUrl("[EasyMultistream]\nSchemaVersion=1\nYouTubeEnabled=true\n");
 	const auto missingServerUrlResult = easy_multistream::loadProfileSettings(missingServerUrl.get());
-	CHECK(missingServerUrlResult.status == easy_multistream::SettingsLoadStatus::SetupRequired);
+	CHECK(missingServerUrlResult.status == easy_multistream::SettingsLoadStatus::Loaded);
 	CHECK(missingServerUrlResult.settings.youtubeEnabled);
+	CHECK(missingServerUrlResult.settings.youtubeServerUrl == easy_multistream::kDefaultYouTubeServerUrl);
 	CHECK(missingServerUrlResult.sourceSchemaVersion == 1);
 
 	Config invalidServerUrl(
 		"[EasyMultistream]\nSchemaVersion=2\nYouTubeEnabled=true\nYouTubeServerUrl=https://a.example/live2\n");
 	const auto invalidServerUrlResult = easy_multistream::loadProfileSettings(invalidServerUrl.get());
-	CHECK(invalidServerUrlResult.status == easy_multistream::SettingsLoadStatus::InvalidSchema);
+	CHECK(invalidServerUrlResult.status == easy_multistream::SettingsLoadStatus::Loaded);
+	CHECK(invalidServerUrlResult.settings.youtubeServerUrl == easy_multistream::kDefaultYouTubeServerUrl);
 
 	const auto unavailable = easy_multistream::loadProfileSettings(nullptr);
 	CHECK(unavailable.status == easy_multistream::SettingsLoadStatus::Unavailable);
