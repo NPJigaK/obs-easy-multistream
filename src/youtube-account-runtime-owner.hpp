@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "youtube-account-destination-preparer.hpp"
 #include "youtube-account-profile-restore.hpp"
 #include "youtube-account-remote-revoke.hpp"
 #include "windows-credential-vault.hpp"
@@ -20,10 +21,10 @@
 namespace easy_multistream {
 
 // This is the production lifecycle seam for the saved YouTube account state.
-// It owns restore/invalidation, the internal local-disconnect and remote-revoke
-// transactions, and a headless connection facade. These operations remain
-// detached from OBS UI/runtime code until the account output lifecycle is
-// complete.
+// It owns restore/invalidation, the internal destination-preparation,
+// local-disconnect, and remote-revoke transactions, plus a headless connection
+// facade. These operations remain detached from OBS UI/streaming-runtime code
+// until the account output lifecycle is complete.
 // All methods are owner-thread-only.
 struct YouTubeAccountRuntimeOwnerSnapshot final {
 	YouTubeAccountProfileRestoreStatus restoreStatus = YouTubeAccountProfileRestoreStatus::Unavailable;
@@ -122,6 +123,36 @@ struct YouTubeAccountRemoteRevokeSnapshot final {
 	bool closed = false;
 };
 
+enum class YouTubeAccountDestinationOperationStatus {
+	Started,
+	Cancelled,
+	NoActiveAttempt,
+	NotConfigured,
+	NotRestored,
+	NoSelection,
+	NotAccountMode,
+	ProfileUnavailable,
+	ProfileChanged,
+	Busy,
+	WrongThread,
+	Closed,
+	StaleAttempt,
+	OperationFailed,
+};
+
+// Secret-free observation of the account destination transaction. A resolved
+// RTMPS URL and stream key exist only in the move-only completion passed to the
+// caller; they are never retained in this snapshot.
+struct YouTubeAccountDestinationSnapshot final {
+	YouTubeDestinationPreparerState state = YouTubeDestinationPreparerState::Idle;
+	std::optional<YouTubeDestinationPrepareAttempt> activeAttempt;
+	std::optional<YouTubeDestinationPrepareStatus> lastStatus;
+	std::uint64_t generation = 0;
+	bool lockCleanupPending = false;
+	bool restored = false;
+	bool closed = false;
+};
+
 class YouTubeAccountRuntimeOwner final {
 public:
 	using ProfilePathReader = YouTubeAccountProfileContext::ProfilePathReader;
@@ -139,7 +170,9 @@ public:
 				   GoogleOAuthAuthorizationSession::BrowserOpener browserOpener,
 				   std::unique_ptr<WinCredentialApi> credentialApi,
 				   std::unique_ptr<YouTubeAccountProfileOperationLockApi> profileLockApi,
-				   std::unique_ptr<YouTubeAccountRemoteRevokePort> remoteRevokePort = {});
+				   std::unique_ptr<YouTubeAccountRemoteRevokePort> remoteRevokePort = {},
+				   std::unique_ptr<YouTubeDestinationRefreshPort> destinationRefreshPort = {},
+				   std::unique_ptr<YouTubeDestinationResolverPort> destinationResolverPort = {});
 
 	YouTubeAccountRuntimeOwner(const YouTubeAccountRuntimeOwner &) = delete;
 	YouTubeAccountRuntimeOwner &operator=(const YouTubeAccountRuntimeOwner &) = delete;
@@ -165,6 +198,14 @@ public:
 	startRemoteRevoke(YouTubeAccountRemoteRevokeCoordinator::CompletionHandler completionHandler) noexcept;
 	bool cancelRemoteRevoke(YouTubeAccountRemoteRevokeAttempt attempt) noexcept;
 	YouTubeAccountRemoteRevokeSnapshot remoteRevokeSnapshot() const;
+	// Resolves the currently restored account selection just in time. The owner,
+	// not the caller, supplies the active profile generation, binding, and saved
+	// selection so an obsolete profile cannot be prepared by value.
+	YouTubeAccountDestinationOperationStatus
+	startDestinationPreparation(YouTubeAccountDestinationPreparer::CompletionHandler completionHandler) noexcept;
+	YouTubeAccountDestinationOperationStatus
+	cancelDestinationPreparation(YouTubeDestinationPrepareAttempt attempt) noexcept;
+	YouTubeAccountDestinationSnapshot destinationSnapshot() const;
 	// Erases the active profile's saved account selection and credential while
 	// keeping an account-mode profile ready for a later connection. The
 	// coordinator owns the transaction-scoped selection commit; this owner only
@@ -183,7 +224,14 @@ private:
 	bool invalidateConnectionContext(YouTubeAccountProfileRestoreStatus status) noexcept;
 	bool onOwnerThread() const noexcept;
 	bool remoteRevokeBusy() const noexcept;
+	bool destinationPreparationBusy() const noexcept;
+	bool accountOperationBusy() const noexcept;
 	void updateAfterRemoteRevoke(YouTubeAccountRemoteRevokeCompletion &completion) noexcept;
+	void updateAfterDestinationPreparation(YouTubeDestinationPrepareCompletion &completion,
+					       YouTubeDestinationPrepareAttempt expectedAttempt,
+					       const std::string &expectedBinding,
+					       const YouTubeAccountSelection &expectedSelection) noexcept;
+	void scheduleDestinationCleanupRetry() noexcept;
 	void retryPendingProfileRestore() noexcept;
 	void clearRestoredBinding() noexcept;
 	static bool isAcceptedRestore(const YouTubeAccountProfileRestoreResult &result) noexcept;
@@ -201,12 +249,16 @@ private:
 	std::unique_ptr<YouTubeAccountProvider> provider_;
 	std::unique_ptr<YouTubeAccountProfileRestoreCoordinator> restoreCoordinator_;
 	std::unique_ptr<YouTubeAccountRemoteRevokeCoordinator> remoteRevokeCoordinator_;
+	std::unique_ptr<YouTubeAccountDestinationPreparer> destinationPreparer_;
 
 	std::uint64_t restoredGeneration_ = 0;
+	std::uint64_t destinationAttemptCounter_ = 0;
 	std::string restoredBinding_;
+	std::optional<YouTubeDestinationPrepareStatus> lastDestinationStatus_;
 	YouTubeAccountProfileRestoreStatus restoreStatus_ = YouTubeAccountProfileRestoreStatus::Unavailable;
 	bool restored_ = false;
 	bool profileRestorePending_ = false;
+	bool destinationCleanupRetryScheduled_ = false;
 	bool closed_ = false;
 	bool shutdownComplete_ = false;
 };

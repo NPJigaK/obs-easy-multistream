@@ -21,7 +21,7 @@ Browser-based YouTube account connection is the accepted next setup path, but it
 The current source tree includes an account state machine, Google desktop-authorization protocol core,
 a separate loopback-listener library, a browser-opener authorization-session layer, a fixed-origin HTTPS token
 transport, a read-only YouTube discovery transport with bounded pagination, a headless interactive account provider,
-a separate secret-bearing selected-stream resolver, a detached headless destination preparer, a Windows
+a separate secret-bearing selected-stream resolver, a lifecycle-owned headless destination preparer, a Windows
 profile-operation lock, and an active-profile restore coordinator owned by the production lifecycle wrapper. The
 provider and destination preparer both
 require the lock provider to be injected and keep
@@ -54,15 +54,17 @@ the operation re-reads durable state where required and no recovery terminology 
 releases its owner-thread lock after credential/profile rollback or the final commit. The preparer releases its lock
 after queued completion state is finalized and immediately before invoking an external completion handler. If native
 release fails, neither component reports a usable result. When ownership remains, it retains the lock fail-closed and
-retries unfinished lock or port cleanup during shutdown. A production lifecycle owner now links the provider and profile
-operation coordinator into the OBS plugin to restore saved local state during module load and `PROFILE_CHANGED`, invalidate
+the destination owner queues one bounded cleanup retry before restoring the new profile; unfinished lock or port cleanup
+is retried again during shutdown. A production lifecycle owner now links the provider, destination
+preparer, and profile operation coordinator into the OBS plugin to restore saved local state during module load and `PROFILE_CHANGED`, invalidate
 it during `PROFILE_CHANGING`, close it during `EXIT`, and provide a tested local-disconnect seam for the future account UI.
-No current dock or plugin-main action invokes either internal seam. The owner now exposes a headless connection facade
-that revalidates the active account-mode profile without advancing its generation, maps provider details to stable
+No current dock or plugin-main action invokes these internal seams. The owner now exposes headless connection and
+destination-preparation facades
+that revalidate the active account-mode profile without advancing its generation, map provider details to stable
 operation results, uses attempt-scoped cancellation, and exposes candidates only through revision-bound handles and
 copied labels rather than raw Google resource IDs. The production owner still uses an empty client ID and browser opener,
 so the facade returns not-configured before it opens a listener or browser, makes an OAuth/API request, or starts an
-output. The dormant provider does construct its Qt network adapters; this adds the Qt Network runtime dependency but no
+output. The dormant provider and destination preparer construct their Qt network adapters; this adds the Qt Network runtime dependency but no
 socket bind, HTTP request, or background service. The current dock and manual RTMPS workflow remain unchanged. The
 profile codec now distinguishes manual and account modes and can preserve a bounded,
 non-secret channel/stream selection. Account mode without a selection is also a valid persisted setup-required state,
@@ -70,9 +72,9 @@ so clearing or importing a profile never silently changes it to the manual-key p
 a saved selection by checking only the scoped Credential Manager entry: present becomes locally configured but not
 Google-validated, missing becomes reauthorization-required, and credential-service errors remain unavailable. A profile
 with no selection does not inspect or delete any account credential. Restoration advances the account generation
-and starts no browser, listener, HTTP request, discovery operation, or output. The provider lifecycle integration is
-active, but account mode remains fail-closed until destination preparation and output handoff are integrated; it cannot
-consume the manual URL/key destination. Production client configuration, browser opening, refresh/output preparation,
+and starts no browser, listener, HTTP request, discovery operation, or output. The lifecycle integration is active, but
+account mode remains fail-closed until the preparation completion is handed to the output runtime; it cannot consume the
+manual URL/key destination. Production client configuration, browser opening, output handoff,
 interactive output integration, and user-facing account controls remain release-gated.
 
 The manual YouTube stream key remains intentionally shared by all OBS profiles, but the Google refresh token uses a
@@ -88,9 +90,9 @@ profile cannot read or write another profile's credential. Before any output can
 and resolve the exact saved channel and stream. If profile selection is persisted before a new token is written and that
 write fails, the selection is rolled back. The profile-operation lock derives a non-secret `Local\\` mutex name from the
 same validated binding, rejects both other-process ownership and same-process recursive acquisition without waiting, and
-reports recovered ownership only as an internal result. Local disconnect and the headless remote-revoke transaction use
-this same boundary. Interactive authorization and destination preparation
-remain detached from the production dock and runtime even though the account lifecycle owner is now part of the plugin.
+reports recovered ownership only as an internal result. Local disconnect, remote revoke, and destination preparation use
+this same boundary. Interactive authorization and destination preparation remain detached from the production dock and
+streaming runtime even though their lifecycle owner is now part of the plugin.
 
 The `YouTubeAccountProfileRestoreCoordinator` supplies the outer profile transaction used by the production lifecycle
 owner for both restore and local disconnect. On its owner thread it first obtains only a value-copy candidate binding, then
@@ -165,7 +167,7 @@ OBS dock wrapper (OBS-owned)
 Windows Credential Manager
   ├─ one Easy Multistream YouTube key for the current Windows account
   └─ profile/channel-scoped plugin-owned entries for the future Google refresh token
-     (used only by detached account libraries until integration)
+     (used only by lifecycle-owned account transactions; no current dock action invokes them)
 
 Current OBS profile/basic.ini
   ├─ SchemaVersion + YouTubeEnabled + explicit connection mode

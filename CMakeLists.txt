@@ -292,6 +292,7 @@ target_link_libraries(
   PUBLIC
     ${CMAKE_PROJECT_NAME}-youtube-account-profile-restore
     ${CMAKE_PROJECT_NAME}-youtube-account-remote-revoke
+    ${CMAKE_PROJECT_NAME}-youtube-account-destination-preparer
 )
 
 configure_file(src/version.hpp.in generated/version.hpp @ONLY)
