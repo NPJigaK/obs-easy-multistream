@@ -289,7 +289,9 @@ target_include_directories(
 )
 target_link_libraries(
   ${CMAKE_PROJECT_NAME}-youtube-account-runtime-owner
-  PUBLIC ${CMAKE_PROJECT_NAME}-youtube-account-profile-restore
+  PUBLIC
+    ${CMAKE_PROJECT_NAME}-youtube-account-profile-restore
+    ${CMAKE_PROJECT_NAME}-youtube-account-remote-revoke
 )
 
 configure_file(src/version.hpp.in generated/version.hpp @ONLY)

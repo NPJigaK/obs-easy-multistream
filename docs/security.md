@@ -16,7 +16,7 @@ YouTubeServerUrl=rtmps://a.rtmps.youtube.com/live2
 
 The account-ready profile format can also hold a non-secret YouTube channel ID, channel label, reusable-stream ID, and stream label. Those values are strictly bounded and validated, but the unfinished account path is not exposed in the dock and cannot start an output. Account mode without a selection is a valid setup-required profile state. The connection mode is explicit: an account-mode profile never falls back to the saved manual URL/key path.
 
-The YouTube stream key is stored as a Windows Generic Credential for the current Windows account. It is not stored in `basic.ini`, scene collections, profile exports, plugin logs, or diagnostic text. One manual stream-key credential is shared by all OBS profiles; the dock states this explicitly. The non-secret Stream URL and future account selection are profile-scoped. The Google refresh token uses a distinct typed store whose target is scoped to a SHA-256 binding of the exact active OBS profile path, while the selected channel is represented by a SHA-256 binding in `CREDENTIALW.UserName`. Raw profile paths and tokens never appear in a target name, profile, log, or UI. A profile may retain only bounded non-secret channel/stream selection data; the raw channel ID is never copied into Credential Manager metadata, logs, or UI. The old fixed refresh-token target is never read, migrated, or deleted. The account provider is owned by the production lifecycle wrapper, while the destination preparer remains detached. Both use the injected profile-operation lock. Production restoration reads only credential status; the new local-disconnect seam can delete the exact scoped credential, but no current UI or plugin-main action invokes it. No production path reads the refresh-token bytes yet.
+The YouTube stream key is stored as a Windows Generic Credential for the current Windows account. It is not stored in `basic.ini`, scene collections, profile exports, plugin logs, or diagnostic text. One manual stream-key credential is shared by all OBS profiles; the dock states this explicitly. The non-secret Stream URL and future account selection are profile-scoped. The Google refresh token uses a distinct typed store whose target is scoped to a SHA-256 binding of the exact active OBS profile path, while the selected channel is represented by a SHA-256 binding in `CREDENTIALW.UserName`. Raw profile paths and tokens never appear in a target name, profile, log, or UI. A profile may retain only bounded non-secret channel/stream selection data; the raw channel ID is never copied into Credential Manager metadata, logs, or UI. The old fixed refresh-token target is never read, migrated, or deleted. The account provider is owned by the production lifecycle wrapper, while the destination preparer remains detached. Both use the injected profile-operation lock. Production restoration reads only credential status. The internal remote-revoke seam can read the exact scoped credential only for an explicit revoke transaction, but no current UI, plugin-main action, or output path invokes it.
 
 Deleting the credential is an explicit, confirmed action. It does not rewrite any profile's non-secret enabled flag. Enabled profiles remain configured but cannot stream until a new shared key is saved.
 
@@ -46,8 +46,9 @@ deletes only the credential whose profile and channel metadata match, then clear
 the profile in account mode. With no selection it never probes Credential Manager. A deletion failure leaves both stores
 unchanged and can be retried. If the credential was deleted but the profile save fails, the token is never recreated from
 stale memory and the provider becomes unavailable; the remaining selection cannot be treated as connected. A profile
-race, shutdown request, or native lock-release failure overrides success and fails closed. This operation makes no Google
-request; remote revocation remains a separate explicit future action.
+race, shutdown request, or native lock-release failure overrides success and fails closed. This local-only operation makes no Google
+request. The separate internal remote-revoke transaction contacts Google's fixed HTTPS revoke endpoint first, accepts only
+success or an already-invalid token before local cleanup, and preserves retryable local state after ambiguous remote failure.
 
 ## Credential Manager boundary
 
@@ -73,8 +74,8 @@ real browser.
 
 PKCE, state validation, and exclusive binding prevent an unrelated local process from successfully completing or taking over an authorization attempt, but they cannot make the desktop resistant to denial by malware already running as the same Windows user. Such a process can repeatedly connect to the temporary port, consume the bounded connection budget, or keep bounded client slots busy until their timeout. The listener fails closed and requires a retry rather than accepting a callback after its limits are exhausted.
 
-The token-transport library is linked and its network manager is constructed by the lifecycle-owned provider, but no token
-operation is reachable from the production plugin yet and construction emits no request. Its tested active path posts
+The token-transport library is linked and its network managers are constructed by the lifecycle-owned account components,
+but no token operation is reachable from the production plugin UI or plugin main and construction emits no request. Its tested active path posts
 form data only to Google's fixed HTTPS token and revocation endpoints, never accepts an endpoint from settings, never
 sends a client secret, requires peer-verified TLS 1.2 or later, rejects redirects and missing encryption proof, disables
 credential and cookie reuse, and applies independent time and 64 KiB response limits. Responses are type-checked, known
@@ -99,7 +100,7 @@ selection, scoped refresh-token storage, and non-secret selection persistence. I
 before an interactive transaction and holds that lock through selection/credential persistence and any rollback. A busy
 lock returns without mutating provider state; a recovered lock is internal recovery metadata only. The production plugin
 now owns this provider behind a lifecycle wrapper that performs saved-state restoration and exposes tested internal
-connection and local-disconnect transactions. Neither action is connected to the dock, plugin main, or streaming runtime.
+connection, local-disconnect, and remote-revoke transactions. None is connected to the dock, plugin main, or streaming runtime.
 The connection snapshot contains copied labels and revision-bound candidate handles, not raw channel/stream IDs or secret
 material. Every operation first performs a non-mutating reread of the active profile and rejects a changed generation,
 binding, or connection mode before any browser or transport action.
@@ -154,9 +155,10 @@ release failure fail closed. Owner-thread destruction makes the provider termina
 complete; any retained ownership remains fail-closed until process teardown. Recovered ownership is accepted only
 for the locked reread and is not user-facing. The coordinator carries only copied non-secret profile/provider values;
 refresh tokens and stream keys remain in their existing secure boundaries. The wrapper is called automatically only for
-module/profile lifecycle events; its connection and local-disconnect methods have no production caller. The empty
-production OAuth configuration makes connection start fail before browser, listener, or network work, and neither
-internal seam can start an output. Future remote revoke must use the same profile-operation boundary.
+module/profile lifecycle events; its connection, local-disconnect, and remote-revoke methods have no production caller. The empty
+production OAuth configuration makes connection start fail before browser, listener, or network work, and none of the
+internal seams can start an output. Remote revoke uses the same profile-operation boundary and is cancelled before profile
+restoration or provider shutdown can proceed.
 
 The YouTube output owns a private RTMP service and output while retaining explicit references to the native H.264 and main AAC encoders. It never starts or stops the native OBS stream. A YouTube error closes only the YouTube output, leaves Twitch running, and exposes a separate retry action after teardown completes.
 

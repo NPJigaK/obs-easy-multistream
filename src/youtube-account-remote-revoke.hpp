@@ -154,6 +154,7 @@ public:
 private:
 	using QObject::moveToThread;
 	friend class YouTubeAccountRemoteRevokeCoordinatorTestAccess;
+	friend class YouTubeAccountRuntimeOwner;
 
 	YouTubeAccountRemoteRevokeCoordinator(YouTubeAccountProfileContext &context, YouTubeAccountProvider &provider,
 					      YouTubeAccountRefreshTokenStore &refreshTokenStore,

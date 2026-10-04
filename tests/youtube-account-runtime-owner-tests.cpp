@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -142,6 +143,9 @@ public:
 			return false;
 		}
 		++readCount;
+		if (onRead) {
+			onRead();
+		}
 		const auto found = entries.find(targetName);
 		if (found == entries.end()) {
 			error = ERROR_NOT_FOUND;
@@ -198,9 +202,74 @@ public:
 	int eraseCount = 0;
 	bool eraseResult = true;
 	DWORD eraseError = ERROR_ACCESS_DENIED;
+	std::function<void()> onRead;
 
 private:
 	std::unordered_map<CREDENTIALW *, std::unique_ptr<Allocation>> allocations;
+};
+
+class OwnerTestRemoteRevokePort final : public YouTubeAccountRemoteRevokePort {
+public:
+	GoogleOAuthTokenStartStatus startRevoke(GoogleOAuthTokenRevokeRequest request,
+						CompletionHandler completionHandler) noexcept override
+	{
+		++startCount;
+		lastAttempt = request.attempt;
+		lastToken = request.token.view();
+		handler = std::move(completionHandler);
+		return startStatus;
+	}
+
+	bool cancel(GoogleOAuthTokenAttempt attempt) noexcept override
+	{
+		++cancelCount;
+		lastCancelledAttempt = attempt;
+		return cancelResult;
+	}
+
+	bool shutdown() noexcept override
+	{
+		++shutdownCount;
+		closed = true;
+		return shutdownResult;
+	}
+
+	void complete(GoogleOAuthTokenCompletion completion)
+	{
+		if (handler) {
+			auto callback = handler;
+			callback(std::move(completion));
+		}
+	}
+
+	GoogleOAuthTokenCompletion success() const
+	{
+		GoogleOAuthTokenCompletion completion;
+		completion.attempt = lastAttempt;
+		completion.operation = GoogleOAuthTokenOperation::RevokeToken;
+		completion.status = GoogleOAuthTokenCompletionStatus::Success;
+		completion.providerError = GoogleOAuthTokenProviderError::None;
+		return completion;
+	}
+
+	GoogleOAuthTokenCompletion networkFailure() const
+	{
+		auto completion = success();
+		completion.status = GoogleOAuthTokenCompletionStatus::NetworkFailure;
+		return completion;
+	}
+
+	GoogleOAuthTokenStartStatus startStatus = GoogleOAuthTokenStartStatus::Started;
+	bool cancelResult = true;
+	bool shutdownResult = true;
+	bool closed = false;
+	int startCount = 0;
+	int cancelCount = 0;
+	int shutdownCount = 0;
+	GoogleOAuthTokenAttempt lastAttempt;
+	GoogleOAuthTokenAttempt lastCancelledAttempt;
+	std::string lastToken;
+	CompletionHandler handler;
 };
 
 } // namespace easy_multistream
@@ -252,6 +321,14 @@ public:
 
 	config_t *get() const noexcept { return config_; }
 
+	bool blockSafeSave()
+	{
+		std::error_code error;
+		std::filesystem::remove(path_, error);
+		error.clear();
+		return std::filesystem::create_directory(path_, error);
+	}
+
 private:
 	config_t *config_ = nullptr;
 	std::filesystem::path path_;
@@ -279,7 +356,8 @@ std::unique_ptr<YouTubeAccountRuntimeOwner>
 makeOwner(std::string &currentPath, ConfigHandle &config, std::unique_ptr<WinCredentialApi> credentialApi,
 	  std::unique_ptr<YouTubeAccountProfileOperationLockApi> lockApi,
 	  GoogleOAuthAuthorizationSession::BrowserOpener browserOpener = {},
-	  YouTubeAccountRuntimeOwner::ConfigReader configReaderOverride = {}, QString clientId = {})
+	  YouTubeAccountRuntimeOwner::ConfigReader configReaderOverride = {}, QString clientId = {},
+	  std::unique_ptr<YouTubeAccountRemoteRevokePort> remoteRevokePort = {})
 {
 	if (!configReaderOverride) {
 		configReaderOverride = [&config]() {
@@ -287,9 +365,9 @@ makeOwner(std::string &currentPath, ConfigHandle &config, std::unique_ptr<WinCre
 		};
 	}
 	return std::make_unique<YouTubeAccountRuntimeOwner>([&currentPath]() { return currentPath; },
-							    std::move(configReaderOverride), std::move(clientId),
-							    std::move(browserOpener), std::move(credentialApi),
-							    std::move(lockApi));
+								    std::move(configReaderOverride), std::move(clientId),
+								    std::move(browserOpener), std::move(credentialApi),
+								    std::move(lockApi), std::move(remoteRevokePort));
 }
 
 void saveCredential(OwnerTestCredentialApi &api, std::string_view profilePath, const YouTubeAccountSelection &selection)
@@ -301,6 +379,387 @@ void saveCredential(OwnerTestCredentialApi &api, std::string_view profilePath, c
 	}
 	WindowsYouTubeAccountRefreshTokenStore store(api);
 	CHECK(store.write({*binding, selection.channelId}, "owner-refresh-token").succeeded());
+}
+
+class RemoteOwnerFixture final {
+public:
+	RemoteOwnerFixture(const char *configName)
+	{
+		CHECK(config.open(configName));
+		setAccountSettings(config.get(), selectionA());
+
+		auto credentialApi = std::make_unique<OwnerTestCredentialApi>();
+		credentialApiRaw = credentialApi.get();
+		saveCredential(*credentialApiRaw, currentPath, selectionA());
+
+		auto lockApi = std::make_unique<OwnerTestLockApi>();
+		lockApiRaw = lockApi.get();
+		auto remoteRevokePort = std::make_unique<OwnerTestRemoteRevokePort>();
+		remoteRevokePortRaw = remoteRevokePort.get();
+		owner = makeOwner(currentPath, config, std::move(credentialApi), std::move(lockApi), {}, {}, {},
+					  std::move(remoteRevokePort));
+		CHECK(owner->restoreActiveProfile().status == YouTubeAccountProfileRestoreStatus::Restored);
+	}
+
+	ConfigHandle config;
+	std::string currentPath{kProfilePathA};
+	OwnerTestCredentialApi *credentialApiRaw = nullptr;
+	OwnerTestLockApi *lockApiRaw = nullptr;
+	OwnerTestRemoteRevokePort *remoteRevokePortRaw = nullptr;
+	std::unique_ptr<YouTubeAccountRuntimeOwner> owner;
+};
+
+void processOwnerEvents()
+{
+	QCoreApplication::processEvents();
+}
+
+void testRuntimeOwnerRemoteRevokeSuccessPublishesSetupRequiredBeforeHandler()
+{
+	RemoteOwnerFixture fixture("easy-multistream-runtime-owner-remote-revoke-success.ini");
+	std::optional<YouTubeAccountRemoteRevokeCompletion> received;
+	YouTubeAccountRuntimeOwnerSnapshot handlerSnapshot;
+	YouTubeAccountProfileContext::LoadResult handlerProfile;
+
+	CHECK(fixture.owner->startRemoteRevoke([&](YouTubeAccountRemoteRevokeCompletion completion) {
+			handlerSnapshot = fixture.owner->snapshot();
+			handlerProfile = completion.profile;
+			received.emplace(std::move(completion));
+		}) == YouTubeAccountRemoteRevokeStartStatus::Started);
+	CHECK(fixture.remoteRevokePortRaw->startCount == 1);
+	CHECK(fixture.remoteRevokePortRaw->lastToken == "owner-refresh-token");
+	fixture.remoteRevokePortRaw->complete(fixture.remoteRevokePortRaw->success());
+	processOwnerEvents();
+
+	CHECK(received.has_value());
+	if (received.has_value()) {
+		CHECK(received->status == YouTubeAccountRemoteRevokeStatus::Revoked);
+		CHECK(received->remoteRevokeAccepted);
+		CHECK(received->credentialErased);
+		CHECK(received->selectionCleared);
+		CHECK(received->profile.status == YouTubeAccountProfileContext::LoadStatus::SetupRequired);
+		CHECK(!received->profile.snapshot.selection.has_value());
+	}
+	CHECK(handlerSnapshot.restored);
+	CHECK(handlerSnapshot.restoreStatus == YouTubeAccountProfileRestoreStatus::SetupRequired);
+	CHECK(handlerSnapshot.providerStage == YouTubeAccountProviderStage::Idle);
+	CHECK(handlerSnapshot.generation != 0);
+	CHECK(!handlerSnapshot.profileBinding.empty());
+	CHECK(handlerProfile.status == YouTubeAccountProfileContext::LoadStatus::SetupRequired);
+	CHECK(!handlerProfile.snapshot.selection.has_value());
+	CHECK(fixture.credentialApiRaw->entries.empty());
+	CHECK(!loadProfileSettings(fixture.config.get()).settings.youtubeAccountSelection.has_value());
+	CHECK(fixture.owner->remoteRevokeSnapshot().state == YouTubeAccountRemoteRevokeState::Completed);
+}
+
+void testRuntimeOwnerBlocksRestoreConnectionAndDisconnectWhileRemoteRevokeRuns()
+{
+	RemoteOwnerFixture fixture("easy-multistream-runtime-owner-remote-revoke-busy.ini");
+	CHECK(fixture.owner->startRemoteRevoke([](YouTubeAccountRemoteRevokeCompletion) {}) ==
+	      YouTubeAccountRemoteRevokeStartStatus::Started);
+	CHECK(fixture.owner->restoreActiveProfile().status == YouTubeAccountProfileRestoreStatus::Busy);
+	CHECK(fixture.owner->startConnection() == YouTubeAccountConnectionOperationStatus::Busy);
+	CHECK(YouTubeAccountRuntimeOwnerTestAccess::disconnect(*fixture.owner).status ==
+	      YouTubeAccountProfileDisconnectStatus::Busy);
+	CHECK(fixture.owner->snapshot().restored);
+	CHECK(fixture.owner->snapshot().restoreStatus == YouTubeAccountProfileRestoreStatus::Restored);
+	CHECK(fixture.owner->remoteRevokeSnapshot().activeAttempt.has_value());
+
+	fixture.remoteRevokePortRaw->complete(fixture.remoteRevokePortRaw->networkFailure());
+	processOwnerEvents();
+}
+
+void testRuntimeOwnerRemoteRevokeNetworkFailurePreservesRestoredState()
+{
+	RemoteOwnerFixture fixture("easy-multistream-runtime-owner-remote-revoke-network-failure.ini");
+	std::optional<YouTubeAccountRemoteRevokeCompletion> received;
+	const auto before = fixture.owner->snapshot();
+	CHECK(fixture.owner->startRemoteRevoke([&](YouTubeAccountRemoteRevokeCompletion completion) {
+		received.emplace(std::move(completion));
+	}) == YouTubeAccountRemoteRevokeStartStatus::Started);
+	fixture.remoteRevokePortRaw->complete(fixture.remoteRevokePortRaw->networkFailure());
+	processOwnerEvents();
+
+	CHECK(received.has_value());
+	if (received.has_value()) {
+		CHECK(received->status == YouTubeAccountRemoteRevokeStatus::NetworkFailure);
+		CHECK(!received->remoteRevokeAccepted);
+		CHECK(!received->credentialErased);
+		CHECK(!received->selectionCleared);
+	}
+	const auto after = fixture.owner->snapshot();
+	CHECK(after.restored);
+	CHECK(after.restoreStatus == YouTubeAccountProfileRestoreStatus::Restored);
+	CHECK(after.generation == before.generation);
+	CHECK(after.profileBinding == before.profileBinding);
+	CHECK(after.providerStage == YouTubeAccountProviderStage::Configured);
+	CHECK(!fixture.credentialApiRaw->entries.empty());
+	CHECK(loadProfileSettings(fixture.config.get()).settings.youtubeAccountSelection.has_value());
+}
+
+void testRuntimeOwnerRemoteRevokeEraseFailureRemainsRetryable()
+{
+	RemoteOwnerFixture fixture("easy-multistream-runtime-owner-remote-revoke-erase-failure.ini");
+	fixture.credentialApiRaw->eraseResult = false;
+	fixture.credentialApiRaw->eraseError = ERROR_ACCESS_DENIED;
+	std::optional<YouTubeAccountRemoteRevokeCompletion> received;
+	CHECK(fixture.owner->startRemoteRevoke([&](YouTubeAccountRemoteRevokeCompletion completion) {
+		received.emplace(std::move(completion));
+	}) == YouTubeAccountRemoteRevokeStartStatus::Started);
+	fixture.remoteRevokePortRaw->complete(fixture.remoteRevokePortRaw->success());
+	processOwnerEvents();
+
+	CHECK(received.has_value());
+	if (received.has_value()) {
+		CHECK(received->status == YouTubeAccountRemoteRevokeStatus::CredentialEraseFailed);
+		CHECK(received->remoteRevokeAccepted);
+		CHECK(!received->credentialErased);
+		CHECK(!received->selectionCleared);
+	}
+	CHECK(fixture.owner->snapshot().restored);
+	CHECK(fixture.owner->snapshot().providerStage == YouTubeAccountProviderStage::Configured);
+	CHECK(fixture.credentialApiRaw->entries.size() == 1);
+	CHECK(loadProfileSettings(fixture.config.get()).settings.youtubeAccountSelection.has_value());
+}
+
+void testRuntimeOwnerRemoteRevokeProfileSaveFailureFailsClosed()
+{
+	RemoteOwnerFixture fixture("easy-multistream-runtime-owner-remote-revoke-save-failure.ini");
+	std::optional<YouTubeAccountRemoteRevokeCompletion> received;
+	CHECK(fixture.owner->startRemoteRevoke([&](YouTubeAccountRemoteRevokeCompletion completion) {
+		received.emplace(std::move(completion));
+	}) == YouTubeAccountRemoteRevokeStartStatus::Started);
+	CHECK(fixture.config.blockSafeSave());
+	fixture.remoteRevokePortRaw->complete(fixture.remoteRevokePortRaw->success());
+	processOwnerEvents();
+
+	CHECK(received.has_value());
+	if (received.has_value()) {
+		CHECK(received->status == YouTubeAccountRemoteRevokeStatus::ProfileSaveFailed);
+		CHECK(received->remoteRevokeAccepted);
+		CHECK(received->credentialErased);
+		CHECK(!received->selectionCleared);
+	}
+	CHECK(!fixture.owner->snapshot().restored);
+	CHECK(fixture.owner->snapshot().restoreStatus == YouTubeAccountProfileRestoreStatus::OperationFailed);
+	CHECK(fixture.owner->snapshot().providerStage == YouTubeAccountProviderStage::Unavailable);
+	CHECK(fixture.credentialApiRaw->entries.empty());
+	CHECK(loadProfileSettings(fixture.config.get()).settings.youtubeAccountSelection.has_value());
+}
+
+void testRuntimeOwnerRemoteRevokeLockCleanupFailureFailsClosedAndRetriesOnShutdown()
+{
+	RemoteOwnerFixture fixture("easy-multistream-runtime-owner-remote-revoke-lock-failure.ini");
+	std::optional<YouTubeAccountRemoteRevokeCompletion> received;
+	CHECK(fixture.owner->startRemoteRevoke([&](YouTubeAccountRemoteRevokeCompletion completion) {
+		received.emplace(std::move(completion));
+	}) == YouTubeAccountRemoteRevokeStartStatus::Started);
+	fixture.lockApiRaw->releaseResult = false;
+	fixture.remoteRevokePortRaw->complete(fixture.remoteRevokePortRaw->success());
+	processOwnerEvents();
+
+	CHECK(received.has_value());
+	if (received.has_value()) {
+		CHECK(received->status == YouTubeAccountRemoteRevokeStatus::OperationFailed);
+		CHECK(received->lockCleanupPending);
+	}
+	CHECK(!fixture.owner->snapshot().restored);
+	CHECK(fixture.owner->snapshot().restoreStatus == YouTubeAccountProfileRestoreStatus::OperationFailed);
+	CHECK(fixture.owner->remoteRevokeSnapshot().lockCleanupPending);
+	fixture.lockApiRaw->releaseResult = true;
+	CHECK(fixture.owner->shutdown());
+	CHECK(!fixture.owner->remoteRevokeSnapshot().lockCleanupPending);
+}
+
+void testRuntimeOwnerRemoteRevokeImmediateLockCleanupFailureFailsClosed()
+{
+	RemoteOwnerFixture fixture("easy-multistream-runtime-owner-remote-revoke-start-lock-failure.ini");
+	// Keep the active profile valid while deliberately making the provider's
+	// restored selection stale. The coordinator discovers that mismatch only
+	// after acquiring its operation lock.
+	CHECK(YouTubeAccountRuntimeOwnerTestAccess::commitSelection(*fixture.owner, selectionB()));
+	fixture.lockApiRaw->releaseResult = false;
+
+	CHECK(fixture.owner->startRemoteRevoke([](YouTubeAccountRemoteRevokeCompletion) {}) ==
+	      YouTubeAccountRemoteRevokeStartStatus::OperationFailed);
+	CHECK(fixture.remoteRevokePortRaw->startCount == 0);
+	CHECK(!fixture.owner->snapshot().restored);
+	CHECK(fixture.owner->snapshot().restoreStatus == YouTubeAccountProfileRestoreStatus::OperationFailed);
+	CHECK(fixture.owner->remoteRevokeSnapshot().lockCleanupPending);
+
+	fixture.lockApiRaw->releaseResult = true;
+	CHECK(fixture.owner->shutdown());
+	CHECK(!fixture.owner->remoteRevokeSnapshot().lockCleanupPending);
+}
+
+void testRuntimeOwnerRestoresChangedProfileAfterQueuedRemoteCompletion()
+{
+	RemoteOwnerFixture fixture("easy-multistream-runtime-owner-remote-revoke-profile-restore-retry.ini");
+	std::optional<YouTubeAccountRemoteRevokeCompletion> received;
+	CHECK(fixture.owner->startRemoteRevoke([&](YouTubeAccountRemoteRevokeCompletion completion) {
+		received.emplace(std::move(completion));
+	}) == YouTubeAccountRemoteRevokeStartStatus::Started);
+
+	CHECK(fixture.owner->invalidateForProfileChange());
+	saveCredential(*fixture.credentialApiRaw, kProfilePathB, selectionB());
+	fixture.currentPath = kProfilePathB;
+	setAccountSettings(fixture.config.get(), selectionB());
+	CHECK(fixture.owner->restoreActiveProfile().status == YouTubeAccountProfileRestoreStatus::Busy);
+
+	processOwnerEvents();
+	CHECK(received.has_value());
+	if (received.has_value()) {
+		CHECK(received->status == YouTubeAccountRemoteRevokeStatus::ProfileChanged);
+	}
+	const auto owner = fixture.owner->snapshot();
+	const auto expectedBinding = makeYouTubeAccountProfileBinding(kProfilePathB);
+	CHECK(expectedBinding.has_value());
+	CHECK(owner.restored);
+	CHECK(owner.restoreStatus == YouTubeAccountProfileRestoreStatus::Restored);
+	CHECK(owner.providerStage == YouTubeAccountProviderStage::Configured);
+	CHECK(expectedBinding.has_value() && owner.profileBinding == *expectedBinding);
+	const auto savedSelection = loadProfileSettings(fixture.config.get()).settings.youtubeAccountSelection;
+	CHECK(savedSelection.has_value());
+	if (savedSelection.has_value()) {
+		const auto expectedSelection = selectionB();
+		CHECK(savedSelection->channelId == expectedSelection.channelId);
+		CHECK(savedSelection->channelLabel == expectedSelection.channelLabel);
+		CHECK(savedSelection->streamId == expectedSelection.streamId);
+		CHECK(savedSelection->streamLabel == expectedSelection.streamLabel);
+	}
+}
+
+void testRuntimeOwnerSecondRemoteRevokeKeepsSetupRequiredState()
+{
+	RemoteOwnerFixture fixture("easy-multistream-runtime-owner-remote-revoke-idempotent-state.ini");
+	CHECK(fixture.owner->startRemoteRevoke([](YouTubeAccountRemoteRevokeCompletion) {}) ==
+	      YouTubeAccountRemoteRevokeStartStatus::Started);
+	fixture.remoteRevokePortRaw->complete(fixture.remoteRevokePortRaw->success());
+	processOwnerEvents();
+
+	const auto before = fixture.owner->snapshot();
+	CHECK(before.restored);
+	CHECK(before.restoreStatus == YouTubeAccountProfileRestoreStatus::SetupRequired);
+	CHECK(before.providerStage == YouTubeAccountProviderStage::Idle);
+	CHECK(fixture.owner->startRemoteRevoke([](YouTubeAccountRemoteRevokeCompletion) {}) ==
+	      YouTubeAccountRemoteRevokeStartStatus::InvalidSelection);
+	const auto after = fixture.owner->snapshot();
+	CHECK(after.restored);
+	CHECK(after.restoreStatus == YouTubeAccountProfileRestoreStatus::SetupRequired);
+	CHECK(after.providerStage == YouTubeAccountProviderStage::Idle);
+	CHECK(after.generation == before.generation);
+	CHECK(after.profileBinding == before.profileBinding);
+	CHECK(fixture.remoteRevokePortRaw->startCount == 1);
+}
+
+void testRuntimeOwnerRemoteStartReportsReentrantProfileInvalidation()
+{
+	RemoteOwnerFixture fixture("easy-multistream-runtime-owner-remote-revoke-reentrant-profile-change.ini");
+	bool invalidationCalled = false;
+	bool invalidationResult = true;
+	fixture.credentialApiRaw->onRead = [&]() {
+		if (!invalidationCalled) {
+			invalidationCalled = true;
+			invalidationResult = fixture.owner->invalidateForProfileChange();
+		}
+	};
+	std::optional<YouTubeAccountRemoteRevokeCompletion> received;
+	CHECK(fixture.owner->startRemoteRevoke([&](YouTubeAccountRemoteRevokeCompletion completion) {
+		received.emplace(std::move(completion));
+	}) == YouTubeAccountRemoteRevokeStartStatus::ProfileChanged);
+	CHECK(invalidationCalled);
+	CHECK(!invalidationResult);
+	CHECK(fixture.remoteRevokePortRaw->startCount == 0);
+
+	processOwnerEvents();
+	CHECK(received.has_value());
+	if (received.has_value()) {
+		CHECK(received->status == YouTubeAccountRemoteRevokeStatus::ProfileChanged);
+	}
+	CHECK(!fixture.owner->snapshot().restored);
+	CHECK(fixture.owner->snapshot().restoreStatus == YouTubeAccountProfileRestoreStatus::ProfileChanged);
+}
+
+void testRuntimeOwnerCancelIgnoresLateRemoteCompletion()
+{
+	RemoteOwnerFixture fixture("easy-multistream-runtime-owner-remote-revoke-cancel.ini");
+	std::optional<YouTubeAccountRemoteRevokeCompletion> received;
+	CHECK(fixture.owner->startRemoteRevoke([&](YouTubeAccountRemoteRevokeCompletion completion) {
+		received.emplace(std::move(completion));
+	}) == YouTubeAccountRemoteRevokeStartStatus::Started);
+	const auto attempt = fixture.owner->remoteRevokeSnapshot().activeAttempt;
+	CHECK(attempt.has_value());
+	if (!attempt.has_value()) {
+		return;
+	}
+	CHECK(fixture.owner->cancelRemoteRevoke(*attempt));
+	CHECK(fixture.remoteRevokePortRaw->cancelCount == 1);
+	fixture.remoteRevokePortRaw->complete(fixture.remoteRevokePortRaw->success());
+	processOwnerEvents();
+
+	CHECK(received.has_value());
+	if (received.has_value()) {
+		CHECK(received->status == YouTubeAccountRemoteRevokeStatus::Cancelled);
+		CHECK(!received->remoteRevokeAccepted);
+		CHECK(!received->credentialErased);
+		CHECK(!received->selectionCleared);
+	}
+	CHECK(fixture.owner->snapshot().restored);
+	CHECK(fixture.owner->snapshot().restoreStatus == YouTubeAccountProfileRestoreStatus::Restored);
+	CHECK(fixture.credentialApiRaw->entries.size() == 1);
+	CHECK(loadProfileSettings(fixture.config.get()).settings.youtubeAccountSelection.has_value());
+}
+
+void testRuntimeOwnerProfileInvalidationCancelsRemoteRevoke()
+{
+	RemoteOwnerFixture fixture("easy-multistream-runtime-owner-remote-revoke-profile-change.ini");
+	std::optional<YouTubeAccountRemoteRevokeCompletion> received;
+	CHECK(fixture.owner->startRemoteRevoke([&](YouTubeAccountRemoteRevokeCompletion completion) {
+		received.emplace(std::move(completion));
+	}) == YouTubeAccountRemoteRevokeStartStatus::Started);
+	CHECK(fixture.owner->invalidateForProfileChange());
+	CHECK(fixture.remoteRevokePortRaw->cancelCount == 1);
+	fixture.remoteRevokePortRaw->complete(fixture.remoteRevokePortRaw->success());
+	processOwnerEvents();
+
+	CHECK(received.has_value());
+	if (received.has_value()) {
+		CHECK(received->status == YouTubeAccountRemoteRevokeStatus::ProfileChanged);
+		CHECK(!received->remoteRevokeAccepted);
+		CHECK(!received->credentialErased);
+		CHECK(!received->selectionCleared);
+	}
+	CHECK(!fixture.owner->snapshot().restored);
+	CHECK(fixture.owner->snapshot().restoreStatus == YouTubeAccountProfileRestoreStatus::ProfileChanged);
+	CHECK(fixture.owner->snapshot().generation == 0);
+	CHECK(fixture.credentialApiRaw->entries.size() == 1);
+	CHECK(loadProfileSettings(fixture.config.get()).settings.youtubeAccountSelection.has_value());
+}
+
+void testRuntimeOwnerShutdownCancelsAndClosesRemotePort()
+{
+	RemoteOwnerFixture fixture("easy-multistream-runtime-owner-remote-revoke-shutdown.ini");
+	std::optional<YouTubeAccountRemoteRevokeCompletion> received;
+	CHECK(fixture.owner->startRemoteRevoke([&](YouTubeAccountRemoteRevokeCompletion completion) {
+		received.emplace(std::move(completion));
+	}) == YouTubeAccountRemoteRevokeStartStatus::Started);
+	CHECK(fixture.owner->shutdown());
+	processOwnerEvents();
+
+	CHECK(fixture.remoteRevokePortRaw->cancelCount == 1);
+	CHECK(fixture.remoteRevokePortRaw->shutdownCount == 1);
+	CHECK(fixture.remoteRevokePortRaw->closed);
+	CHECK(fixture.owner->snapshot().closed);
+	CHECK(fixture.owner->remoteRevokeSnapshot().closed);
+	CHECK(!fixture.owner->remoteRevokeSnapshot().activeAttempt.has_value());
+	CHECK(received.has_value());
+	if (received.has_value()) {
+		CHECK(received->status == YouTubeAccountRemoteRevokeStatus::Closed);
+		CHECK(!received->credentialErased);
+		CHECK(!received->selectionCleared);
+	}
+	CHECK(fixture.credentialApiRaw->entries.size() == 1);
+	CHECK(loadProfileSettings(fixture.config.get()).settings.youtubeAccountSelection.has_value());
 }
 
 void testRestoreOnlyOwnerBindsSuccessfulGeneration()
@@ -1066,6 +1525,19 @@ void testShutdownRetriesIncompleteNativeCleanup()
 int main(int argc, char **argv)
 {
 	QCoreApplication application(argc, argv);
+	testRuntimeOwnerRemoteRevokeSuccessPublishesSetupRequiredBeforeHandler();
+	testRuntimeOwnerBlocksRestoreConnectionAndDisconnectWhileRemoteRevokeRuns();
+	testRuntimeOwnerRemoteRevokeNetworkFailurePreservesRestoredState();
+	testRuntimeOwnerRemoteRevokeEraseFailureRemainsRetryable();
+	testRuntimeOwnerRemoteRevokeProfileSaveFailureFailsClosed();
+	testRuntimeOwnerRemoteRevokeLockCleanupFailureFailsClosedAndRetriesOnShutdown();
+	testRuntimeOwnerRemoteRevokeImmediateLockCleanupFailureFailsClosed();
+	testRuntimeOwnerRestoresChangedProfileAfterQueuedRemoteCompletion();
+	testRuntimeOwnerSecondRemoteRevokeKeepsSetupRequiredState();
+	testRuntimeOwnerRemoteStartReportsReentrantProfileInvalidation();
+	testRuntimeOwnerCancelIgnoresLateRemoteCompletion();
+	testRuntimeOwnerProfileInvalidationCancelsRemoteRevoke();
+	testRuntimeOwnerShutdownCancelsAndClosesRemotePort();
 	testRestoreOnlyOwnerBindsSuccessfulGeneration();
 	testConnectionSeamFailsClosedWhenProductionOAuthIsUnconfigured();
 	testConnectionSeamStartsAndCancelsForCurrentRestoredProfile();
