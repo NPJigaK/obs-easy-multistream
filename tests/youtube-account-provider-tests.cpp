@@ -1879,6 +1879,41 @@ void testHeldProfileOperationLockDisconnectTreatsMissingCredentialAsSuccess()
 	fixture.provider->externalOperationLockReleased();
 }
 
+void testHeldProfileOperationLockDisconnectTreatsNotFoundEraseAsSuccess()
+{
+	Fixture fixture;
+	connectFixture(fixture);
+	const YouTubeAccountSelection selection{"old-channel", "Old channel", "old-stream", "Old stream"};
+	fixture.vault.eraseError = CredentialError::NotFound;
+	YouTubeAccountProfileOperationLock heldLock;
+	CHECK(fixture.operationLockProvider->acquire(kProfileA, heldLock).acquired());
+	const int releaseCountBefore = fixture.operationLockApi.releaseCount;
+	const int closeCountBefore = fixture.operationLockApi.closeCount;
+	int commitCount = 0;
+
+	CHECK(fixture.provider->disconnectSavedStateUnderHeldOperationLock(
+			kProfileA, selection, heldLock,
+			[&](const std::optional<YouTubeAccountSelection> &next) {
+				++commitCount;
+				return !next.has_value();
+			}) == YouTubeAccountProviderDisconnectStatus::Disconnected);
+	CHECK(commitCount == 1);
+	CHECK(fixture.vault.eraseCount == 1);
+	CHECK(fixture.provider->snapshot().stage == YouTubeAccountProviderStage::Idle);
+	CHECK(fixture.provider->snapshot().account.state == easy_multistream::YouTubeAccountState::Disconnected);
+	CHECK(fixture.provider->snapshot().account.channelId.empty());
+	CHECK(fixture.provider->snapshot().account.streamId.empty());
+	CHECK(!fixture.provider->snapshot().account.connectionLease.has_value());
+	CHECK(heldLock.acquired());
+	CHECK(fixture.operationLockApi.releaseCount == releaseCountBefore);
+	CHECK(fixture.operationLockApi.closeCount == closeCountBefore);
+
+	CHECK(heldLock.release());
+	fixture.provider->externalOperationLockReleased();
+	CHECK(fixture.operationLockApi.releaseCount == releaseCountBefore + 1);
+	CHECK(fixture.operationLockApi.closeCount == closeCountBefore + 1);
+}
+
 void testHeldProfileOperationLockDisconnectWithoutSelectionSkipsCredentialStore()
 {
 	Fixture fixture;
@@ -2231,6 +2266,7 @@ int main(int argc, char **argv)
 	testHeldProfileOperationLockRestoreRejectsWrongOrUnheldLockWithoutMutation();
 	testHeldProfileOperationLockDisconnectsWithoutReleasingBorrowedLock();
 	testHeldProfileOperationLockDisconnectTreatsMissingCredentialAsSuccess();
+	testHeldProfileOperationLockDisconnectTreatsNotFoundEraseAsSuccess();
 	testHeldProfileOperationLockDisconnectWithoutSelectionSkipsCredentialStore();
 	testHeldProfileOperationLockDisconnectRejectsInvalidBindingSelectionAndLock();
 	testHeldProfileOperationLockDisconnectEraseFailurePreservesUsableState();

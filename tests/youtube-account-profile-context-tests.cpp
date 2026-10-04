@@ -349,6 +349,50 @@ void testCommitReReadsProfilePathAndInvalidatesOnChange()
 	removeTestPath(path);
 }
 
+void testCommitRejectsProfileChangeDuringConfigReadBeforeSave()
+{
+	ConfigHandle config;
+	const auto path = testPath("easy-multistream-profile-context-config-read-change.ini");
+	removeTestPath(path);
+	CHECK(config.open(path));
+	setAccountSettings(config.get(), true);
+	config.save();
+
+	std::string currentPath(kProfileA);
+	int configReads = 0;
+	YouTubeAccountProfileContext context(
+		[&currentPath]() { return currentPath; },
+		[&config, &currentPath, &configReads]() {
+			++configReads;
+			if (configReads == 2) {
+				// The first read belongs to context.load().  Switch the active
+				// profile while commitSelection is obtaining its config, before
+				// it is allowed to mutate or save the old config.
+				currentPath = std::string(kProfileB);
+			}
+			return config.get();
+		});
+
+	const auto loaded = context.load();
+	CHECK(loaded.status == YouTubeAccountProfileContext::LoadStatus::Loaded);
+	const auto rejected =
+		context.commitSelection(loaded.snapshot.generation, loaded.snapshot.profileBinding, selectionB());
+	CHECK(rejected.status == YouTubeAccountProfileContext::CommitStatus::Stale);
+	CHECK(configReads == 2);
+	CHECK(context.snapshot().generation == loaded.snapshot.generation + 1);
+	CHECK(context.snapshot().profileBinding.empty());
+
+	// The old profile config must remain unchanged: the attempted B selection
+	// must not be written after the active profile switched during config read.
+	const auto persisted = easy_multistream::loadProfileSettings(config.get());
+	CHECK(persisted.status == easy_multistream::SettingsLoadStatus::Loaded);
+	CHECK(persisted.settings.youtubeAccountSelection.has_value());
+	if (persisted.settings.youtubeAccountSelection.has_value()) {
+		CHECK(persisted.settings.youtubeAccountSelection->channelId == "UC-alpha");
+	}
+	removeTestPath(path);
+}
+
 void testCommitOptionalSelectionAndValidation()
 {
 	ConfigHandle config;
@@ -441,6 +485,7 @@ int main()
 	testCommitSelectionRequiresFreshProfileAndAccountMode();
 	testManualProfileDoesNotExposePreservedAccountSelection();
 	testCommitReReadsProfilePathAndInvalidatesOnChange();
+	testCommitRejectsProfileChangeDuringConfigReadBeforeSave();
 	testCommitOptionalSelectionAndValidation();
 	testLoadFailureStatusesAndInvalidation();
 	testCommitSaveFailureLeavesSnapshotAndConfigUnchanged();

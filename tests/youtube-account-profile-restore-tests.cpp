@@ -860,6 +860,66 @@ void testReentrantLocalDisconnectInvalidationIsDeferred()
 	CHECK(!fixture.coordinator.lockHeld());
 }
 
+void testReentrantLocalDisconnectShutdownIsDeferredAndTerminal()
+{
+	Fixture fixture;
+	fixture.account(selectionA());
+	fixture.store.statusValue = {CredentialState::Present, {}};
+	CHECK(fixture.coordinator.restore().status == YouTubeAccountProfileRestoreStatus::Restored);
+	const int releaseCountBefore = fixture.lockApi.releaseCount;
+	const int closeCountBefore = fixture.lockApi.closeCount;
+	bool shutdownRequested = false;
+	fixture.store.onErase = [&]() {
+		shutdownRequested = true;
+		CHECK(!fixture.coordinator.shutdown());
+		CHECK(fixture.coordinator.lockHeld());
+	};
+
+	const auto result = fixture.coordinator.disconnectLocal();
+	CHECK(shutdownRequested);
+	CHECK(result.status == YouTubeAccountProfileDisconnectStatus::Closed);
+	CHECK(result.providerStatus == YouTubeAccountProviderDisconnectStatus::Closed);
+	CHECK(fixture.store.eraseCount == 1);
+	CHECK(fixture.provider.snapshot().stage == YouTubeAccountProviderStage::Idle);
+	CHECK(fixture.lockApi.releaseCount == releaseCountBefore + 1);
+	CHECK(fixture.lockApi.closeCount == closeCountBefore + 1);
+	CHECK(!fixture.coordinator.lockHeld());
+
+	const int eraseCount = fixture.store.eraseCount;
+	const int releaseCount = fixture.lockApi.releaseCount;
+	const auto after = fixture.coordinator.disconnectLocal();
+	CHECK(after.status == YouTubeAccountProfileDisconnectStatus::Closed);
+	CHECK(after.providerStatus == YouTubeAccountProviderDisconnectStatus::Closed);
+	CHECK(fixture.store.eraseCount == eraseCount);
+	CHECK(fixture.lockApi.releaseCount == releaseCount);
+}
+
+void testLocalDisconnectCloseHandleFailureRetriesWithoutSecondErase()
+{
+	Fixture fixture;
+	fixture.account(selectionA());
+	fixture.store.statusValue = {CredentialState::Present, {}};
+	CHECK(fixture.coordinator.restore().status == YouTubeAccountProfileRestoreStatus::Restored);
+	const int releaseCountBefore = fixture.lockApi.releaseCount;
+	const int closeCountBefore = fixture.lockApi.closeCount;
+	fixture.lockApi.closeResult = false;
+
+	const auto failed = fixture.coordinator.disconnectLocal();
+	CHECK(failed.status == YouTubeAccountProfileDisconnectStatus::OperationFailed);
+	CHECK(failed.providerStatus == YouTubeAccountProviderDisconnectStatus::OperationFailed);
+	CHECK(fixture.store.eraseCount == 1);
+	CHECK(fixture.coordinator.lockHeld());
+	CHECK(fixture.lockApi.releaseCount == releaseCountBefore + 1);
+	CHECK(fixture.lockApi.closeCount == closeCountBefore + 1);
+
+	fixture.lockApi.closeResult = true;
+	CHECK(fixture.coordinator.shutdown());
+	CHECK(!fixture.coordinator.lockHeld());
+	CHECK(fixture.store.eraseCount == 1);
+	CHECK(fixture.lockApi.releaseCount == releaseCountBefore + 1);
+	CHECK(fixture.lockApi.closeCount == closeCountBefore + 2);
+}
+
 void testLocalDisconnectWrongThreadAndClosedAreSideEffectFree()
 {
 	Fixture fixture;
@@ -925,6 +985,8 @@ int main(int argc, char **argv)
 	testLocalDisconnectReleaseFailureFailsClosedAndRetries();
 	testLocalDisconnectCredentialFailurePreservesStateAndCanRetry();
 	testReentrantLocalDisconnectInvalidationIsDeferred();
+	testReentrantLocalDisconnectShutdownIsDeferredAndTerminal();
+	testLocalDisconnectCloseHandleFailureRetriesWithoutSecondErase();
 	testLocalDisconnectWrongThreadAndClosedAreSideEffectFree();
 	testLocalDisconnectPreservesPreciseProfileValidationFailures();
 	if (failures != 0) {

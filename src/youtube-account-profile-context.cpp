@@ -169,11 +169,27 @@ YouTubeAccountProfileContext::commitSelection(std::uint64_t expectedGeneration, 
 		}
 
 		config_t *config = configReader_();
+		// The config reader is an external frontend boundary.  Re-check the
+		// profile binding after it returns so a re-entrant profile switch cannot
+		// make the transaction save into a config that no longer belongs to the
+		// generation being committed.  This is defense in depth for the
+		// owner-thread/no-event-processing contract; it must happen before any
+		// config mutation or save.
+		const auto bindingAfterConfigRead = readProfileBinding();
+		if (!bindingAfterConfigRead.has_value() || *bindingAfterConfigRead != expectedProfileBinding) {
+			invalidate();
+			return staleResult();
+		}
 		if (config == nullptr) {
 			return {CommitStatus::Unavailable, snapshot_};
 		}
 
 		const SettingsLoadResult loaded = loadProfileSettings(config);
+		const auto bindingAfterLoad = readProfileBinding();
+		if (!bindingAfterLoad.has_value() || *bindingAfterLoad != expectedProfileBinding) {
+			invalidate();
+			return staleResult();
+		}
 		if (loaded.status != SettingsLoadStatus::Loaded && loaded.status != SettingsLoadStatus::Defaults &&
 		    loaded.status != SettingsLoadStatus::SetupRequired) {
 			return {mapCommitStatus(loaded.status), snapshot_};
