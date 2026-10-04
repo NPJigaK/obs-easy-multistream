@@ -27,7 +27,7 @@ namespace easy_multistream {
 class YouTubeAccountRuntimeOwnerTestAccess final {
 public:
 	static bool commitSelection(YouTubeAccountRuntimeOwner &owner,
-					const std::optional<YouTubeAccountSelection> &selection) noexcept
+				    const std::optional<YouTubeAccountSelection> &selection) noexcept
 	{
 		return owner.commitSelection(selection);
 	}
@@ -275,23 +275,24 @@ void setManualSettings(config_t *config)
 	writeProfileSettings(config, settings);
 }
 
-std::unique_ptr<YouTubeAccountRuntimeOwner> makeOwner(
-	std::string &currentPath, ConfigHandle &config, std::unique_ptr<WinCredentialApi> credentialApi,
-	std::unique_ptr<YouTubeAccountProfileOperationLockApi> lockApi,
-	GoogleOAuthAuthorizationSession::BrowserOpener browserOpener = {},
-	YouTubeAccountRuntimeOwner::ConfigReader configReaderOverride = {})
+std::unique_ptr<YouTubeAccountRuntimeOwner>
+makeOwner(std::string &currentPath, ConfigHandle &config, std::unique_ptr<WinCredentialApi> credentialApi,
+	  std::unique_ptr<YouTubeAccountProfileOperationLockApi> lockApi,
+	  GoogleOAuthAuthorizationSession::BrowserOpener browserOpener = {},
+	  YouTubeAccountRuntimeOwner::ConfigReader configReaderOverride = {}, QString clientId = {})
 {
 	if (!configReaderOverride) {
-		configReaderOverride = [&config]() { return config.get(); };
+		configReaderOverride = [&config]() {
+			return config.get();
+		};
 	}
-	return std::make_unique<YouTubeAccountRuntimeOwner>(
-		[&currentPath]() { return currentPath; }, std::move(configReaderOverride), QString{},
-		std::move(browserOpener),
-		std::move(credentialApi), std::move(lockApi));
+	return std::make_unique<YouTubeAccountRuntimeOwner>([&currentPath]() { return currentPath; },
+							    std::move(configReaderOverride), std::move(clientId),
+							    std::move(browserOpener), std::move(credentialApi),
+							    std::move(lockApi));
 }
 
-void saveCredential(OwnerTestCredentialApi &api, std::string_view profilePath,
-			    const YouTubeAccountSelection &selection)
+void saveCredential(OwnerTestCredentialApi &api, std::string_view profilePath, const YouTubeAccountSelection &selection)
 {
 	const auto binding = makeYouTubeAccountProfileBinding(profilePath);
 	CHECK(binding.has_value());
@@ -333,6 +334,198 @@ void testRestoreOnlyOwnerBindsSuccessfulGeneration()
 	CHECK(owner->snapshot().profileBinding == snapshot.profileBinding);
 	CHECK(owner->snapshot().providerStage == YouTubeAccountProviderStage::Configured);
 	CHECK(YouTubeAccountRuntimeOwnerTestAccess::commitSelection(*owner, selectionA()));
+}
+
+void testConnectionSeamFailsClosedWhenProductionOAuthIsUnconfigured()
+{
+	ConfigHandle config;
+	CHECK(config.open("easy-multistream-runtime-owner-connect-unconfigured.ini"));
+	setAccountSettings(config.get(), std::nullopt);
+	std::string currentPath(kProfilePathA);
+	auto lockApi = std::make_unique<OwnerTestLockApi>();
+	auto *lockApiRaw = lockApi.get();
+	int browserOpenCount = 0;
+	auto owner = makeOwner(currentPath, config, std::make_unique<OwnerTestCredentialApi>(), std::move(lockApi),
+			       [&browserOpenCount](const QUrl &) {
+				       ++browserOpenCount;
+				       return true;
+			       });
+
+	CHECK(owner->startConnection() == YouTubeAccountConnectionOperationStatus::NotRestored);
+	CHECK(browserOpenCount == 0);
+	CHECK(lockApiRaw->releaseCount == 0);
+	CHECK(owner->restoreActiveProfile().status == YouTubeAccountProfileRestoreStatus::SetupRequired);
+	const int releasesAfterRestore = lockApiRaw->releaseCount;
+	CHECK(owner->startConnection() == YouTubeAccountConnectionOperationStatus::NotConfigured);
+	CHECK(browserOpenCount == 0);
+	CHECK(lockApiRaw->releaseCount == releasesAfterRestore);
+	CHECK(owner->connectionSnapshot().stage == YouTubeAccountProviderStage::Idle);
+	CHECK(owner->selectChannel({1, 1}, {1, 0}) == YouTubeAccountConnectionOperationStatus::StaleAttempt);
+	CHECK(owner->selectStream({1, 1}, {1, 0}) == YouTubeAccountConnectionOperationStatus::StaleAttempt);
+	CHECK(owner->cancelConnection({1, 1}) == YouTubeAccountConnectionOperationStatus::NoActiveAttempt);
+}
+
+void testConnectionSeamStartsAndCancelsForCurrentRestoredProfile()
+{
+	ConfigHandle config;
+	CHECK(config.open("easy-multistream-runtime-owner-connect.ini"));
+	setAccountSettings(config.get(), std::nullopt);
+	std::string currentPath(kProfilePathA);
+	auto lockApi = std::make_unique<OwnerTestLockApi>();
+	auto *lockApiRaw = lockApi.get();
+	int browserOpenCount = 0;
+	QUrl authorizationUrl;
+	auto owner = makeOwner(
+		currentPath, config, std::make_unique<OwnerTestCredentialApi>(), std::move(lockApi),
+		[&browserOpenCount, &authorizationUrl](const QUrl &url) {
+			++browserOpenCount;
+			authorizationUrl = url;
+			return true;
+		},
+		{}, QStringLiteral("runtime-owner-client.apps.googleusercontent.com"));
+
+	CHECK(owner->restoreActiveProfile().status == YouTubeAccountProfileRestoreStatus::SetupRequired);
+	const int releasesAfterRestore = lockApiRaw->releaseCount;
+	CHECK(owner->startConnection(GoogleOAuthConsentMode::ForceConsent) ==
+	      YouTubeAccountConnectionOperationStatus::Started);
+	CHECK(browserOpenCount == 1);
+	CHECK(authorizationUrl.scheme() == QStringLiteral("https"));
+	CHECK(authorizationUrl.host() == QStringLiteral("accounts.google.com"));
+	CHECK(authorizationUrl.query().contains(QStringLiteral("prompt=consent")));
+	CHECK(lockApiRaw->releaseCount == releasesAfterRestore);
+
+	const auto connection = owner->connectionSnapshot();
+	CHECK(connection.stage == YouTubeAccountProviderStage::Authorizing);
+	CHECK(connection.activeAttempt.has_value());
+	CHECK(connection.channels.empty());
+	CHECK(connection.streams.empty());
+	if (!connection.activeAttempt.has_value()) {
+		return;
+	}
+	const YouTubeAccountConnectionAttempt attempt = *connection.activeAttempt;
+	CHECK(owner->selectChannel(attempt, {connection.revision, 0}) ==
+	      YouTubeAccountConnectionOperationStatus::WrongPhase);
+	CHECK(owner->selectStream(attempt, {connection.revision, 0}) ==
+	      YouTubeAccountConnectionOperationStatus::WrongPhase);
+	CHECK(owner->selectChannel({attempt.generation, attempt.attempt + 1}, {connection.revision, 0}) ==
+	      YouTubeAccountConnectionOperationStatus::StaleAttempt);
+	CHECK(owner->cancelConnection({attempt.generation, attempt.attempt + 1}) ==
+	      YouTubeAccountConnectionOperationStatus::StaleAttempt);
+	CHECK(owner->connectionSnapshot().activeAttempt == attempt);
+	CHECK(owner->cancelConnection(attempt) == YouTubeAccountConnectionOperationStatus::Cancelled);
+	CHECK(lockApiRaw->releaseCount == releasesAfterRestore + 1);
+	CHECK(owner->connectionSnapshot().stage == YouTubeAccountProviderStage::Idle);
+	CHECK(owner->cancelConnection(attempt) == YouTubeAccountConnectionOperationStatus::NoActiveAttempt);
+}
+
+void testConnectionSeamRejectsAProfileSwitchBeforeOpeningBrowser()
+{
+	ConfigHandle config;
+	CHECK(config.open("easy-multistream-runtime-owner-connect-profile-switch.ini"));
+	setAccountSettings(config.get(), std::nullopt);
+	std::string currentPath(kProfilePathA);
+	int browserOpenCount = 0;
+	auto owner = makeOwner(
+		currentPath, config, std::make_unique<OwnerTestCredentialApi>(), std::make_unique<OwnerTestLockApi>(),
+		[&browserOpenCount](const QUrl &) {
+			++browserOpenCount;
+			return true;
+		},
+		{}, QStringLiteral("runtime-owner-client.apps.googleusercontent.com"));
+
+	CHECK(owner->restoreActiveProfile().status == YouTubeAccountProfileRestoreStatus::SetupRequired);
+	currentPath = std::string(kProfilePathB);
+	CHECK(owner->startConnection() == YouTubeAccountConnectionOperationStatus::ProfileChanged);
+	CHECK(browserOpenCount == 0);
+	const auto snapshot = owner->snapshot();
+	CHECK(!snapshot.restored);
+	CHECK(snapshot.restoreStatus == YouTubeAccountProfileRestoreStatus::ProfileChanged);
+	CHECK(snapshot.providerStage == YouTubeAccountProviderStage::Idle);
+}
+
+void testConnectionSeamRejectsAChangedConnectionModeBeforeOpeningBrowser()
+{
+	ConfigHandle config;
+	CHECK(config.open("easy-multistream-runtime-owner-connect-mode-change.ini"));
+	setAccountSettings(config.get(), std::nullopt);
+	std::string currentPath(kProfilePathA);
+	int browserOpenCount = 0;
+	auto owner = makeOwner(
+		currentPath, config, std::make_unique<OwnerTestCredentialApi>(), std::make_unique<OwnerTestLockApi>(),
+		[&browserOpenCount](const QUrl &) {
+			++browserOpenCount;
+			return true;
+		},
+		{}, QStringLiteral("runtime-owner-client.apps.googleusercontent.com"));
+
+	CHECK(owner->restoreActiveProfile().status == YouTubeAccountProfileRestoreStatus::SetupRequired);
+	setManualSettings(config.get());
+	CHECK(owner->startConnection() == YouTubeAccountConnectionOperationStatus::NotAccountMode);
+	CHECK(browserOpenCount == 0);
+	const auto snapshot = owner->snapshot();
+	CHECK(!snapshot.restored);
+	CHECK(snapshot.restoreStatus == YouTubeAccountProfileRestoreStatus::NotAccountMode);
+	CHECK(snapshot.providerStage == YouTubeAccountProviderStage::Idle);
+}
+
+void testProfileInvalidationCancelsAnActiveConnectionAttempt()
+{
+	ConfigHandle config;
+	CHECK(config.open("easy-multistream-runtime-owner-connect-invalidate.ini"));
+	setAccountSettings(config.get(), std::nullopt);
+	std::string currentPath(kProfilePathA);
+	auto owner = makeOwner(
+		currentPath, config, std::make_unique<OwnerTestCredentialApi>(), std::make_unique<OwnerTestLockApi>(),
+		[](const QUrl &) { return true; }, {},
+		QStringLiteral("runtime-owner-client.apps.googleusercontent.com"));
+
+	CHECK(owner->restoreActiveProfile().status == YouTubeAccountProfileRestoreStatus::SetupRequired);
+	CHECK(owner->startConnection() == YouTubeAccountConnectionOperationStatus::Started);
+	const auto active = owner->connectionSnapshot().activeAttempt;
+	CHECK(active.has_value());
+	CHECK(owner->invalidateForProfileChange());
+	CHECK(!owner->snapshot().restored);
+	CHECK(owner->connectionSnapshot().stage == YouTubeAccountProviderStage::Idle);
+	if (active.has_value()) {
+		CHECK(owner->cancelConnection(*active) == YouTubeAccountConnectionOperationStatus::NotRestored);
+		CHECK(owner->selectChannel(*active, {1, 0}) == YouTubeAccountConnectionOperationStatus::NotRestored);
+	}
+}
+
+void testConnectionCancelFailsClosedWhenNativeLockCleanupFails()
+{
+	ConfigHandle config;
+	CHECK(config.open("easy-multistream-runtime-owner-connect-cancel-lock-failure.ini"));
+	setAccountSettings(config.get(), std::nullopt);
+	std::string currentPath(kProfilePathA);
+	auto lockApi = std::make_unique<OwnerTestLockApi>();
+	auto *lockApiRaw = lockApi.get();
+	auto owner = makeOwner(
+		currentPath, config, std::make_unique<OwnerTestCredentialApi>(), std::move(lockApi),
+		[](const QUrl &) { return true; }, {},
+		QStringLiteral("runtime-owner-client.apps.googleusercontent.com"));
+
+	CHECK(owner->restoreActiveProfile().status == YouTubeAccountProfileRestoreStatus::SetupRequired);
+	CHECK(owner->startConnection() == YouTubeAccountConnectionOperationStatus::Started);
+	const auto attempt = owner->connectionSnapshot().activeAttempt;
+	CHECK(attempt.has_value());
+	if (!attempt.has_value()) {
+		return;
+	}
+
+	lockApiRaw->releaseResult = false;
+	CHECK(owner->cancelConnection(*attempt) == YouTubeAccountConnectionOperationStatus::OperationFailed);
+	CHECK(!owner->snapshot().restored);
+	CHECK(owner->snapshot().restoreStatus == YouTubeAccountProfileRestoreStatus::OperationFailed);
+	CHECK(owner->connectionSnapshot().stage == YouTubeAccountProviderStage::Unavailable);
+	CHECK(owner->startConnection() == YouTubeAccountConnectionOperationStatus::NotRestored);
+
+	// Cleanup remains terminal and retryable without reopening the failed
+	// connection context.
+	CHECK(!owner->shutdown());
+	lockApiRaw->releaseResult = true;
+	CHECK(owner->shutdown());
+	CHECK(owner->startConnection() == YouTubeAccountConnectionOperationStatus::Closed);
 }
 
 void testLocalDisconnectDeletesCredentialAndKeepsAccountMode()
@@ -478,7 +671,7 @@ void testLocalDisconnectSaveFailureDoesNotRestoreErasedCredential()
 	auto *credentialApiRaw = credentialApi.get();
 	saveCredential(*credentialApiRaw, currentPath, selectionA());
 	auto owner = makeOwner(currentPath, config, std::move(credentialApi), std::make_unique<OwnerTestLockApi>(), {},
-					std::move(configReader));
+			       std::move(configReader));
 
 	CHECK(owner->restoreActiveProfile().status == YouTubeAccountProfileRestoreStatus::Restored);
 	// The disconnect preflight is the next config read; make only its commit
@@ -532,12 +725,11 @@ void testMissingCredentialRestoresReauthorizationBoundaryWithoutOpeningBrowser()
 	auto credentialApi = std::make_unique<OwnerTestCredentialApi>();
 	auto *credentialApiRaw = credentialApi.get();
 	int browserOpenCount = 0;
-	auto owner = makeOwner(
-		currentPath, config, std::move(credentialApi), std::make_unique<OwnerTestLockApi>(),
-		[&browserOpenCount](const QUrl &) {
-			++browserOpenCount;
-			return false;
-		});
+	auto owner = makeOwner(currentPath, config, std::move(credentialApi), std::make_unique<OwnerTestLockApi>(),
+			       [&browserOpenCount](const QUrl &) {
+				       ++browserOpenCount;
+				       return false;
+			       });
 
 	const auto result = owner->restoreActiveProfile();
 	CHECK(result.status == YouTubeAccountProfileRestoreStatus::ReauthorizationRequired);
@@ -557,12 +749,11 @@ void testManualProfileNeverReadsAccountCredential()
 	auto credentialApi = std::make_unique<OwnerTestCredentialApi>();
 	auto *credentialApiRaw = credentialApi.get();
 	int browserOpenCount = 0;
-	auto owner = makeOwner(
-		currentPath, config, std::move(credentialApi), std::make_unique<OwnerTestLockApi>(),
-		[&browserOpenCount](const QUrl &) {
-			++browserOpenCount;
-			return false;
-		});
+	auto owner = makeOwner(currentPath, config, std::move(credentialApi), std::make_unique<OwnerTestLockApi>(),
+			       [&browserOpenCount](const QUrl &) {
+				       ++browserOpenCount;
+				       return false;
+			       });
 
 	const auto result = owner->restoreActiveProfile();
 	CHECK(result.status == YouTubeAccountProfileRestoreStatus::NotAccountMode);
@@ -580,14 +771,23 @@ void testOwnerLifecycleIsThreadBoundWithoutSideEffects()
 	setManualSettings(config.get());
 	std::string currentPath(kProfilePathA);
 	auto owner = makeOwner(currentPath, config, std::make_unique<OwnerTestCredentialApi>(),
-				       std::make_unique<OwnerTestLockApi>());
+			       std::make_unique<OwnerTestLockApi>());
 	YouTubeAccountProfileRestoreResult restoreResult;
 	YouTubeAccountProfileDisconnectResult disconnectResult;
+	YouTubeAccountConnectionOperationStatus startStatus = YouTubeAccountConnectionOperationStatus::OperationFailed;
+	YouTubeAccountConnectionOperationStatus channelStatus =
+		YouTubeAccountConnectionOperationStatus::OperationFailed;
+	YouTubeAccountConnectionOperationStatus streamStatus = YouTubeAccountConnectionOperationStatus::OperationFailed;
+	YouTubeAccountConnectionOperationStatus cancelStatus = YouTubeAccountConnectionOperationStatus::OperationFailed;
 	bool invalidateResult = true;
 	bool shutdownResult = true;
 	std::thread worker([&]() {
 		restoreResult = owner->restoreActiveProfile();
 		disconnectResult = YouTubeAccountRuntimeOwnerTestAccess::disconnect(*owner);
+		startStatus = owner->startConnection();
+		channelStatus = owner->selectChannel({1, 1}, {1, 0});
+		streamStatus = owner->selectStream({1, 1}, {1, 0});
+		cancelStatus = owner->cancelConnection({1, 1});
 		invalidateResult = owner->invalidateForProfileChange();
 		shutdownResult = owner->shutdown();
 	});
@@ -598,6 +798,10 @@ void testOwnerLifecycleIsThreadBoundWithoutSideEffects()
 	CHECK(!owner->snapshot().closed);
 	CHECK(!owner->snapshot().restored);
 	CHECK(disconnectResult.status == YouTubeAccountProfileDisconnectStatus::WrongThread);
+	CHECK(startStatus == YouTubeAccountConnectionOperationStatus::WrongThread);
+	CHECK(channelStatus == YouTubeAccountConnectionOperationStatus::WrongThread);
+	CHECK(streamStatus == YouTubeAccountConnectionOperationStatus::WrongThread);
+	CHECK(cancelStatus == YouTubeAccountConnectionOperationStatus::WrongThread);
 }
 
 void testProfileChangeClearsOldBindingAndRestoresNewOne()
@@ -657,6 +861,11 @@ void testShutdownRetriesIncompleteNativeCleanup()
 	CHECK(owner->shutdown());
 	const auto closedDisconnect = YouTubeAccountRuntimeOwnerTestAccess::disconnect(*owner);
 	CHECK(closedDisconnect.status == YouTubeAccountProfileDisconnectStatus::Closed);
+	CHECK(owner->startConnection() == YouTubeAccountConnectionOperationStatus::Closed);
+	CHECK(owner->selectChannel({1, 1}, {1, 0}) == YouTubeAccountConnectionOperationStatus::Closed);
+	CHECK(owner->selectStream({1, 1}, {1, 0}) == YouTubeAccountConnectionOperationStatus::Closed);
+	CHECK(owner->cancelConnection({1, 1}) == YouTubeAccountConnectionOperationStatus::Closed);
+	CHECK(owner->connectionSnapshot().stage == YouTubeAccountProviderStage::Closed);
 	CHECK(owner->snapshot().closed);
 }
 
@@ -666,6 +875,12 @@ int main(int argc, char **argv)
 {
 	QCoreApplication application(argc, argv);
 	testRestoreOnlyOwnerBindsSuccessfulGeneration();
+	testConnectionSeamFailsClosedWhenProductionOAuthIsUnconfigured();
+	testConnectionSeamStartsAndCancelsForCurrentRestoredProfile();
+	testConnectionSeamRejectsAProfileSwitchBeforeOpeningBrowser();
+	testConnectionSeamRejectsAChangedConnectionModeBeforeOpeningBrowser();
+	testProfileInvalidationCancelsAnActiveConnectionAttempt();
+	testConnectionCancelFailsClosedWhenNativeLockCleanupFails();
 	testLocalDisconnectDeletesCredentialAndKeepsAccountMode();
 	testLocalDisconnectIsIdempotentWhenCredentialIsMissing();
 	testBusyDisconnectLeavesRestoredOwnerMetadataUntouched();

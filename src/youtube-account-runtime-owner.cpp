@@ -23,20 +23,71 @@ template<typename T> T &requireDependency(const std::unique_ptr<T> &dependency)
 	return *dependency;
 }
 
+YouTubeAccountLease providerLease(YouTubeAccountConnectionAttempt attempt) noexcept
+{
+	return {attempt.generation, attempt.attempt};
+}
+
+YouTubeAccountConnectionAttempt connectionAttempt(YouTubeAccountLease lease) noexcept
+{
+	return {lease.generation, lease.attempt};
+}
+
+YouTubeAccountConnectionOperationStatus mapStartStatus(YouTubeAccountProviderStartStatus status) noexcept
+{
+	switch (status) {
+	case YouTubeAccountProviderStartStatus::Started:
+		return YouTubeAccountConnectionOperationStatus::Started;
+	case YouTubeAccountProviderStartStatus::WrongThread:
+		return YouTubeAccountConnectionOperationStatus::WrongThread;
+	case YouTubeAccountProviderStartStatus::Busy:
+		return YouTubeAccountConnectionOperationStatus::Busy;
+	case YouTubeAccountProviderStartStatus::Closed:
+		return YouTubeAccountConnectionOperationStatus::Closed;
+	case YouTubeAccountProviderStartStatus::InvalidClientId:
+		return YouTubeAccountConnectionOperationStatus::NotConfigured;
+	case YouTubeAccountProviderStartStatus::InvalidProfileBinding:
+		return YouTubeAccountConnectionOperationStatus::ProfileChanged;
+	case YouTubeAccountProviderStartStatus::InvalidSelectionCommitter:
+	case YouTubeAccountProviderStartStatus::OperationFailed:
+		return YouTubeAccountConnectionOperationStatus::OperationFailed;
+	}
+	return YouTubeAccountConnectionOperationStatus::OperationFailed;
+}
+
+YouTubeAccountConnectionOperationStatus mapSelectionStatus(YouTubeAccountProviderSelectionStatus status) noexcept
+{
+	switch (status) {
+	case YouTubeAccountProviderSelectionStatus::Accepted:
+		return YouTubeAccountConnectionOperationStatus::Accepted;
+	case YouTubeAccountProviderSelectionStatus::WrongThread:
+		return YouTubeAccountConnectionOperationStatus::WrongThread;
+	case YouTubeAccountProviderSelectionStatus::Closed:
+		return YouTubeAccountConnectionOperationStatus::Closed;
+	case YouTubeAccountProviderSelectionStatus::StaleLease:
+		return YouTubeAccountConnectionOperationStatus::StaleAttempt;
+	case YouTubeAccountProviderSelectionStatus::WrongStage:
+		return YouTubeAccountConnectionOperationStatus::WrongPhase;
+	case YouTubeAccountProviderSelectionStatus::UnknownCandidate:
+		return YouTubeAccountConnectionOperationStatus::UnknownCandidate;
+	case YouTubeAccountProviderSelectionStatus::OperationFailed:
+		return YouTubeAccountConnectionOperationStatus::OperationFailed;
+	}
+	return YouTubeAccountConnectionOperationStatus::OperationFailed;
+}
+
 } // namespace
 
-YouTubeAccountRuntimeOwner::YouTubeAccountRuntimeOwner(ProfilePathReader profilePathReader,
-								ConfigReader configReader)
+YouTubeAccountRuntimeOwner::YouTubeAccountRuntimeOwner(ProfilePathReader profilePathReader, ConfigReader configReader)
 	: YouTubeAccountRuntimeOwner(std::move(profilePathReader), std::move(configReader), QString{}, {},
-					     std::make_unique<NativeWinCredentialApi>(),
-					     std::make_unique<NativeYouTubeAccountProfileOperationLockApi>())
+				     std::make_unique<NativeWinCredentialApi>(),
+				     std::make_unique<NativeYouTubeAccountProfileOperationLockApi>())
 {
 }
 
 YouTubeAccountRuntimeOwner::YouTubeAccountRuntimeOwner(
 	ProfilePathReader profilePathReader, ConfigReader configReader, QString clientId,
-	GoogleOAuthAuthorizationSession::BrowserOpener browserOpener,
-	std::unique_ptr<WinCredentialApi> credentialApi,
+	GoogleOAuthAuthorizationSession::BrowserOpener browserOpener, std::unique_ptr<WinCredentialApi> credentialApi,
 	std::unique_ptr<YouTubeAccountProfileOperationLockApi> profileLockApi)
 	: context_(std::move(profilePathReader), std::move(configReader)),
 	  credentialApi_(std::move(credentialApi)),
@@ -50,8 +101,8 @@ YouTubeAccountRuntimeOwner::YouTubeAccountRuntimeOwner(
 		[this](const std::optional<YouTubeAccountSelection> &selection) noexcept {
 			return commitSelection(selection);
 		});
-	restoreCoordinator_ = std::make_unique<YouTubeAccountProfileRestoreCoordinator>(
-		context_, *provider_, profileLockProvider_);
+	restoreCoordinator_ =
+		std::make_unique<YouTubeAccountProfileRestoreCoordinator>(context_, *provider_, profileLockProvider_);
 }
 
 YouTubeAccountRuntimeOwner::~YouTubeAccountRuntimeOwner()
@@ -91,8 +142,7 @@ bool YouTubeAccountRuntimeOwner::isAcceptedRestore(const YouTubeAccountProfileRe
 	       result.status == YouTubeAccountProfileRestoreStatus::CredentialUnavailable;
 }
 
-bool YouTubeAccountRuntimeOwner::isAcceptedDisconnect(
-	const YouTubeAccountProfileDisconnectResult &result) noexcept
+bool YouTubeAccountRuntimeOwner::isAcceptedDisconnect(const YouTubeAccountProfileDisconnectResult &result) noexcept
 {
 	// The disconnect transaction returns the post-commit account snapshot.  Do
 	// not accept a status alone: accepting a stale/cleared snapshot here would
@@ -108,8 +158,8 @@ bool YouTubeAccountRuntimeOwner::isAcceptedDisconnect(
 	return isUsableProfile(snapshot) && !snapshot.selection.has_value();
 }
 
-YouTubeAccountProfileRestoreStatus YouTubeAccountRuntimeOwner::mapDisconnectStatus(
-	YouTubeAccountProfileDisconnectStatus status) const noexcept
+YouTubeAccountProfileRestoreStatus
+YouTubeAccountRuntimeOwner::mapDisconnectStatus(YouTubeAccountProfileDisconnectStatus status) const noexcept
 {
 	switch (status) {
 	case YouTubeAccountProfileDisconnectStatus::Disconnected:
@@ -181,6 +231,220 @@ YouTubeAccountProfileRestoreResult YouTubeAccountRuntimeOwner::restoreActiveProf
 		result.providerStatus = YouTubeAccountProviderRestoreStatus::OperationFailed;
 	}
 	return result;
+}
+
+bool YouTubeAccountRuntimeOwner::invalidateConnectionContext(YouTubeAccountProfileRestoreStatus status) noexcept
+{
+	clearRestoredBinding();
+	try {
+		if (restoreCoordinator_ == nullptr || !restoreCoordinator_->invalidate()) {
+			restoreStatus_ = YouTubeAccountProfileRestoreStatus::OperationFailed;
+			return false;
+		}
+		restoreStatus_ = status;
+		return true;
+	} catch (...) {
+		restoreStatus_ = YouTubeAccountProfileRestoreStatus::OperationFailed;
+		return false;
+	}
+}
+
+YouTubeAccountConnectionOperationStatus YouTubeAccountRuntimeOwner::preflightConnection() noexcept
+{
+	if (closed_) {
+		return YouTubeAccountConnectionOperationStatus::Closed;
+	}
+	if (!restored_ || restoredGeneration_ == 0 || restoredBinding_.empty()) {
+		return YouTubeAccountConnectionOperationStatus::NotRestored;
+	}
+
+	switch (context_.checkActiveAccount(restoredGeneration_, restoredBinding_)) {
+	case YouTubeAccountProfileContext::ActiveAccountStatus::Current:
+		return YouTubeAccountConnectionOperationStatus::Accepted;
+	case YouTubeAccountProfileContext::ActiveAccountStatus::Stale:
+		return invalidateConnectionContext(YouTubeAccountProfileRestoreStatus::ProfileChanged)
+			       ? YouTubeAccountConnectionOperationStatus::ProfileChanged
+			       : YouTubeAccountConnectionOperationStatus::OperationFailed;
+	case YouTubeAccountProfileContext::ActiveAccountStatus::NotAccountMode:
+		return invalidateConnectionContext(YouTubeAccountProfileRestoreStatus::NotAccountMode)
+			       ? YouTubeAccountConnectionOperationStatus::NotAccountMode
+			       : YouTubeAccountConnectionOperationStatus::OperationFailed;
+	case YouTubeAccountProfileContext::ActiveAccountStatus::ProfileUnavailable:
+		return invalidateConnectionContext(YouTubeAccountProfileRestoreStatus::ProfileUnavailable)
+			       ? YouTubeAccountConnectionOperationStatus::ProfileUnavailable
+			       : YouTubeAccountConnectionOperationStatus::OperationFailed;
+	case YouTubeAccountProfileContext::ActiveAccountStatus::InvalidSettings:
+		(void)invalidateConnectionContext(YouTubeAccountProfileRestoreStatus::InvalidSettings);
+		return YouTubeAccountConnectionOperationStatus::OperationFailed;
+	case YouTubeAccountProfileContext::ActiveAccountStatus::UnsupportedFutureSettings:
+		(void)invalidateConnectionContext(YouTubeAccountProfileRestoreStatus::UnsupportedFutureSettings);
+		return YouTubeAccountConnectionOperationStatus::OperationFailed;
+	case YouTubeAccountProfileContext::ActiveAccountStatus::Unavailable:
+		(void)invalidateConnectionContext(YouTubeAccountProfileRestoreStatus::OperationFailed);
+		return YouTubeAccountConnectionOperationStatus::OperationFailed;
+	}
+	return YouTubeAccountConnectionOperationStatus::OperationFailed;
+}
+
+YouTubeAccountConnectionOperationStatus
+YouTubeAccountRuntimeOwner::startConnection(GoogleOAuthConsentMode consentMode) noexcept
+{
+	if (!onOwnerThread()) {
+		return YouTubeAccountConnectionOperationStatus::WrongThread;
+	}
+	if (closed_ || provider_ == nullptr) {
+		return YouTubeAccountConnectionOperationStatus::Closed;
+	}
+	const auto preflight = preflightConnection();
+	if (preflight != YouTubeAccountConnectionOperationStatus::Accepted) {
+		return preflight;
+	}
+	const auto providerStatus = provider_->startConnection(consentMode);
+	if (providerStatus == YouTubeAccountProviderStartStatus::InvalidProfileBinding) {
+		return invalidateConnectionContext(YouTubeAccountProfileRestoreStatus::ProfileChanged)
+			       ? YouTubeAccountConnectionOperationStatus::ProfileChanged
+			       : YouTubeAccountConnectionOperationStatus::OperationFailed;
+	}
+	return mapStartStatus(providerStatus);
+}
+
+YouTubeAccountConnectionOperationStatus
+YouTubeAccountRuntimeOwner::selectChannel(YouTubeAccountConnectionAttempt attempt,
+					  YouTubeAccountCandidateHandle candidate) noexcept
+{
+	if (!onOwnerThread()) {
+		return YouTubeAccountConnectionOperationStatus::WrongThread;
+	}
+	if (closed_ || provider_ == nullptr) {
+		return YouTubeAccountConnectionOperationStatus::Closed;
+	}
+	const auto preflight = preflightConnection();
+	if (preflight != YouTubeAccountConnectionOperationStatus::Accepted) {
+		return preflight;
+	}
+	try {
+		const auto snapshot = provider_->snapshot();
+		const auto lease = providerLease(attempt);
+		if (!snapshot.account.lease.has_value() || *snapshot.account.lease != lease) {
+			return YouTubeAccountConnectionOperationStatus::StaleAttempt;
+		}
+		if (snapshot.stage != YouTubeAccountProviderStage::AwaitingChannelSelection) {
+			return YouTubeAccountConnectionOperationStatus::WrongPhase;
+		}
+		if (candidate.revision != snapshot.revision || candidate.index >= snapshot.channels.size()) {
+			return YouTubeAccountConnectionOperationStatus::UnknownCandidate;
+		}
+		return mapSelectionStatus(provider_->selectChannel(lease, snapshot.channels[candidate.index].id));
+	} catch (...) {
+		return YouTubeAccountConnectionOperationStatus::OperationFailed;
+	}
+}
+
+YouTubeAccountConnectionOperationStatus
+YouTubeAccountRuntimeOwner::selectStream(YouTubeAccountConnectionAttempt attempt,
+					 YouTubeAccountCandidateHandle candidate) noexcept
+{
+	if (!onOwnerThread()) {
+		return YouTubeAccountConnectionOperationStatus::WrongThread;
+	}
+	if (closed_ || provider_ == nullptr) {
+		return YouTubeAccountConnectionOperationStatus::Closed;
+	}
+	const auto preflight = preflightConnection();
+	if (preflight != YouTubeAccountConnectionOperationStatus::Accepted) {
+		return preflight;
+	}
+	try {
+		const auto snapshot = provider_->snapshot();
+		const auto lease = providerLease(attempt);
+		if (!snapshot.account.lease.has_value() || *snapshot.account.lease != lease) {
+			return YouTubeAccountConnectionOperationStatus::StaleAttempt;
+		}
+		if (snapshot.stage != YouTubeAccountProviderStage::AwaitingStreamSelection) {
+			return YouTubeAccountConnectionOperationStatus::WrongPhase;
+		}
+		if (candidate.revision != snapshot.revision || candidate.index >= snapshot.streams.size()) {
+			return YouTubeAccountConnectionOperationStatus::UnknownCandidate;
+		}
+		return mapSelectionStatus(provider_->selectStream(lease, snapshot.streams[candidate.index].id));
+	} catch (...) {
+		return YouTubeAccountConnectionOperationStatus::OperationFailed;
+	}
+}
+
+YouTubeAccountConnectionOperationStatus
+YouTubeAccountRuntimeOwner::cancelConnection(YouTubeAccountConnectionAttempt attempt) noexcept
+{
+	if (!onOwnerThread()) {
+		return YouTubeAccountConnectionOperationStatus::WrongThread;
+	}
+	if (closed_ || provider_ == nullptr) {
+		return YouTubeAccountConnectionOperationStatus::Closed;
+	}
+	const auto preflight = preflightConnection();
+	if (preflight != YouTubeAccountConnectionOperationStatus::Accepted) {
+		return preflight;
+	}
+	try {
+		const auto before = provider_->snapshot();
+		const auto lease = providerLease(attempt);
+		if (!before.account.lease.has_value()) {
+			return YouTubeAccountConnectionOperationStatus::NoActiveAttempt;
+		}
+		if (*before.account.lease != lease) {
+			return YouTubeAccountConnectionOperationStatus::StaleAttempt;
+		}
+		if (provider_->cancel(lease)) {
+			return YouTubeAccountConnectionOperationStatus::Cancelled;
+		}
+
+		const auto after = provider_->snapshot();
+		if (after.stage == YouTubeAccountProviderStage::Closed) {
+			return YouTubeAccountConnectionOperationStatus::Closed;
+		}
+		if (after.account.lease.has_value() && *after.account.lease == lease) {
+			return YouTubeAccountConnectionOperationStatus::Busy;
+		}
+		// A cancellation that removed the attempt but failed native cleanup is
+		// not a reusable connection context. Keep all later work fail-closed.
+		clearRestoredBinding();
+		restoreStatus_ = YouTubeAccountProfileRestoreStatus::OperationFailed;
+		return YouTubeAccountConnectionOperationStatus::OperationFailed;
+	} catch (...) {
+		clearRestoredBinding();
+		restoreStatus_ = YouTubeAccountProfileRestoreStatus::OperationFailed;
+		return YouTubeAccountConnectionOperationStatus::OperationFailed;
+	}
+}
+
+YouTubeAccountConnectionSnapshot YouTubeAccountRuntimeOwner::connectionSnapshot() const
+{
+	YouTubeAccountConnectionSnapshot value;
+	value.restored = restored_;
+	value.closed = closed_;
+	if (provider_ == nullptr) {
+		return value;
+	}
+
+	const auto providerSnapshot = provider_->snapshot();
+	value.revision = providerSnapshot.revision;
+	value.stage = providerSnapshot.stage;
+	value.state = providerSnapshot.account.state;
+	value.failure = providerSnapshot.account.failure;
+	value.channelLabel = providerSnapshot.account.channelLabel;
+	value.streamLabel = providerSnapshot.account.streamLabel;
+	if (providerSnapshot.account.lease.has_value()) {
+		value.activeAttempt = connectionAttempt(*providerSnapshot.account.lease);
+	}
+	value.channels.reserve(providerSnapshot.channels.size());
+	for (std::size_t index = 0; index < providerSnapshot.channels.size(); ++index) {
+		value.channels.push_back({{providerSnapshot.revision, index}, providerSnapshot.channels[index].label});
+	}
+	value.streams.reserve(providerSnapshot.streams.size());
+	for (std::size_t index = 0; index < providerSnapshot.streams.size(); ++index) {
+		value.streams.push_back({{providerSnapshot.revision, index}, providerSnapshot.streams[index].label});
+	}
+	return value;
 }
 
 YouTubeAccountProfileDisconnectResult YouTubeAccountRuntimeOwner::disconnectActiveProfile() noexcept

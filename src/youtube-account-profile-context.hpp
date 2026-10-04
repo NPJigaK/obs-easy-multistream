@@ -60,6 +60,19 @@ public:
 		SaveFailed,
 	};
 
+	// A side-effect-free preflight for an operation that was authorized by a
+	// prior load(). It rereads the active path and config without advancing the
+	// generation or replacing the cached snapshot.
+	enum class ActiveAccountStatus {
+		Current,
+		Stale,
+		NotAccountMode,
+		ProfileUnavailable,
+		InvalidSettings,
+		UnsupportedFutureSettings,
+		Unavailable,
+	};
+
 	struct CommitResult final {
 		CommitStatus status = CommitStatus::Unavailable;
 		Snapshot snapshot;
@@ -86,6 +99,8 @@ public:
 	void invalidate() noexcept;
 
 	Snapshot snapshot() const;
+	ActiveAccountStatus checkActiveAccount(std::uint64_t expectedGeneration,
+					       std::string_view expectedProfileBinding) const noexcept;
 
 	// Commit only a validated, non-secret account selection. The expected
 	// generation and binding must still describe the active snapshot. The

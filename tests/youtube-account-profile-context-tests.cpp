@@ -173,13 +173,12 @@ void testCurrentProfileBindingIsSideEffectFreeAndBounded()
 {
 	int configReads = 0;
 	std::string currentPath(kProfileA);
-	YouTubeAccountProfileContext context(
-		[&currentPath]() { return currentPath; },
-		[&configReads]() {
-			++configReads;
-			throw std::runtime_error("config reader must not be called");
-			return static_cast<config_t *>(nullptr);
-		});
+	YouTubeAccountProfileContext context([&currentPath]() { return currentPath; },
+					     [&configReads]() {
+						     ++configReads;
+						     throw std::runtime_error("config reader must not be called");
+						     return static_cast<config_t *>(nullptr);
+					     });
 
 	const auto before = context.snapshot();
 	const auto bindingA = context.currentProfileBinding();
@@ -219,10 +218,44 @@ void testCurrentProfileBindingRejectsMissingThrowingAndInvalidReaders()
 
 	for (const std::string path : {std::string(), std::string("profile\0suffix", 14),
 				       std::string(easy_multistream::kMaxYouTubeAccountProfilePathBytes + 1, 'p')}) {
-		YouTubeAccountProfileContext invalid(
-			[&path]() { return path; }, []() { return static_cast<config_t *>(nullptr); });
+		YouTubeAccountProfileContext invalid([&path]() { return path; },
+						     []() { return static_cast<config_t *>(nullptr); });
 		CHECK(!invalid.currentProfileBinding().has_value());
 	}
+}
+
+void testActiveAccountCheckIsFreshAndDoesNotAdvanceGeneration()
+{
+	ConfigHandle config;
+	const auto path = testPath("easy-multistream-profile-context-active-check.ini");
+	removeTestPath(path);
+	CHECK(config.open(path));
+	setAccountSettings(config.get());
+	config.save();
+
+	std::string currentPath(kProfileA);
+	YouTubeAccountProfileContext context([&currentPath]() { return currentPath; },
+					     [&config]() { return config.get(); });
+	const auto loaded = context.load();
+	const auto before = context.snapshot();
+	CHECK(context.checkActiveAccount(loaded.snapshot.generation, loaded.snapshot.profileBinding) ==
+	      YouTubeAccountProfileContext::ActiveAccountStatus::Current);
+	CHECK(context.snapshot().generation == before.generation);
+	CHECK(context.snapshot().profileBinding == before.profileBinding);
+
+	// The preflight rereads the config rather than trusting the last load.
+	setManualSettings(config.get());
+	CHECK(context.checkActiveAccount(loaded.snapshot.generation, loaded.snapshot.profileBinding) ==
+	      YouTubeAccountProfileContext::ActiveAccountStatus::NotAccountMode);
+	CHECK(context.snapshot().generation == before.generation);
+
+	setAccountSettings(config.get());
+	currentPath = std::string(kProfileB);
+	CHECK(context.checkActiveAccount(loaded.snapshot.generation, loaded.snapshot.profileBinding) ==
+	      YouTubeAccountProfileContext::ActiveAccountStatus::Stale);
+	CHECK(context.snapshot().generation == before.generation);
+	CHECK(context.snapshot().profileBinding == before.profileBinding);
+	removeTestPath(path);
 }
 
 void testGenerationInvalidationPreventsStaleCommit()
@@ -481,6 +514,7 @@ int main()
 	testLoadCopiesValueOnlyProfileContext();
 	testCurrentProfileBindingIsSideEffectFreeAndBounded();
 	testCurrentProfileBindingRejectsMissingThrowingAndInvalidReaders();
+	testActiveAccountCheckIsFreshAndDoesNotAdvanceGeneration();
 	testGenerationInvalidationPreventsStaleCommit();
 	testCommitSelectionRequiresFreshProfileAndAccountMode();
 	testManualProfileDoesNotExposePreservedAccountSelection();
