@@ -805,6 +805,9 @@ public:
 		YouTubeAccountProviderSnapshot value;
 		value.revision = revision_;
 		value.stage = stage_;
+		if (profileBindingValid_) {
+			value.profileBinding = profileBinding_;
+		}
 		value.account = coordinator_.snapshot();
 		value.channels = channels_;
 		value.streams = streams_;
