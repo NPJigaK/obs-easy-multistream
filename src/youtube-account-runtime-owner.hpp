@@ -17,8 +17,9 @@
 namespace easy_multistream {
 
 // This is the production lifecycle seam for the saved YouTube account state.
-// It deliberately exposes restore/invalidation only: it does not expose the
-// browser, token exchange, discovery, or output paths to OBS UI/runtime code.
+// It exposes restore/invalidation and an internal local-disconnect transaction;
+// browser, token exchange, discovery, remote revoke, and output paths remain
+// unavailable to OBS UI/runtime code.
 // All methods are owner-thread-only and are called synchronously from OBS's
 // frontend lifecycle callbacks.
 struct YouTubeAccountRuntimeOwnerSnapshot final {
@@ -55,6 +56,11 @@ public:
 	~YouTubeAccountRuntimeOwner();
 
 	YouTubeAccountProfileRestoreResult restoreActiveProfile() noexcept;
+	// Erases the active profile's saved account selection and credential while
+	// keeping an account-mode profile ready for a later connection. The
+	// coordinator owns the transaction-scoped selection commit; this owner only
+	// publishes the resulting generation/binding after the transaction succeeds.
+	YouTubeAccountProfileDisconnectResult disconnectActiveProfile() noexcept;
 	bool invalidateForProfileChange() noexcept;
 	bool shutdown() noexcept;
 
@@ -68,6 +74,8 @@ private:
 	void clearRestoredBinding() noexcept;
 	static bool isAcceptedRestore(const YouTubeAccountProfileRestoreResult &result) noexcept;
 	static bool isUsableProfile(const YouTubeAccountProfileContext::Snapshot &snapshot) noexcept;
+	static bool isAcceptedDisconnect(const YouTubeAccountProfileDisconnectResult &result) noexcept;
+	YouTubeAccountProfileRestoreStatus mapDisconnectStatus(YouTubeAccountProfileDisconnectStatus status) const noexcept;
 
 	YouTubeAccountProfileContext context_;
 	std::unique_ptr<WinCredentialApi> credentialApi_;

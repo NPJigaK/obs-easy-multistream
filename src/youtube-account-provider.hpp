@@ -117,6 +117,20 @@ enum class YouTubeAccountProviderSelectionStatus {
 	OperationFailed,
 };
 
+enum class YouTubeAccountProviderDisconnectStatus {
+	Disconnected,
+	AlreadyDisconnected,
+	CredentialUnavailable,
+	ProfileSaveFailed,
+	InvalidSelectionCommitter,
+	WrongThread,
+	Busy,
+	Closed,
+	InvalidProfileBinding,
+	InvalidSelection,
+	OperationFailed,
+};
+
 struct YouTubeAccountProviderSnapshot final {
 	std::uint64_t revision = 0;
 	YouTubeAccountProviderStage stage = YouTubeAccountProviderStage::Idle;
@@ -133,10 +147,10 @@ struct YouTubeAccountProviderSnapshot final {
 // settings writer already provides that rollback contract.
 using YouTubeAccountSelectionCommitter = std::function<bool(const std::optional<YouTubeAccountSelection> &selection)>;
 
-// Headless, owner-thread-only orchestration for one interactive account
-// connection. It is deliberately detached from PluginState, docks, runtime
-// output, and the production OBS module until those layers have their own
-// reviewed integration slices.
+// Headless, owner-thread-only orchestration for one account connection. The
+// production lifecycle owner constructs it for saved-state restoration and an
+// internal local-disconnect transaction. Interactive connection entry points
+// remain detached from PluginState, docks, and runtime output.
 class YouTubeAccountProvider final : public QObject {
 public:
 	// profileBinding is a validated, non-secret identity for the active OBS
@@ -187,6 +201,10 @@ private:
 	YouTubeAccountProviderRestoreStatus restoreSavedStateUnderHeldOperationLock(
 		std::string profileBinding, std::optional<YouTubeAccountSelection> selection,
 		const YouTubeAccountProfileOperationLock &heldLock) noexcept;
+	YouTubeAccountProviderDisconnectStatus disconnectSavedStateUnderHeldOperationLock(
+		std::string profileBinding, std::optional<YouTubeAccountSelection> selection,
+		const YouTubeAccountProfileOperationLock &heldLock,
+		YouTubeAccountSelectionCommitter selectionCommitter) noexcept;
 	void externalOperationLockReleased() noexcept;
 	void markExternalOperationReleaseFailed() noexcept;
 	void shutdownAfterExternalOperationLockFailure() noexcept;

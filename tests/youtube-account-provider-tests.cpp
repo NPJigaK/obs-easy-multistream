@@ -146,7 +146,15 @@ public:
 		const YouTubeAccountProfileOperationLock &heldLock) noexcept
 	{
 		return provider_->restoreSavedStateUnderHeldOperationLock(std::move(profileBinding), std::move(selection),
-												 heldLock);
+											 heldLock);
+	}
+	YouTubeAccountProviderDisconnectStatus disconnectSavedStateUnderHeldOperationLock(
+		std::string profileBinding, std::optional<YouTubeAccountSelection> selection,
+		const YouTubeAccountProfileOperationLock &heldLock,
+		YouTubeAccountSelectionCommitter selectionCommitter) noexcept
+	{
+		return provider_->disconnectSavedStateUnderHeldOperationLock(std::move(profileBinding), std::move(selection),
+											 heldLock, std::move(selectionCommitter));
 	}
 	void markExternalOperationReleaseFailed() noexcept { provider_->markExternalOperationReleaseFailed(); }
 	void externalOperationLockReleased() noexcept { provider_->externalOperationLockReleased(); }
@@ -198,6 +206,7 @@ using easy_multistream::YouTubeAccountDiscoveryPort;
 using easy_multistream::YouTubeAccountLease;
 using easy_multistream::YouTubeAccountProviderSelectionStatus;
 using easy_multistream::YouTubeAccountProviderRestoreStatus;
+using easy_multistream::YouTubeAccountProviderDisconnectStatus;
 using easy_multistream::YouTubeAccountProviderSnapshot;
 using easy_multistream::YouTubeAccountProviderStage;
 using easy_multistream::YouTubeAccountProviderStartStatus;
@@ -1810,6 +1819,258 @@ void testHeldProfileOperationLockRestoreRejectsWrongOrUnheldLockWithoutMutation(
 	CHECK(heldLock.release());
 }
 
+void testHeldProfileOperationLockDisconnectsWithoutReleasingBorrowedLock()
+{
+	Fixture fixture;
+	connectFixture(fixture);
+	const YouTubeAccountSelection selection{"old-channel", "Old channel", "old-stream", "Old stream"};
+	YouTubeAccountProfileOperationLock heldLock;
+	CHECK(fixture.operationLockProvider->acquire(kProfileA, heldLock).acquired());
+	const int releasesBeforeDisconnect = fixture.operationLockApi.releaseCount;
+	bool committedNullSelection = false;
+	const auto before = fixture.provider->snapshot();
+
+	CHECK(fixture.provider->disconnectSavedStateUnderHeldOperationLock(
+			kProfileA, selection, heldLock,
+			[&](const std::optional<YouTubeAccountSelection> &next) {
+				committedNullSelection = !next.has_value();
+				return committedNullSelection;
+			}) == YouTubeAccountProviderDisconnectStatus::Disconnected);
+	CHECK(committedNullSelection);
+	CHECK(fixture.vault.eraseCount == 1);
+	CHECK(fixture.vault.eraseScopes.back().profileBinding == kProfileA);
+	CHECK(fixture.vault.eraseScopes.back().channelId == selection.channelId);
+	CHECK(fixture.provider->snapshot().stage == YouTubeAccountProviderStage::Idle);
+	CHECK(fixture.provider->snapshot().account.state == easy_multistream::YouTubeAccountState::Disconnected);
+	CHECK(fixture.provider->snapshot().account.channelId.empty());
+	CHECK(!fixture.provider->snapshot().account.connectionLease.has_value());
+	// The caller still owns the exact borrowed lock until it explicitly reports
+	// release; the provider must not release it from the disconnect operation.
+	CHECK(heldLock.acquired());
+	CHECK(fixture.operationLockApi.releaseCount == releasesBeforeDisconnect);
+	CHECK(heldLock.release());
+	fixture.provider->externalOperationLockReleased();
+	CHECK(fixture.operationLockApi.releaseCount == releasesBeforeDisconnect + 1);
+}
+
+void testHeldProfileOperationLockDisconnectTreatsMissingCredentialAsSuccess()
+{
+	Fixture fixture;
+	const YouTubeAccountSelection selection = savedSelection("missing-disconnect");
+	fixture.vault.forceStatus(CredentialState::Missing);
+	CHECK(fixture.provider->restoreSavedState(selection) ==
+	      YouTubeAccountProviderRestoreStatus::ReauthorizationRequired);
+
+	YouTubeAccountProfileOperationLock heldLock;
+	CHECK(fixture.operationLockProvider->acquire(kProfileA, heldLock).acquired());
+	int commitCount = 0;
+	CHECK(fixture.provider->disconnectSavedStateUnderHeldOperationLock(
+			kProfileA, selection, heldLock,
+			[&](const std::optional<YouTubeAccountSelection> &next) {
+				++commitCount;
+				return !next.has_value();
+			}) == YouTubeAccountProviderDisconnectStatus::Disconnected);
+	CHECK(commitCount == 1);
+	CHECK(fixture.vault.eraseCount == 1);
+	CHECK(fixture.provider->snapshot().stage == YouTubeAccountProviderStage::Idle);
+	CHECK(fixture.provider->snapshot().account.state == easy_multistream::YouTubeAccountState::Disconnected);
+	CHECK(heldLock.acquired());
+	CHECK(heldLock.release());
+	fixture.provider->externalOperationLockReleased();
+}
+
+void testHeldProfileOperationLockDisconnectTreatsNotFoundEraseAsSuccess()
+{
+	Fixture fixture;
+	connectFixture(fixture);
+	const YouTubeAccountSelection selection{"old-channel", "Old channel", "old-stream", "Old stream"};
+	fixture.vault.eraseError = CredentialError::NotFound;
+	YouTubeAccountProfileOperationLock heldLock;
+	CHECK(fixture.operationLockProvider->acquire(kProfileA, heldLock).acquired());
+	const int releaseCountBefore = fixture.operationLockApi.releaseCount;
+	const int closeCountBefore = fixture.operationLockApi.closeCount;
+	int commitCount = 0;
+
+	CHECK(fixture.provider->disconnectSavedStateUnderHeldOperationLock(
+			kProfileA, selection, heldLock,
+			[&](const std::optional<YouTubeAccountSelection> &next) {
+				++commitCount;
+				return !next.has_value();
+			}) == YouTubeAccountProviderDisconnectStatus::Disconnected);
+	CHECK(commitCount == 1);
+	CHECK(fixture.vault.eraseCount == 1);
+	CHECK(fixture.provider->snapshot().stage == YouTubeAccountProviderStage::Idle);
+	CHECK(fixture.provider->snapshot().account.state == easy_multistream::YouTubeAccountState::Disconnected);
+	CHECK(fixture.provider->snapshot().account.channelId.empty());
+	CHECK(fixture.provider->snapshot().account.streamId.empty());
+	CHECK(!fixture.provider->snapshot().account.connectionLease.has_value());
+	CHECK(heldLock.acquired());
+	CHECK(fixture.operationLockApi.releaseCount == releaseCountBefore);
+	CHECK(fixture.operationLockApi.closeCount == closeCountBefore);
+
+	CHECK(heldLock.release());
+	fixture.provider->externalOperationLockReleased();
+	CHECK(fixture.operationLockApi.releaseCount == releaseCountBefore + 1);
+	CHECK(fixture.operationLockApi.closeCount == closeCountBefore + 1);
+}
+
+void testHeldProfileOperationLockDisconnectWithoutSelectionSkipsCredentialStore()
+{
+	Fixture fixture;
+	YouTubeAccountProfileOperationLock heldLock;
+	CHECK(fixture.operationLockProvider->acquire(kProfileA, heldLock).acquired());
+	const auto before = fixture.provider->snapshot();
+
+	CHECK(fixture.provider->disconnectSavedStateUnderHeldOperationLock(kProfileA, std::nullopt, heldLock, {}) ==
+	      YouTubeAccountProviderDisconnectStatus::AlreadyDisconnected);
+	CHECK(fixture.vault.readCount == 0);
+	CHECK(fixture.vault.statusCount == 0);
+	CHECK(fixture.vault.eraseCount == 0);
+	CHECK(fixture.provider->snapshot().stage == YouTubeAccountProviderStage::Idle);
+	CHECK(fixture.provider->snapshot().account.state == easy_multistream::YouTubeAccountState::Disconnected);
+	CHECK(fixture.provider->snapshot().revision != before.revision);
+	CHECK(heldLock.acquired());
+	CHECK(fixture.operationLockApi.releaseCount == 0);
+	CHECK(heldLock.release());
+	fixture.provider->externalOperationLockReleased();
+}
+
+void testHeldProfileOperationLockDisconnectRejectsInvalidBindingSelectionAndLock()
+{
+	Fixture fixture;
+	connectFixture(fixture);
+	const YouTubeAccountSelection selection{"old-channel", "Old channel", "old-stream", "Old stream"};
+	YouTubeAccountProfileOperationLock heldLock;
+	CHECK(fixture.operationLockProvider->acquire(kProfileA, heldLock).acquired());
+	const auto before = fixture.provider->snapshot();
+
+	CHECK(fixture.provider->disconnectSavedStateUnderHeldOperationLock(
+			kProfileB, selection, heldLock,
+			[](const std::optional<YouTubeAccountSelection> &) { return true; }) ==
+	      YouTubeAccountProviderDisconnectStatus::InvalidProfileBinding);
+	CHECK(fixture.provider->snapshot().revision == before.revision);
+	CHECK(fixture.vault.eraseCount == 0);
+
+	YouTubeAccountSelection wrongSelection = selection;
+	wrongSelection.channelId = "another-channel";
+	CHECK(fixture.provider->disconnectSavedStateUnderHeldOperationLock(
+			kProfileA, wrongSelection, heldLock,
+			[](const std::optional<YouTubeAccountSelection> &) { return true; }) ==
+	      YouTubeAccountProviderDisconnectStatus::InvalidSelection);
+	CHECK(fixture.provider->snapshot().revision == before.revision);
+	CHECK(fixture.vault.eraseCount == 0);
+
+	YouTubeAccountProfileOperationLock unheldLock;
+	CHECK(fixture.provider->disconnectSavedStateUnderHeldOperationLock(
+			kProfileA, selection, unheldLock,
+			[](const std::optional<YouTubeAccountSelection> &) { return true; }) ==
+	      YouTubeAccountProviderDisconnectStatus::OperationFailed);
+	CHECK(fixture.provider->snapshot().revision == before.revision);
+	CHECK(fixture.vault.eraseCount == 0);
+	CHECK(heldLock.acquired());
+	CHECK(heldLock.release());
+	fixture.provider->externalOperationLockReleased();
+}
+
+void testHeldProfileOperationLockDisconnectEraseFailurePreservesUsableState()
+{
+	Fixture fixture;
+	connectFixture(fixture);
+	const YouTubeAccountSelection selection{"old-channel", "Old channel", "old-stream", "Old stream"};
+	fixture.vault.eraseError = CredentialError::Unavailable;
+	YouTubeAccountProfileOperationLock heldLock;
+	CHECK(fixture.operationLockProvider->acquire(kProfileA, heldLock).acquired());
+	const auto before = fixture.provider->snapshot();
+	int commitCount = 0;
+
+	CHECK(fixture.provider->disconnectSavedStateUnderHeldOperationLock(
+			kProfileA, selection, heldLock,
+			[&](const std::optional<YouTubeAccountSelection> &) {
+				++commitCount;
+				return true;
+			}) == YouTubeAccountProviderDisconnectStatus::CredentialUnavailable);
+	const auto after = fixture.provider->snapshot();
+	CHECK(commitCount == 0);
+	CHECK(after.revision == before.revision);
+	CHECK(after.stage == before.stage);
+	CHECK(after.account.state == before.account.state);
+	CHECK(after.account.channelId == before.account.channelId);
+	CHECK(after.account.streamId == before.account.streamId);
+	CHECK(after.account.connectionLease == before.account.connectionLease);
+	CHECK(!fixture.vault.stored.empty());
+	CHECK(heldLock.acquired());
+	CHECK(heldLock.release());
+	fixture.provider->externalOperationLockReleased();
+}
+
+void testHeldProfileOperationLockDisconnectCommitFailureFailsClosedWithoutTokenRestore()
+{
+	Fixture fixture;
+	connectFixture(fixture);
+	const YouTubeAccountSelection selection{"old-channel", "Old channel", "old-stream", "Old stream"};
+	YouTubeAccountProfileOperationLock heldLock;
+	CHECK(fixture.operationLockProvider->acquire(kProfileA, heldLock).acquired());
+
+	CHECK(fixture.provider->disconnectSavedStateUnderHeldOperationLock(
+			kProfileA, selection, heldLock,
+			[](const std::optional<YouTubeAccountSelection> &) { return false; }) ==
+	      YouTubeAccountProviderDisconnectStatus::ProfileSaveFailed);
+	const auto failed = fixture.provider->snapshot();
+	CHECK(failed.stage == YouTubeAccountProviderStage::Unavailable);
+	CHECK(failed.account.state == easy_multistream::YouTubeAccountState::Unavailable);
+	CHECK(failed.account.channelId == selection.channelId);
+	CHECK(failed.account.streamId == selection.streamId);
+	CHECK(!failed.account.connectionLease.has_value());
+	CHECK(fixture.vault.eraseCount == 1);
+	CHECK(fixture.vault.stored.empty());
+	CHECK(heldLock.acquired());
+	CHECK(heldLock.release());
+	fixture.provider->externalOperationLockReleased();
+}
+
+void testHeldProfileOperationLockDisconnectPreflightsCommitterAndLifecycleGuards()
+{
+	Fixture fixture;
+	connectFixture(fixture);
+	const YouTubeAccountSelection selection{"old-channel", "Old channel", "old-stream", "Old stream"};
+	YouTubeAccountProfileOperationLock heldLock;
+	CHECK(fixture.operationLockProvider->acquire(kProfileA, heldLock).acquired());
+	const auto before = fixture.provider->snapshot();
+
+	CHECK(fixture.provider->disconnectSavedStateUnderHeldOperationLock(kProfileA, selection, heldLock, {}) ==
+	      YouTubeAccountProviderDisconnectStatus::InvalidSelectionCommitter);
+	CHECK(fixture.vault.eraseCount == 0);
+	CHECK(fixture.provider->snapshot().revision == before.revision);
+	CHECK(heldLock.acquired());
+	CHECK(heldLock.release());
+	fixture.provider->externalOperationLockReleased();
+
+	{
+		Fixture busy;
+		YouTubeAccountProfileOperationLock busyLock;
+		CHECK(busy.operationLockProvider->acquire(kProfileA, busyLock).acquired());
+		busy.vault.forceStatus(CredentialState::Present);
+		CHECK(busy.provider->restoreSavedStateUnderHeldOperationLock(
+				kProfileA, savedSelection("busy-disconnect"), busyLock) ==
+		      YouTubeAccountProviderRestoreStatus::Configured);
+		CHECK(busy.provider->disconnectSavedStateUnderHeldOperationLock(
+				kProfileA, savedSelection("busy-disconnect"), busyLock,
+				[](const std::optional<YouTubeAccountSelection> &) { return true; }) ==
+		      YouTubeAccountProviderDisconnectStatus::Busy);
+		CHECK(busy.vault.eraseCount == 0);
+		CHECK(busyLock.release());
+		busy.provider->externalOperationLockReleased();
+	}
+
+	Fixture closed;
+	CHECK(closed.provider->shutdown());
+	YouTubeAccountProfileOperationLock closedLock;
+	CHECK(closed.operationLockProvider->acquire(kProfileA, closedLock).acquired());
+	CHECK(closed.provider->disconnectSavedStateUnderHeldOperationLock(
+			kProfileA, std::nullopt, closedLock, {}) == YouTubeAccountProviderDisconnectStatus::Closed);
+	CHECK(closedLock.release());
+}
+
 void testExternalOperationReleaseFailureCanFailProviderClosed()
 {
 	Fixture fixture;
@@ -2003,6 +2264,14 @@ int main(int argc, char **argv)
 	testHeldProfileOperationLockRestoreDoesNotReacquireOrRelease();
 	testHeldProfileOperationLockRestoreSkipsCredentialForMissingSelection();
 	testHeldProfileOperationLockRestoreRejectsWrongOrUnheldLockWithoutMutation();
+	testHeldProfileOperationLockDisconnectsWithoutReleasingBorrowedLock();
+	testHeldProfileOperationLockDisconnectTreatsMissingCredentialAsSuccess();
+	testHeldProfileOperationLockDisconnectTreatsNotFoundEraseAsSuccess();
+	testHeldProfileOperationLockDisconnectWithoutSelectionSkipsCredentialStore();
+	testHeldProfileOperationLockDisconnectRejectsInvalidBindingSelectionAndLock();
+	testHeldProfileOperationLockDisconnectEraseFailurePreservesUsableState();
+	testHeldProfileOperationLockDisconnectCommitFailureFailsClosedWithoutTokenRestore();
+	testHeldProfileOperationLockDisconnectPreflightsCommitterAndLifecycleGuards();
 	testExternalOperationReleaseFailureCanFailProviderClosed();
 	testProfileOperationLockIsNotNeededForNonCredentialRestore();
 	testProfileOperationLockReleasesOnLifecycleTermination();

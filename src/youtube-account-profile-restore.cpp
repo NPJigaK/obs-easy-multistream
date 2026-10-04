@@ -66,6 +66,36 @@ YouTubeAccountProfileRestoreCoordinator::mapProviderStatus(YouTubeAccountProvide
 	return YouTubeAccountProfileRestoreStatus::OperationFailed;
 }
 
+YouTubeAccountProfileDisconnectStatus YouTubeAccountProfileRestoreCoordinator::mapProviderStatus(
+	YouTubeAccountProviderDisconnectStatus status) noexcept
+{
+	switch (status) {
+	case YouTubeAccountProviderDisconnectStatus::Disconnected:
+		return YouTubeAccountProfileDisconnectStatus::Disconnected;
+	case YouTubeAccountProviderDisconnectStatus::AlreadyDisconnected:
+		return YouTubeAccountProfileDisconnectStatus::AlreadyDisconnected;
+	case YouTubeAccountProviderDisconnectStatus::CredentialUnavailable:
+		return YouTubeAccountProfileDisconnectStatus::CredentialUnavailable;
+	case YouTubeAccountProviderDisconnectStatus::ProfileSaveFailed:
+		return YouTubeAccountProfileDisconnectStatus::ProfileSaveFailed;
+	case YouTubeAccountProviderDisconnectStatus::InvalidSelectionCommitter:
+		return YouTubeAccountProfileDisconnectStatus::OperationFailed;
+	case YouTubeAccountProviderDisconnectStatus::WrongThread:
+		return YouTubeAccountProfileDisconnectStatus::WrongThread;
+	case YouTubeAccountProviderDisconnectStatus::Busy:
+		return YouTubeAccountProfileDisconnectStatus::Busy;
+	case YouTubeAccountProviderDisconnectStatus::Closed:
+		return YouTubeAccountProfileDisconnectStatus::Closed;
+	case YouTubeAccountProviderDisconnectStatus::InvalidProfileBinding:
+		return YouTubeAccountProfileDisconnectStatus::InvalidProfileBinding;
+	case YouTubeAccountProviderDisconnectStatus::InvalidSelection:
+		return YouTubeAccountProfileDisconnectStatus::InvalidSelection;
+	case YouTubeAccountProviderDisconnectStatus::OperationFailed:
+		return YouTubeAccountProfileDisconnectStatus::OperationFailed;
+	}
+	return YouTubeAccountProfileDisconnectStatus::OperationFailed;
+}
+
 void YouTubeAccountProfileRestoreCoordinator::invalidateAfterFailure() noexcept
 {
 	context_.invalidate();
@@ -77,6 +107,17 @@ void YouTubeAccountProfileRestoreCoordinator::clearReturnedProfile(
 {
 	// The context has already been invalidated. Do not let a caller accidentally
 	// consume the selection copied just before a profile race or cleanup failure.
+	result.profile.status = YouTubeAccountProfileContext::LoadStatus::Unavailable;
+	result.profile.snapshot.generation = 0;
+	result.profile.snapshot.profileBinding.clear();
+	result.profile.snapshot.connectionMode = YouTubeConnectionMode::Manual;
+	result.profile.snapshot.selection.reset();
+	result.profile.snapshot.settingsStatus = SettingsLoadStatus::Unavailable;
+}
+
+void YouTubeAccountProfileRestoreCoordinator::clearReturnedProfile(
+	YouTubeAccountProfileDisconnectResult &result) noexcept
+{
 	result.profile.status = YouTubeAccountProfileContext::LoadStatus::Unavailable;
 	result.profile.snapshot.generation = 0;
 	result.profile.snapshot.profileBinding.clear();
@@ -157,6 +198,49 @@ void YouTubeAccountProfileRestoreCoordinator::finishTransaction(
 	result.providerStatus = YouTubeAccountProviderRestoreStatus::OperationFailed;
 }
 
+void YouTubeAccountProfileRestoreCoordinator::finishTransaction(
+	YouTubeAccountProfileDisconnectResult &result) noexcept
+{
+	assert(transactionActive_);
+
+	bool pendingInvalidation = invalidationRequested_;
+	bool pendingShutdown = shutdownRequested_;
+	invalidationRequested_ = false;
+	shutdownRequested_ = false;
+
+	bool cleanupSucceeded = true;
+	if (pendingInvalidation || pendingShutdown) {
+		// Keep transactionActive_ set while cleanup releases the profile mutex.
+		// A nested lifecycle request is therefore deferred instead of releasing
+		// an in-flight transaction from inside one of its callbacks.
+		cleanupSucceeded = invalidateNow();
+	}
+
+	pendingInvalidation = pendingInvalidation || invalidationRequested_;
+	pendingShutdown = pendingShutdown || shutdownRequested_;
+	invalidationRequested_ = false;
+	shutdownRequested_ = false;
+	transactionActive_ = false;
+
+	if (!pendingInvalidation && !pendingShutdown) {
+		return;
+	}
+
+	clearReturnedProfile(result);
+	if (!cleanupSucceeded) {
+		result.status = YouTubeAccountProfileDisconnectStatus::OperationFailed;
+		result.providerStatus = YouTubeAccountProviderDisconnectStatus::OperationFailed;
+		return;
+	}
+	if (pendingShutdown) {
+		result.status = YouTubeAccountProfileDisconnectStatus::Closed;
+		result.providerStatus = YouTubeAccountProviderDisconnectStatus::Closed;
+		return;
+	}
+	result.status = YouTubeAccountProfileDisconnectStatus::ProfileChanged;
+	result.providerStatus = YouTubeAccountProviderDisconnectStatus::OperationFailed;
+}
+
 bool YouTubeAccountProfileRestoreCoordinator::releaseAfterTransaction(
 	YouTubeAccountProfileRestoreResult &result) noexcept
 {
@@ -173,6 +257,22 @@ bool YouTubeAccountProfileRestoreCoordinator::releaseAfterTransaction(
 	clearReturnedProfile(result);
 	result.status = YouTubeAccountProfileRestoreStatus::OperationFailed;
 	result.providerStatus = YouTubeAccountProviderRestoreStatus::OperationFailed;
+	return false;
+}
+
+bool YouTubeAccountProfileRestoreCoordinator::releaseAfterTransaction(
+	YouTubeAccountProfileDisconnectResult &result) noexcept
+{
+	if (operationLock_.release()) {
+		provider_.externalOperationLockReleased();
+		return true;
+	}
+
+	context_.invalidate();
+	provider_.markExternalOperationReleaseFailed();
+	clearReturnedProfile(result);
+	result.status = YouTubeAccountProfileDisconnectStatus::OperationFailed;
+	result.providerStatus = YouTubeAccountProviderDisconnectStatus::OperationFailed;
 	return false;
 }
 
@@ -446,6 +546,346 @@ YouTubeAccountProfileRestoreResult YouTubeAccountProfileRestoreCoordinator::rest
 		} else {
 			result.status = YouTubeAccountProfileRestoreStatus::OperationFailed;
 			result.providerStatus = YouTubeAccountProviderRestoreStatus::OperationFailed;
+		}
+		finishTransaction(result);
+		return result;
+	}
+}
+
+YouTubeAccountProfileDisconnectResult YouTubeAccountProfileRestoreCoordinator::disconnectLocal() noexcept
+{
+	YouTubeAccountProfileDisconnectResult result;
+	if (!onOwnerThread()) {
+		result.status = YouTubeAccountProfileDisconnectStatus::WrongThread;
+		result.providerStatus = YouTubeAccountProviderDisconnectStatus::WrongThread;
+		return result;
+	}
+	if (closed_) {
+		result.status = YouTubeAccountProfileDisconnectStatus::Closed;
+		result.providerStatus = YouTubeAccountProviderDisconnectStatus::Closed;
+		return result;
+	}
+	if (transactionActive_) {
+		result.status = YouTubeAccountProfileDisconnectStatus::Busy;
+		result.providerStatus = YouTubeAccountProviderDisconnectStatus::Busy;
+		return result;
+	}
+	transactionActive_ = true;
+
+	try {
+		if (provider_.snapshot().stage == YouTubeAccountProviderStage::Closed) {
+			result.status = YouTubeAccountProfileDisconnectStatus::Closed;
+			result.providerStatus = YouTubeAccountProviderDisconnectStatus::Closed;
+			finishTransaction(result);
+			return result;
+		}
+		if (operationLock_.cleanupPending()) {
+			result.status = YouTubeAccountProfileDisconnectStatus::Busy;
+			result.providerStatus = YouTubeAccountProviderDisconnectStatus::Busy;
+			finishTransaction(result);
+			return result;
+		}
+
+		// As with restore(), this is the only pre-lock profile read. It is an
+		// opaque binding and does not touch settings or credentials.
+		const auto candidateBinding = context_.currentProfileBinding();
+		if (lifecycleRequestPending()) {
+			finishTransaction(result);
+			return result;
+		}
+		if (!candidateBinding.has_value()) {
+			context_.invalidate();
+			(void)provider_.invalidateContext();
+			result.status = YouTubeAccountProfileDisconnectStatus::ProfileUnavailable;
+			result.providerStatus = YouTubeAccountProviderDisconnectStatus::OperationFailed;
+			finishTransaction(result);
+			return result;
+		}
+
+		const auto lockResult = lockProvider_.acquire(*candidateBinding, operationLock_);
+		result.recovered = lockResult.recovered();
+		if (lifecycleRequestPending()) {
+			finishTransaction(result);
+			return result;
+		}
+		if (!lockResult.acquired()) {
+			switch (lockResult.status) {
+			case YouTubeAccountProfileOperationLockStatus::Busy:
+				result.status = YouTubeAccountProfileDisconnectStatus::Busy;
+				result.providerStatus = YouTubeAccountProviderDisconnectStatus::Busy;
+				break;
+			case YouTubeAccountProfileOperationLockStatus::InvalidProfileBinding:
+				result.status = YouTubeAccountProfileDisconnectStatus::InvalidProfileBinding;
+				result.providerStatus = YouTubeAccountProviderDisconnectStatus::InvalidProfileBinding;
+				break;
+			case YouTubeAccountProfileOperationLockStatus::Unavailable:
+				result.status = YouTubeAccountProfileDisconnectStatus::Unavailable;
+				result.providerStatus = YouTubeAccountProviderDisconnectStatus::OperationFailed;
+				break;
+			case YouTubeAccountProfileOperationLockStatus::Acquired:
+			case YouTubeAccountProfileOperationLockStatus::Recovered:
+				break;
+			}
+			finishTransaction(result);
+			return result;
+		}
+
+		if (!operationLock_.acquiredFor(*candidateBinding)) {
+			invalidateAfterFailure();
+			clearReturnedProfile(result);
+			result.status = YouTubeAccountProfileDisconnectStatus::OperationFailed;
+			result.providerStatus = YouTubeAccountProviderDisconnectStatus::OperationFailed;
+			releaseAfterTransaction(result);
+			finishTransaction(result);
+			return result;
+		}
+
+		const auto lockedBinding = context_.currentProfileBinding();
+		if (lifecycleRequestPending()) {
+			finishTransaction(result);
+			return result;
+		}
+		if (!lockedBinding.has_value() || *lockedBinding != *candidateBinding) {
+			context_.invalidate();
+			(void)provider_.invalidateContext();
+			clearReturnedProfile(result);
+			result.status = lockedBinding.has_value() ? YouTubeAccountProfileDisconnectStatus::ProfileChanged
+									 : YouTubeAccountProfileDisconnectStatus::ProfileUnavailable;
+			result.providerStatus = YouTubeAccountProviderDisconnectStatus::OperationFailed;
+			releaseAfterTransaction(result);
+			finishTransaction(result);
+			return result;
+		}
+
+		// Load the settings while the exact profile lease is held. This is also
+		// the preflight that prevents a malformed/future/manual profile from
+		// reaching the credential eraser.
+		result.profile = context_.load();
+		if (lifecycleRequestPending()) {
+			finishTransaction(result);
+			return result;
+		}
+		const auto postLoadBinding = context_.currentProfileBinding();
+		if (lifecycleRequestPending()) {
+			finishTransaction(result);
+			return result;
+		}
+		if (!postLoadBinding.has_value() || *postLoadBinding != *candidateBinding) {
+			context_.invalidate();
+			(void)provider_.invalidateContext();
+			clearReturnedProfile(result);
+			result.status = postLoadBinding.has_value() ? YouTubeAccountProfileDisconnectStatus::ProfileChanged
+									   : YouTubeAccountProfileDisconnectStatus::ProfileUnavailable;
+			result.providerStatus = YouTubeAccountProviderDisconnectStatus::OperationFailed;
+			releaseAfterTransaction(result);
+			finishTransaction(result);
+			return result;
+		}
+		const auto &loadedSnapshot = result.profile.snapshot;
+		if (loadedSnapshot.profileBinding.empty()) {
+			context_.invalidate();
+			(void)provider_.invalidateContext();
+			clearReturnedProfile(result);
+			result.status = YouTubeAccountProfileDisconnectStatus::ProfileUnavailable;
+			result.providerStatus = YouTubeAccountProviderDisconnectStatus::OperationFailed;
+			releaseAfterTransaction(result);
+			finishTransaction(result);
+			return result;
+		}
+		if (loadedSnapshot.profileBinding != *candidateBinding) {
+			context_.invalidate();
+			(void)provider_.invalidateContext();
+			clearReturnedProfile(result);
+			result.status = YouTubeAccountProfileDisconnectStatus::ProfileChanged;
+			result.providerStatus = YouTubeAccountProviderDisconnectStatus::OperationFailed;
+			releaseAfterTransaction(result);
+			finishTransaction(result);
+			return result;
+		}
+
+		switch (result.profile.status) {
+		case YouTubeAccountProfileContext::LoadStatus::ProfileUnavailable:
+			context_.invalidate();
+			(void)provider_.invalidateContext();
+			clearReturnedProfile(result);
+			result.status = YouTubeAccountProfileDisconnectStatus::ProfileUnavailable;
+			result.providerStatus = YouTubeAccountProviderDisconnectStatus::OperationFailed;
+			releaseAfterTransaction(result);
+			finishTransaction(result);
+			return result;
+		case YouTubeAccountProfileContext::LoadStatus::InvalidSettings:
+			(void)provider_.invalidateContext();
+			result.status = YouTubeAccountProfileDisconnectStatus::InvalidSettings;
+			result.providerStatus = YouTubeAccountProviderDisconnectStatus::OperationFailed;
+			releaseAfterTransaction(result);
+			finishTransaction(result);
+			return result;
+		case YouTubeAccountProfileContext::LoadStatus::UnsupportedFutureSettings:
+			(void)provider_.invalidateContext();
+			result.status = YouTubeAccountProfileDisconnectStatus::UnsupportedFutureSettings;
+			result.providerStatus = YouTubeAccountProviderDisconnectStatus::OperationFailed;
+			releaseAfterTransaction(result);
+			finishTransaction(result);
+			return result;
+		case YouTubeAccountProfileContext::LoadStatus::Unavailable:
+			(void)provider_.invalidateContext();
+			result.status = YouTubeAccountProfileDisconnectStatus::Unavailable;
+			result.providerStatus = YouTubeAccountProviderDisconnectStatus::OperationFailed;
+			releaseAfterTransaction(result);
+			finishTransaction(result);
+			return result;
+		case YouTubeAccountProfileContext::LoadStatus::Loaded:
+		case YouTubeAccountProfileContext::LoadStatus::Defaults:
+		case YouTubeAccountProfileContext::LoadStatus::SetupRequired:
+			break;
+		}
+
+		if (loadedSnapshot.connectionMode != YouTubeConnectionMode::Account) {
+			(void)provider_.invalidateContext();
+			result.status = YouTubeAccountProfileDisconnectStatus::NotAccountMode;
+			result.providerStatus = YouTubeAccountProviderDisconnectStatus::OperationFailed;
+			releaseAfterTransaction(result);
+			finishTransaction(result);
+			return result;
+		}
+
+		const std::uint64_t expectedGeneration = loadedSnapshot.generation;
+		const std::string expectedBinding = *candidateBinding;
+		const bool hadSelection = loadedSnapshot.selection.has_value();
+		std::optional<YouTubeAccountProfileContext::CommitResult> selectionCommit;
+		const auto transactionCommitter =
+			[this, expectedGeneration, expectedBinding,
+			 &selectionCommit](const std::optional<YouTubeAccountSelection> &) noexcept {
+				try {
+					selectionCommit =
+						context_.commitSelection(expectedGeneration, expectedBinding, std::nullopt);
+					return selectionCommit->status == YouTubeAccountProfileContext::CommitStatus::Committed;
+				} catch (...) {
+					return false;
+				}
+			};
+
+		result.providerStatus = provider_.disconnectSavedStateUnderHeldOperationLock(
+			*candidateBinding, loadedSnapshot.selection, operationLock_, transactionCommitter);
+		result.status = mapProviderStatus(result.providerStatus);
+		if (result.providerStatus == YouTubeAccountProviderDisconnectStatus::ProfileSaveFailed &&
+		    selectionCommit.has_value()) {
+			switch (selectionCommit->status) {
+			case YouTubeAccountProfileContext::CommitStatus::Stale:
+				result.status = YouTubeAccountProfileDisconnectStatus::ProfileChanged;
+				break;
+			case YouTubeAccountProfileContext::CommitStatus::NotAccountMode:
+				result.status = YouTubeAccountProfileDisconnectStatus::NotAccountMode;
+				break;
+			case YouTubeAccountProfileContext::CommitStatus::ProfileUnavailable:
+				result.status = YouTubeAccountProfileDisconnectStatus::ProfileUnavailable;
+				break;
+			case YouTubeAccountProfileContext::CommitStatus::InvalidSettings:
+				result.status = YouTubeAccountProfileDisconnectStatus::InvalidSettings;
+				break;
+			case YouTubeAccountProfileContext::CommitStatus::UnsupportedFutureSettings:
+				result.status = YouTubeAccountProfileDisconnectStatus::UnsupportedFutureSettings;
+				break;
+			case YouTubeAccountProfileContext::CommitStatus::Unavailable:
+				result.status = YouTubeAccountProfileDisconnectStatus::Unavailable;
+				break;
+			case YouTubeAccountProfileContext::CommitStatus::SaveFailed:
+				result.status = YouTubeAccountProfileDisconnectStatus::ProfileSaveFailed;
+				break;
+			case YouTubeAccountProfileContext::CommitStatus::Committed:
+			case YouTubeAccountProfileContext::CommitStatus::InvalidSelection:
+				result.status = YouTubeAccountProfileDisconnectStatus::OperationFailed;
+				break;
+			}
+		}
+		if (lifecycleRequestPending()) {
+			finishTransaction(result);
+			return result;
+		}
+
+		// The provider must have completed the profile commit before reporting a
+		// successful disconnect. Reject a buggy implementation that erases a
+		// credential but leaves the old selection persisted.
+		const auto committedSnapshot = context_.snapshot();
+		const bool providerDisconnectApplied =
+			result.providerStatus == YouTubeAccountProviderDisconnectStatus::Disconnected ||
+			result.providerStatus == YouTubeAccountProviderDisconnectStatus::AlreadyDisconnected;
+		if (providerDisconnectApplied &&
+		    (committedSnapshot.generation != expectedGeneration ||
+		     committedSnapshot.profileBinding != expectedBinding || committedSnapshot.selection.has_value())) {
+			context_.invalidate();
+			clearReturnedProfile(result);
+			result.status = YouTubeAccountProfileDisconnectStatus::OperationFailed;
+			result.providerStatus = YouTubeAccountProviderDisconnectStatus::OperationFailed;
+			if (releaseAfterTransaction(result)) {
+				(void)provider_.invalidateContext();
+			}
+			finishTransaction(result);
+			return result;
+		}
+
+		const auto finalBinding = context_.currentProfileBinding();
+		if (lifecycleRequestPending()) {
+			finishTransaction(result);
+			return result;
+		}
+		if (!finalBinding.has_value() || *finalBinding != *candidateBinding) {
+			context_.invalidate();
+			clearReturnedProfile(result);
+			result.status = finalBinding.has_value() ? YouTubeAccountProfileDisconnectStatus::ProfileChanged
+									: YouTubeAccountProfileDisconnectStatus::ProfileUnavailable;
+			result.providerStatus = YouTubeAccountProviderDisconnectStatus::OperationFailed;
+			if (releaseAfterTransaction(result)) {
+				(void)provider_.invalidateContext();
+			}
+			finishTransaction(result);
+			return result;
+		}
+
+		if (!providerDisconnectApplied) {
+			if (result.providerStatus == YouTubeAccountProviderDisconnectStatus::CredentialUnavailable) {
+				// No durable state changed: the exact credential erase failed before
+				// the profile committer ran. Keep the freshly loaded profile and the
+				// provider's usable state so the caller can retry without an
+				// intervening restore. Native lock cleanup can still turn this into a
+				// fail-closed OperationFailed result.
+				releaseAfterTransaction(result);
+				finishTransaction(result);
+				return result;
+			}
+			if (releaseAfterTransaction(result)) {
+				context_.invalidate();
+				clearReturnedProfile(result);
+				(void)provider_.invalidateContext();
+			}
+			finishTransaction(result);
+			return result;
+		}
+
+		// Return the post-commit account setup state, never the selection that was
+		// loaded before the transaction. This also makes the invariant explicit
+		// for callers that retain the returned value after the lock is released.
+		result.profile.snapshot = committedSnapshot;
+		result.profile.snapshot.selection.reset();
+		result.profile.status = YouTubeAccountProfileContext::LoadStatus::SetupRequired;
+		if (!hadSelection) {
+			result.status = YouTubeAccountProfileDisconnectStatus::AlreadyDisconnected;
+		} else {
+			result.status = YouTubeAccountProfileDisconnectStatus::Disconnected;
+		}
+		releaseAfterTransaction(result);
+		finishTransaction(result);
+		return result;
+	} catch (...) {
+		if (operationLock_.cleanupPending()) {
+			invalidateAfterFailure();
+			clearReturnedProfile(result);
+			result.status = YouTubeAccountProfileDisconnectStatus::OperationFailed;
+			result.providerStatus = YouTubeAccountProviderDisconnectStatus::OperationFailed;
+			releaseAfterTransaction(result);
+		} else {
+			result.status = YouTubeAccountProfileDisconnectStatus::OperationFailed;
+			result.providerStatus = YouTubeAccountProviderDisconnectStatus::OperationFailed;
 		}
 		finishTransaction(result);
 		return result;

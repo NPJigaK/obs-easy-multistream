@@ -91,6 +91,57 @@ bool YouTubeAccountRuntimeOwner::isAcceptedRestore(const YouTubeAccountProfileRe
 	       result.status == YouTubeAccountProfileRestoreStatus::CredentialUnavailable;
 }
 
+bool YouTubeAccountRuntimeOwner::isAcceptedDisconnect(
+	const YouTubeAccountProfileDisconnectResult &result) noexcept
+{
+	// The disconnect transaction returns the post-commit account snapshot.  Do
+	// not accept a status alone: accepting a stale/cleared snapshot here would
+	// let a later selection commit use the wrong profile generation.
+	if (result.status != YouTubeAccountProfileDisconnectStatus::Disconnected &&
+	    result.status != YouTubeAccountProfileDisconnectStatus::AlreadyDisconnected) {
+		return false;
+	}
+	if (result.profile.status != YouTubeAccountProfileContext::LoadStatus::SetupRequired) {
+		return false;
+	}
+	const auto &snapshot = result.profile.snapshot;
+	return isUsableProfile(snapshot) && !snapshot.selection.has_value();
+}
+
+YouTubeAccountProfileRestoreStatus YouTubeAccountRuntimeOwner::mapDisconnectStatus(
+	YouTubeAccountProfileDisconnectStatus status) const noexcept
+{
+	switch (status) {
+	case YouTubeAccountProfileDisconnectStatus::Disconnected:
+	case YouTubeAccountProfileDisconnectStatus::AlreadyDisconnected:
+		return YouTubeAccountProfileRestoreStatus::SetupRequired;
+	case YouTubeAccountProfileDisconnectStatus::NotAccountMode:
+		return YouTubeAccountProfileRestoreStatus::NotAccountMode;
+	case YouTubeAccountProfileDisconnectStatus::ProfileUnavailable:
+		return YouTubeAccountProfileRestoreStatus::ProfileUnavailable;
+	case YouTubeAccountProfileDisconnectStatus::InvalidSettings:
+		return YouTubeAccountProfileRestoreStatus::InvalidSettings;
+	case YouTubeAccountProfileDisconnectStatus::UnsupportedFutureSettings:
+		return YouTubeAccountProfileRestoreStatus::UnsupportedFutureSettings;
+	case YouTubeAccountProfileDisconnectStatus::ProfileChanged:
+		return YouTubeAccountProfileRestoreStatus::ProfileChanged;
+	case YouTubeAccountProfileDisconnectStatus::Busy:
+		return restoreStatus_;
+	case YouTubeAccountProfileDisconnectStatus::WrongThread:
+		return restoreStatus_;
+	case YouTubeAccountProfileDisconnectStatus::Closed:
+		return YouTubeAccountProfileRestoreStatus::Closed;
+	case YouTubeAccountProfileDisconnectStatus::InvalidProfileBinding:
+	case YouTubeAccountProfileDisconnectStatus::InvalidSelection:
+	case YouTubeAccountProfileDisconnectStatus::CredentialUnavailable:
+	case YouTubeAccountProfileDisconnectStatus::ProfileSaveFailed:
+	case YouTubeAccountProfileDisconnectStatus::Unavailable:
+	case YouTubeAccountProfileDisconnectStatus::OperationFailed:
+		return YouTubeAccountProfileRestoreStatus::OperationFailed;
+	}
+	return YouTubeAccountProfileRestoreStatus::OperationFailed;
+}
+
 void YouTubeAccountRuntimeOwner::clearRestoredBinding() noexcept
 {
 	restored_ = false;
@@ -130,6 +181,65 @@ YouTubeAccountProfileRestoreResult YouTubeAccountRuntimeOwner::restoreActiveProf
 		result.providerStatus = YouTubeAccountProviderRestoreStatus::OperationFailed;
 	}
 	return result;
+}
+
+YouTubeAccountProfileDisconnectResult YouTubeAccountRuntimeOwner::disconnectActiveProfile() noexcept
+{
+	YouTubeAccountProfileDisconnectResult result;
+	if (!onOwnerThread()) {
+		result.status = YouTubeAccountProfileDisconnectStatus::WrongThread;
+		result.providerStatus = YouTubeAccountProviderDisconnectStatus::WrongThread;
+		return result;
+	}
+	if (closed_ || restoreCoordinator_ == nullptr) {
+		result.status = YouTubeAccountProfileDisconnectStatus::Closed;
+		result.providerStatus = YouTubeAccountProviderDisconnectStatus::Closed;
+		return result;
+	}
+
+	try {
+		result = restoreCoordinator_->disconnectLocal();
+		// Busy and wrong-thread are non-mutating outcomes. In particular, do not
+		// overwrite a valid restored generation with a transient lock conflict.
+		if (result.status == YouTubeAccountProfileDisconnectStatus::Busy ||
+		    result.status == YouTubeAccountProfileDisconnectStatus::WrongThread) {
+			return result;
+		}
+
+		if (isAcceptedDisconnect(result)) {
+			const auto &snapshot = result.profile.snapshot;
+			restored_ = true;
+			restoredGeneration_ = snapshot.generation;
+			restoredBinding_ = snapshot.profileBinding;
+			restoreStatus_ = YouTubeAccountProfileRestoreStatus::SetupRequired;
+			return result;
+		}
+		if (result.status == YouTubeAccountProfileDisconnectStatus::CredentialUnavailable &&
+		    isUsableProfile(result.profile.snapshot) && result.profile.snapshot.selection.has_value()) {
+			// Credential deletion failed before any durable mutation. Rebind the
+			// owner to the generation loaded by the failed transaction and keep the
+			// previous connection status so the same action can be retried safely.
+			restored_ = true;
+			restoredGeneration_ = result.profile.snapshot.generation;
+			restoredBinding_ = result.profile.snapshot.profileBinding;
+			return result;
+		}
+
+		// A closed coordinator is terminal. This can only normally happen after
+		// shutdown(), but preserve the invariant if a lower layer closed first.
+		if (result.status == YouTubeAccountProfileDisconnectStatus::Closed) {
+			closed_ = true;
+		}
+		clearRestoredBinding();
+		restoreStatus_ = mapDisconnectStatus(result.status);
+		return result;
+	} catch (...) {
+		clearRestoredBinding();
+		restoreStatus_ = YouTubeAccountProfileRestoreStatus::OperationFailed;
+		result.status = YouTubeAccountProfileDisconnectStatus::OperationFailed;
+		result.providerStatus = YouTubeAccountProviderDisconnectStatus::OperationFailed;
+		return result;
+	}
 }
 
 bool YouTubeAccountRuntimeOwner::invalidateForProfileChange() noexcept

@@ -31,6 +31,11 @@ public:
 	{
 		return owner.commitSelection(selection);
 	}
+
+	static YouTubeAccountProfileDisconnectResult disconnect(YouTubeAccountRuntimeOwner &owner) noexcept
+	{
+		return owner.disconnectActiveProfile();
+	}
 };
 
 class OwnerTestLockApi final : public YouTubeAccountProfileOperationLockApi {
@@ -45,6 +50,12 @@ public:
 
 	DWORD wait(HANDLE, DWORD, DWORD &error) noexcept override
 	{
+		if (nextWaitResult != WAIT_OBJECT_0) {
+			const DWORD result = nextWaitResult;
+			nextWaitResult = WAIT_OBJECT_0;
+			error = result == WAIT_FAILED ? ERROR_GEN_FAILURE : ERROR_SUCCESS;
+			return result;
+		}
 		error = ERROR_SUCCESS;
 		return WAIT_OBJECT_0;
 	}
@@ -76,6 +87,7 @@ public:
 	bool closeResult = true;
 	DWORD releaseError = ERROR_ACCESS_DENIED;
 	DWORD closeError = ERROR_INVALID_HANDLE;
+	DWORD nextWaitResult = WAIT_OBJECT_0;
 	int releaseCount = 0;
 	int closeCount = 0;
 
@@ -161,6 +173,11 @@ public:
 			error = ERROR_INVALID_PARAMETER;
 			return false;
 		}
+		++eraseCount;
+		if (!eraseResult) {
+			error = eraseError;
+			return false;
+		}
 		const auto erased = entries.erase(targetName);
 		if (erased == 0) {
 			error = ERROR_NOT_FOUND;
@@ -178,6 +195,9 @@ public:
 	std::unordered_map<std::wstring, Entry> entries;
 	int writeCount = 0;
 	int readCount = 0;
+	int eraseCount = 0;
+	bool eraseResult = true;
+	DWORD eraseError = ERROR_ACCESS_DENIED;
 
 private:
 	std::unordered_map<CREDENTIALW *, std::unique_ptr<Allocation>> allocations;
@@ -258,10 +278,14 @@ void setManualSettings(config_t *config)
 std::unique_ptr<YouTubeAccountRuntimeOwner> makeOwner(
 	std::string &currentPath, ConfigHandle &config, std::unique_ptr<WinCredentialApi> credentialApi,
 	std::unique_ptr<YouTubeAccountProfileOperationLockApi> lockApi,
-	GoogleOAuthAuthorizationSession::BrowserOpener browserOpener = {})
+	GoogleOAuthAuthorizationSession::BrowserOpener browserOpener = {},
+	YouTubeAccountRuntimeOwner::ConfigReader configReaderOverride = {})
 {
+	if (!configReaderOverride) {
+		configReaderOverride = [&config]() { return config.get(); };
+	}
 	return std::make_unique<YouTubeAccountRuntimeOwner>(
-		[&currentPath]() { return currentPath; }, [&config]() { return config.get(); }, QString{},
+		[&currentPath]() { return currentPath; }, std::move(configReaderOverride), QString{},
 		std::move(browserOpener),
 		std::move(credentialApi), std::move(lockApi));
 }
@@ -309,6 +333,194 @@ void testRestoreOnlyOwnerBindsSuccessfulGeneration()
 	CHECK(owner->snapshot().profileBinding == snapshot.profileBinding);
 	CHECK(owner->snapshot().providerStage == YouTubeAccountProviderStage::Configured);
 	CHECK(YouTubeAccountRuntimeOwnerTestAccess::commitSelection(*owner, selectionA()));
+}
+
+void testLocalDisconnectDeletesCredentialAndKeepsAccountMode()
+{
+	ConfigHandle config;
+	CHECK(config.open("easy-multistream-runtime-owner-disconnect.ini"));
+	setAccountSettings(config.get(), selectionA());
+	std::string currentPath(kProfilePathA);
+	auto credentialApi = std::make_unique<OwnerTestCredentialApi>();
+	auto *credentialApiRaw = credentialApi.get();
+	saveCredential(*credentialApiRaw, currentPath, selectionA());
+	auto owner = makeOwner(currentPath, config, std::move(credentialApi), std::make_unique<OwnerTestLockApi>());
+
+	const auto restored = owner->restoreActiveProfile();
+	CHECK(restored.status == YouTubeAccountProfileRestoreStatus::Restored);
+	const auto before = owner->snapshot();
+	CHECK(before.restored);
+
+	const auto disconnected = YouTubeAccountRuntimeOwnerTestAccess::disconnect(*owner);
+	CHECK(disconnected.status == YouTubeAccountProfileDisconnectStatus::Disconnected);
+	CHECK(disconnected.profile.status == YouTubeAccountProfileContext::LoadStatus::SetupRequired);
+	CHECK(disconnected.profile.snapshot.connectionMode == YouTubeConnectionMode::Account);
+	CHECK(!disconnected.profile.snapshot.selection.has_value());
+	CHECK(disconnected.profile.snapshot.generation > before.generation);
+	CHECK(disconnected.profile.snapshot.profileBinding == before.profileBinding);
+	CHECK(credentialApiRaw->entries.empty());
+
+	const auto settings = loadProfileSettings(config.get());
+	CHECK(settings.status == SettingsLoadStatus::SetupRequired);
+	CHECK(settings.settings.youtubeConnectionMode == YouTubeConnectionMode::Account);
+	CHECK(!settings.settings.youtubeAccountSelection.has_value());
+	const auto after = owner->snapshot();
+	CHECK(after.restored);
+	CHECK(after.restoreStatus == YouTubeAccountProfileRestoreStatus::SetupRequired);
+	CHECK(after.generation == disconnected.profile.snapshot.generation);
+	CHECK(after.profileBinding == disconnected.profile.snapshot.profileBinding);
+	CHECK(after.providerStage == YouTubeAccountProviderStage::Idle);
+}
+
+void testLocalDisconnectIsIdempotentWhenCredentialIsMissing()
+{
+	ConfigHandle config;
+	CHECK(config.open("easy-multistream-runtime-owner-disconnect-missing.ini"));
+	setAccountSettings(config.get(), selectionA());
+	std::string currentPath(kProfilePathA);
+	auto credentialApi = std::make_unique<OwnerTestCredentialApi>();
+	auto *credentialApiRaw = credentialApi.get();
+	auto owner = makeOwner(currentPath, config, std::move(credentialApi), std::make_unique<OwnerTestLockApi>());
+
+	CHECK(owner->restoreActiveProfile().status == YouTubeAccountProfileRestoreStatus::ReauthorizationRequired);
+	const int readsBeforeDisconnect = credentialApiRaw->readCount;
+	const auto first = YouTubeAccountRuntimeOwnerTestAccess::disconnect(*owner);
+	CHECK(first.status == YouTubeAccountProfileDisconnectStatus::Disconnected);
+	CHECK(credentialApiRaw->readCount == readsBeforeDisconnect + 1);
+	CHECK(credentialApiRaw->eraseCount == 0);
+	CHECK(owner->snapshot().restored);
+
+	const auto second = YouTubeAccountRuntimeOwnerTestAccess::disconnect(*owner);
+	CHECK(second.status == YouTubeAccountProfileDisconnectStatus::AlreadyDisconnected);
+	CHECK(credentialApiRaw->readCount == readsBeforeDisconnect + 1);
+	CHECK(credentialApiRaw->eraseCount == 0);
+	CHECK(owner->snapshot().restored);
+}
+
+void testBusyDisconnectLeavesRestoredOwnerMetadataUntouched()
+{
+	ConfigHandle config;
+	CHECK(config.open("easy-multistream-runtime-owner-disconnect-busy.ini"));
+	setAccountSettings(config.get(), selectionA());
+	std::string currentPath(kProfilePathA);
+	auto credentialApi = std::make_unique<OwnerTestCredentialApi>();
+	saveCredential(*credentialApi, currentPath, selectionA());
+	auto lockApi = std::make_unique<OwnerTestLockApi>();
+	auto *lockApiRaw = lockApi.get();
+	auto owner = makeOwner(currentPath, config, std::move(credentialApi), std::move(lockApi));
+	CHECK(owner->restoreActiveProfile().status == YouTubeAccountProfileRestoreStatus::Restored);
+	const auto before = owner->snapshot();
+
+	lockApiRaw->nextWaitResult = WAIT_TIMEOUT;
+	const auto busy = YouTubeAccountRuntimeOwnerTestAccess::disconnect(*owner);
+	CHECK(busy.status == YouTubeAccountProfileDisconnectStatus::Busy);
+	const auto after = owner->snapshot();
+	CHECK(after.restoreStatus == before.restoreStatus);
+	CHECK(after.generation == before.generation);
+	CHECK(after.profileBinding == before.profileBinding);
+	CHECK(after.restored == before.restored);
+	CHECK(after.closed == before.closed);
+}
+
+void testLocalDisconnectWithNoSelectionNeverTouchesCredentialStore()
+{
+	ConfigHandle config;
+	CHECK(config.open("easy-multistream-runtime-owner-disconnect-setup.ini"));
+	setAccountSettings(config.get(), std::nullopt);
+	std::string currentPath(kProfilePathA);
+	auto credentialApi = std::make_unique<OwnerTestCredentialApi>();
+	auto *credentialApiRaw = credentialApi.get();
+	auto owner = makeOwner(currentPath, config, std::move(credentialApi), std::make_unique<OwnerTestLockApi>());
+
+	CHECK(owner->restoreActiveProfile().status == YouTubeAccountProfileRestoreStatus::SetupRequired);
+	const auto result = YouTubeAccountRuntimeOwnerTestAccess::disconnect(*owner);
+	CHECK(result.status == YouTubeAccountProfileDisconnectStatus::AlreadyDisconnected);
+	CHECK(credentialApiRaw->readCount == 0);
+	CHECK(credentialApiRaw->eraseCount == 0);
+	CHECK(owner->snapshot().restored);
+	CHECK(owner->snapshot().restoreStatus == YouTubeAccountProfileRestoreStatus::SetupRequired);
+}
+
+void testLocalDisconnectManualProfileNeverTouchesCredentialStore()
+{
+	ConfigHandle config;
+	CHECK(config.open("easy-multistream-runtime-owner-disconnect-manual.ini"));
+	setManualSettings(config.get());
+	std::string currentPath(kProfilePathA);
+	auto credentialApi = std::make_unique<OwnerTestCredentialApi>();
+	auto *credentialApiRaw = credentialApi.get();
+	auto owner = makeOwner(currentPath, config, std::move(credentialApi), std::make_unique<OwnerTestLockApi>());
+
+	CHECK(owner->restoreActiveProfile().status == YouTubeAccountProfileRestoreStatus::NotAccountMode);
+	const auto result = YouTubeAccountRuntimeOwnerTestAccess::disconnect(*owner);
+	CHECK(result.status == YouTubeAccountProfileDisconnectStatus::NotAccountMode);
+	CHECK(credentialApiRaw->readCount == 0);
+	CHECK(credentialApiRaw->eraseCount == 0);
+	CHECK(!owner->snapshot().restored);
+}
+
+void testLocalDisconnectSaveFailureDoesNotRestoreErasedCredential()
+{
+	ConfigHandle config;
+	CHECK(config.open("easy-multistream-runtime-owner-disconnect-save-failure.ini"));
+	setAccountSettings(config.get(), selectionA());
+	std::string currentPath(kProfilePathA);
+	int configReadCount = 0;
+	int failFromRead = 0;
+	YouTubeAccountRuntimeOwner::ConfigReader configReader = [&]() -> config_t * {
+		++configReadCount;
+		if (failFromRead != 0 && configReadCount >= failFromRead) {
+			return nullptr;
+		}
+		return config.get();
+	};
+	auto credentialApi = std::make_unique<OwnerTestCredentialApi>();
+	auto *credentialApiRaw = credentialApi.get();
+	saveCredential(*credentialApiRaw, currentPath, selectionA());
+	auto owner = makeOwner(currentPath, config, std::move(credentialApi), std::make_unique<OwnerTestLockApi>(), {},
+					std::move(configReader));
+
+	CHECK(owner->restoreActiveProfile().status == YouTubeAccountProfileRestoreStatus::Restored);
+	// The disconnect preflight is the next config read; make only its commit
+	// read fail, after the credential has already been erased.
+	failFromRead = configReadCount + 2;
+	const auto result = YouTubeAccountRuntimeOwnerTestAccess::disconnect(*owner);
+	CHECK(result.status == YouTubeAccountProfileDisconnectStatus::Unavailable);
+	CHECK(credentialApiRaw->entries.empty());
+	CHECK(credentialApiRaw->eraseCount == 1);
+	CHECK(!owner->snapshot().restored);
+	CHECK(loadProfileSettings(config.get()).settings.youtubeAccountSelection.has_value());
+}
+
+void testLocalDisconnectCredentialFailureCanRetryWithoutRestore()
+{
+	ConfigHandle config;
+	CHECK(config.open("easy-multistream-runtime-owner-disconnect-credential-failure.ini"));
+	setAccountSettings(config.get(), selectionA());
+	std::string currentPath(kProfilePathA);
+	auto credentialApi = std::make_unique<OwnerTestCredentialApi>();
+	auto *credentialApiRaw = credentialApi.get();
+	saveCredential(*credentialApiRaw, currentPath, selectionA());
+	auto owner = makeOwner(currentPath, config, std::move(credentialApi), std::make_unique<OwnerTestLockApi>());
+	CHECK(owner->restoreActiveProfile().status == YouTubeAccountProfileRestoreStatus::Restored);
+	const auto before = owner->snapshot();
+	credentialApiRaw->eraseResult = false;
+	credentialApiRaw->eraseError = ERROR_ACCESS_DENIED;
+
+	const auto failed = YouTubeAccountRuntimeOwnerTestAccess::disconnect(*owner);
+	CHECK(failed.status == YouTubeAccountProfileDisconnectStatus::CredentialUnavailable);
+	CHECK(owner->snapshot().restored);
+	CHECK(owner->snapshot().generation > before.generation);
+	CHECK(owner->snapshot().profileBinding == before.profileBinding);
+	CHECK(owner->snapshot().providerStage == YouTubeAccountProviderStage::Configured);
+	CHECK(loadProfileSettings(config.get()).settings.youtubeAccountSelection.has_value());
+	CHECK(!credentialApiRaw->entries.empty());
+
+	credentialApiRaw->eraseResult = true;
+	const auto retried = YouTubeAccountRuntimeOwnerTestAccess::disconnect(*owner);
+	CHECK(retried.status == YouTubeAccountProfileDisconnectStatus::Disconnected);
+	CHECK(!loadProfileSettings(config.get()).settings.youtubeAccountSelection.has_value());
+	CHECK(credentialApiRaw->entries.empty());
 }
 
 void testMissingCredentialRestoresReauthorizationBoundaryWithoutOpeningBrowser()
@@ -370,10 +582,12 @@ void testOwnerLifecycleIsThreadBoundWithoutSideEffects()
 	auto owner = makeOwner(currentPath, config, std::make_unique<OwnerTestCredentialApi>(),
 				       std::make_unique<OwnerTestLockApi>());
 	YouTubeAccountProfileRestoreResult restoreResult;
+	YouTubeAccountProfileDisconnectResult disconnectResult;
 	bool invalidateResult = true;
 	bool shutdownResult = true;
 	std::thread worker([&]() {
 		restoreResult = owner->restoreActiveProfile();
+		disconnectResult = YouTubeAccountRuntimeOwnerTestAccess::disconnect(*owner);
 		invalidateResult = owner->invalidateForProfileChange();
 		shutdownResult = owner->shutdown();
 	});
@@ -383,6 +597,7 @@ void testOwnerLifecycleIsThreadBoundWithoutSideEffects()
 	CHECK(!shutdownResult);
 	CHECK(!owner->snapshot().closed);
 	CHECK(!owner->snapshot().restored);
+	CHECK(disconnectResult.status == YouTubeAccountProfileDisconnectStatus::WrongThread);
 }
 
 void testProfileChangeClearsOldBindingAndRestoresNewOne()
@@ -440,6 +655,9 @@ void testShutdownRetriesIncompleteNativeCleanup()
 	CHECK(owner->snapshot().closed);
 	lockApiRaw->closeResult = true;
 	CHECK(owner->shutdown());
+	const auto closedDisconnect = YouTubeAccountRuntimeOwnerTestAccess::disconnect(*owner);
+	CHECK(closedDisconnect.status == YouTubeAccountProfileDisconnectStatus::Closed);
+	CHECK(owner->snapshot().closed);
 }
 
 } // namespace
@@ -448,6 +666,13 @@ int main(int argc, char **argv)
 {
 	QCoreApplication application(argc, argv);
 	testRestoreOnlyOwnerBindsSuccessfulGeneration();
+	testLocalDisconnectDeletesCredentialAndKeepsAccountMode();
+	testLocalDisconnectIsIdempotentWhenCredentialIsMissing();
+	testBusyDisconnectLeavesRestoredOwnerMetadataUntouched();
+	testLocalDisconnectWithNoSelectionNeverTouchesCredentialStore();
+	testLocalDisconnectManualProfileNeverTouchesCredentialStore();
+	testLocalDisconnectSaveFailureDoesNotRestoreErasedCredential();
+	testLocalDisconnectCredentialFailureCanRetryWithoutRestore();
 	testMissingCredentialRestoresReauthorizationBoundaryWithoutOpeningBrowser();
 	testManualProfileNeverReadsAccountCredential();
 	testOwnerLifecycleIsThreadBoundWithoutSideEffects();
