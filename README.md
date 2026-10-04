@@ -30,6 +30,7 @@ The current build provides:
 - an OBS module built with the official plugin-template CMake infrastructure;
 - a standard dock registered through the public OBS Frontend API;
 - a one-time automatic dock reveal with inline setup guidance, followed by normal OBS-managed dock behavior;
+- a one-click **Open YouTube Studio** action that uses the default browser's existing YouTube sign-in without reading browser credentials;
 - a compact two-destination status view after setup, with detailed settings behind **Change settings**;
 - an additional **Tools → Open Easy Multistream** command that reveals the same dock;
 - a profile-scoped YouTube enable setting saved atomically in the active OBS profile;
@@ -65,7 +66,7 @@ This is not enabled in the current build. The internal browser, token, selection
 
 Until account connection is available, setup remains a normal OBS workflow. These fields will remain available later as the manual fallback:
 
-1. In YouTube Studio, use the regular **Stream** tab for an encoder stream rather than a scheduled event.
+1. Select **Open YouTube Studio** in the dock. In the browser, use **Stream** rather than a scheduled event.
 2. Create or reuse a custom stream key and turn on YouTube Auto-start and Auto-stop.
 3. Copy YouTube's RTMPS **Stream URL** and stream key into Easy Multistream. The server URL is a user-provided setting; it is not hard-coded by the plugin.
 4. If vertical discovery in the YouTube Shorts feed is wanted, enable YouTube **Dual stream** in the Live Control Room before going live and leave the vertical layout on **Auto**. YouTube then creates the vertical feed from the horizontal stream, normally using a centre crop.
@@ -157,8 +158,8 @@ The build is self-contained inside this repository. It downloads pinned OBS, Qt,
 The first build also compiles the OBS development targets and can take several minutes. A successful build creates both packages:
 
 ```text
-release\obs-easy-multistream-0.3.0-windows-x64-obs32.zip
-release\obs-easy-multistream-0.3.0-windows-x64-obs32-portable.zip
+release\obs-easy-multistream-0.4.0-windows-x64-obs32.zip
+release\obs-easy-multistream-0.4.0-windows-x64-obs32-portable.zip
 ```
 
 The regular ZIP contains one `obs-easy-multistream` folder for the standard OBS plugin directory. The `-portable` ZIP is structured to be extracted directly into an OBS Studio 32.2.2 portable root containing `bin\64bit\obs64.exe`. There is no installer yet. Treat local artifacts as test builds until the real Twitch + YouTube validation is recorded.

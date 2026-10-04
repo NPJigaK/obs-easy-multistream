@@ -8,8 +8,8 @@ The simple workflow uses one YouTube encoder stream. OBS sends one horizontal st
 
 To set it up:
 
-1. Open YouTube Studio and choose **Create → Go live**.
-2. Use the regular **Stream** tab for an encoder stream. Do not use a scheduled event for this workflow.
+1. Select **Open YouTube Studio** in the Easy Multistream dock. It opens YouTube's live dashboard in the default browser and uses that browser's existing sign-in session; the plugin does not read the browser's credentials.
+2. Open **Stream**. If the direct link does not reach that screen, choose **Create → Go live → Stream** in YouTube Studio. Do not use a scheduled event for this workflow.
 3. Make sure live streaming is enabled for the channel. YouTube may require verification or an initial activation period before the first stream.
 4. Create a custom stream key, or select an existing reusable custom stream key.
 5. Enable YouTube **Auto-start** and **Auto-stop** for the stream.

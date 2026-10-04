@@ -41,6 +41,7 @@ struct DockText {
 	QString setup;
 	QString showSettings;
 	QString hideSettings;
+	QString openYouTubeStudio;
 	QString profileLabel;
 	QString enableYouTube;
 	QString serverUrlLabel;
@@ -144,12 +145,14 @@ public:
 	using SaveKeyHandler = std::function<void(QByteArray)>;
 	using RemoveKeyHandler = std::function<void()>;
 	using RetryYouTubeHandler = std::function<void()>;
+	using OpenYouTubeStudioHandler = std::function<void()>;
 
 	explicit DockView(DockText text, QWidget *parent = nullptr);
 
 	void bindActions(QObject *context, EnabledHandler enabledHandler, SaveServerUrlHandler saveServerUrlHandler,
 			 SaveKeyHandler saveKeyHandler, RemoveKeyHandler removeKeyHandler,
-			 RetryYouTubeHandler retryYouTubeHandler);
+			 RetryYouTubeHandler retryYouTubeHandler,
+			 OpenYouTubeStudioHandler openYouTubeStudioHandler);
 	void applyState(const DockState &state);
 	void clearStreamKey();
 	void requestCredentialRemovalConfirmation(QObject *context, RemoveKeyHandler confirmedHandler);
@@ -171,6 +174,7 @@ private:
 	QLabel *youtubeStatusLabel_ = nullptr;
 	QCheckBox *youtubeEnabledCheckBox_ = nullptr;
 	QPushButton *toggleSettingsButton_ = nullptr;
+	QPushButton *openYouTubeStudioButton_ = nullptr;
 	QLineEdit *serverUrlEdit_ = nullptr;
 	QPushButton *saveServerUrlButton_ = nullptr;
 	QLabel *credentialStatusLabel_ = nullptr;
