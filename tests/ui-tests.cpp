@@ -52,6 +52,7 @@ easy_multistream::DockText testText()
 	text.setup = QStringLiteral("Setup");
 	text.showSettings = QStringLiteral("Change settings");
 	text.hideSettings = QStringLiteral("Hide settings");
+	text.openYouTubeStudio = QStringLiteral("Open YouTube Studio");
 	text.profileLabel = QStringLiteral("Profile");
 	text.enableYouTube = QStringLiteral("Enable YouTube");
 	text.serverUrlLabel = QStringLiteral("Server URL");
@@ -127,6 +128,7 @@ void testStateAndActions()
 	auto *gettingStarted = requiredChild<QGroupBox>(view, "easyMultistreamGettingStarted");
 	auto *setup = requiredChild<QGroupBox>(view, "easyMultistreamSetup");
 	auto *toggleSettings = requiredChild<QPushButton>(view, "easyMultistreamToggleSettings");
+	auto *openYouTubeStudio = requiredChild<QPushButton>(view, "easyMultistreamOpenYouTubeStudio");
 	auto *enabled = requiredChild<QCheckBox>(view, "easyMultistreamYouTubeEnabled");
 	auto *serverUrl = requiredChild<QLineEdit>(view, "easyMultistreamServerUrl");
 	auto *saveServerUrl = requiredChild<QPushButton>(view, "easyMultistreamSaveServerUrl");
@@ -135,8 +137,8 @@ void testStateAndActions()
 	auto *remove = requiredChild<QPushButton>(view, "easyMultistreamRemoveKey");
 	if (profile == nullptr || nativeDestination == nullptr || nativeStatus == nullptr || youtubeStatus == nullptr ||
 	    notice == nullptr || credentialStatus == nullptr || gettingStarted == nullptr || setup == nullptr ||
-	    toggleSettings == nullptr || enabled == nullptr || serverUrl == nullptr || saveServerUrl == nullptr ||
-	    key == nullptr || save == nullptr || remove == nullptr) {
+	    toggleSettings == nullptr || openYouTubeStudio == nullptr || enabled == nullptr || serverUrl == nullptr ||
+	    saveServerUrl == nullptr || key == nullptr || save == nullptr || remove == nullptr) {
 		return;
 	}
 
@@ -146,6 +148,8 @@ void testStateAndActions()
 	CHECK(!key->acceptDrops());
 	CHECK(key->maxLength() == 2560);
 	CHECK(serverUrl->maxLength() == 2048);
+	CHECK(openYouTubeStudio->text() == QStringLiteral("Open YouTube Studio"));
+	CHECK(openYouTubeStudio->parentWidget() == setup);
 
 	easy_multistream::DockState state;
 	state.profileName = QStringLiteral("Gaming");
@@ -172,6 +176,7 @@ void testStateAndActions()
 	bool saveKeyCalled = false;
 	bool removeCalled = false;
 	bool retryCalled = false;
+	bool openYouTubeStudioCalled = false;
 	QByteArray receivedKey;
 	QByteArray receivedServerUrl;
 	view.bindActions(
@@ -188,7 +193,11 @@ void testStateAndActions()
 			saveKeyCalled = true;
 			receivedKey = std::move(streamKey);
 		},
-		[&]() { removeCalled = true; }, [&]() { retryCalled = true; });
+		[&]() { removeCalled = true; }, [&]() { retryCalled = true; },
+		[&]() { openYouTubeStudioCalled = true; });
+
+	openYouTubeStudio->click();
+	CHECK(openYouTubeStudioCalled);
 
 	enabled->setChecked(true);
 	CHECK(enabledCalled);
@@ -219,6 +228,7 @@ void testStateAndActions()
 	CHECK(notice->isHidden());
 	toggleSettings->click();
 	CHECK(!setup->isHidden());
+	CHECK(!openYouTubeStudio->isHidden());
 	CHECK(toggleSettings->text() == QStringLiteral("Hide settings"));
 	CHECK(!notice->isHidden());
 	view.applyState(state);

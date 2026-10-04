@@ -100,6 +100,9 @@ DockView::DockView(DockText text, QWidget *parent) : QWidget(parent), text_(std:
 	setupGroup_ = new QGroupBox(text_.setup, this);
 	setupGroup_->setObjectName(QStringLiteral("easyMultistreamSetup"));
 	auto *setupLayout = new QVBoxLayout(setupGroup_);
+	openYouTubeStudioButton_ = new QPushButton(text_.openYouTubeStudio, setupGroup_);
+	openYouTubeStudioButton_->setObjectName(QStringLiteral("easyMultistreamOpenYouTubeStudio"));
+	setupLayout->addWidget(openYouTubeStudioButton_);
 	auto *setupForm = new QFormLayout();
 	setupForm->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
 	profileNameLabel_ = new QLabel(setupGroup_);
@@ -179,7 +182,8 @@ DockView::DockView(DockText text, QWidget *parent) : QWidget(parent), text_(std:
 
 void DockView::bindActions(QObject *context, EnabledHandler enabledHandler, SaveServerUrlHandler saveServerUrlHandler,
 			   SaveKeyHandler saveKeyHandler, RemoveKeyHandler removeKeyHandler,
-			   RetryYouTubeHandler retryYouTubeHandler)
+			   RetryYouTubeHandler retryYouTubeHandler,
+			   OpenYouTubeStudioHandler openYouTubeStudioHandler)
 {
 	Q_ASSERT(context != nullptr);
 
@@ -197,6 +201,12 @@ void DockView::bindActions(QObject *context, EnabledHandler enabledHandler, Save
 			 [handler = std::move(removeKeyHandler)]() mutable { handler(); });
 	QObject::connect(retryYouTubeButton_, &QPushButton::clicked, context,
 			 [handler = std::move(retryYouTubeHandler)]() mutable {
+				 if (handler) {
+					 handler();
+				 }
+			 });
+	QObject::connect(openYouTubeStudioButton_, &QPushButton::clicked, context,
+			 [handler = std::move(openYouTubeStudioHandler)]() mutable {
 				 if (handler) {
 					 handler();
 				 }

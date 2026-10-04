@@ -116,6 +116,7 @@ easy_multistream::DockText loadDockText()
 	text.setup = moduleText("Dock.Setup");
 	text.showSettings = moduleText("Dock.Settings.Show");
 	text.hideSettings = moduleText("Dock.Settings.Hide");
+	text.openYouTubeStudio = moduleText("Dock.OpenYouTubeStudio");
 	text.profileLabel = moduleText("Dock.Profile");
 	text.enableYouTube = moduleText("Dock.EnableYouTube");
 	text.serverUrlLabel = moduleText("Dock.ServerUrl.Label");

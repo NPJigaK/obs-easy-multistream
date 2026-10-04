@@ -17,6 +17,8 @@
 #include <Windows.h>
 
 #include <QByteArray>
+#include <QDesktopServices>
+#include <QUrl>
 
 #include <stdexcept>
 #include <string_view>
@@ -24,6 +26,8 @@
 
 namespace easy_multistream {
 namespace {
+
+constexpr char kYouTubeLiveDashboardUrl[] = "https://www.youtube.com/live_dashboard";
 
 class QByteArrayWiper final {
 public:
@@ -153,6 +157,18 @@ SettingsController::SettingsController(DockView *view, QObject *parent)
 		[this]() {
 			if (retryYouTubeHandler_) {
 				retryYouTubeHandler_();
+			}
+		},
+		[]() noexcept {
+			bool opened = false;
+			try {
+				opened = QDesktopServices::openUrl(
+					QUrl(QString::fromLatin1(kYouTubeLiveDashboardUrl)));
+			} catch (...) {
+				opened = false;
+			}
+			if (!opened) {
+				blog(LOG_WARNING, "[obs-easy-multistream] Could not open YouTube Studio");
 			}
 		});
 }
