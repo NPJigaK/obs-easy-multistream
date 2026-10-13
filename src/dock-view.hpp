@@ -42,6 +42,7 @@ struct DockText {
 	QString showSettings;
 	QString hideSettings;
 	QString openYouTubeStudio;
+	QString verifyOnYouTube;
 	QString profileLabel;
 	QString enableYouTube;
 	QString credentialLabel;
@@ -61,7 +62,7 @@ struct DockText {
 	QString youtubeRequiresTwitch;
 	QString youtubeNotStreaming;
 	QString youtubeConnecting;
-	QString youtubeStreaming;
+	QString youtubeSending;
 	QString youtubeReconnecting;
 	QString youtubeStopping;
 	QString youtubeFailed;
@@ -161,6 +162,7 @@ private:
 	QCheckBox *youtubeEnabledCheckBox_ = nullptr;
 	QPushButton *toggleSettingsButton_ = nullptr;
 	QPushButton *openYouTubeStudioButton_ = nullptr;
+	QPushButton *verifyOnYouTubeButton_ = nullptr;
 	QLabel *credentialStatusLabel_ = nullptr;
 	QLineEdit *streamKeyEdit_ = nullptr;
 	QPushButton *saveKeyButton_ = nullptr;

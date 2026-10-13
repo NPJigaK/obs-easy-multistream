@@ -83,6 +83,10 @@ DockView::DockView(DockText text, QWidget *parent) : QWidget(parent), text_(std:
 	retryYouTubeButton_->setObjectName(QStringLiteral("easyMultistreamRetryYouTube"));
 	retryYouTubeButton_->setVisible(false);
 	destinationsLayout->addRow(QString(), retryYouTubeButton_);
+	verifyOnYouTubeButton_ = new QPushButton(text_.verifyOnYouTube, destinations);
+	verifyOnYouTubeButton_->setObjectName(QStringLiteral("easyMultistreamVerifyOnYouTube"));
+	verifyOnYouTubeButton_->setVisible(false);
+	destinationsLayout->addRow(QString(), verifyOnYouTubeButton_);
 	layout->addWidget(destinations);
 
 	auto *setupControls = new QWidget(this);
@@ -183,8 +187,15 @@ void DockView::bindActions(QObject *context, EnabledHandler enabledHandler, Save
 					 handler();
 				 }
 			 });
+	OpenYouTubeStudioHandler verifyOnYouTubeHandler = openYouTubeStudioHandler;
 	QObject::connect(openYouTubeStudioButton_, &QPushButton::clicked, context,
 			 [handler = std::move(openYouTubeStudioHandler)]() mutable {
+				 if (handler) {
+					 handler();
+				 }
+			 });
+	QObject::connect(verifyOnYouTubeButton_, &QPushButton::clicked, context,
+			 [handler = std::move(verifyOnYouTubeHandler)]() mutable {
 				 if (handler) {
 					 handler();
 				 }
@@ -203,7 +214,11 @@ void DockView::applyState(const DockState &state)
 				    state.session.youtube == YouTubeStreamState::Reconnecting ||
 				    state.session.youtube == YouTubeStreamState::Stopping);
 	const bool streamActive = nativeActive || youtubeActive;
-	const bool youtubeFailed = state.runtimeAvailable && state.session.youtube == YouTubeStreamState::Failed;
+	const bool nativeTwitchStreaming = state.runtimeAvailable && state.session.phase == SessionPhase::Ready &&
+					   state.session.nativeDestination == NativeDestination::Twitch &&
+					   state.session.native == NativeStreamState::Streaming;
+	const bool youtubeFailed = nativeTwitchStreaming && state.youtubeEnabled && state.session.youtubeEnabled &&
+				   state.session.youtube == YouTubeStreamState::Failed;
 	const bool setupIncomplete = state.credential != CredentialDisplayState::Present;
 	const bool compactEligible = state.settingsEditable && !setupIncomplete;
 	if (!compactEligible) {
@@ -226,6 +241,13 @@ void DockView::applyState(const DockState &state)
 				     state.credential == CredentialDisplayState::Present);
 	retryYouTubeButton_->setVisible(youtubeFailed);
 	retryYouTubeButton_->setEnabled(youtubeFailed && nativeActive);
+	const bool youtubeTransportActive =
+		nativeTwitchStreaming && state.youtubeEnabled && state.session.youtubeEnabled &&
+		(state.session.youtube == YouTubeStreamState::Connecting ||
+		 state.session.youtube == YouTubeStreamState::Streaming ||
+		 state.session.youtube == YouTubeStreamState::Reconnecting);
+	verifyOnYouTubeButton_->setVisible(youtubeTransportActive);
+	verifyOnYouTubeButton_->setEnabled(youtubeTransportActive);
 
 	switch (state.credential) {
 	case CredentialDisplayState::Missing:
@@ -279,6 +301,8 @@ void DockView::applyState(const DockState &state)
 
 	if (state.runtimeAvailable && state.session.nativeDestination != NativeDestination::Twitch) {
 		youtubeStatusLabel_->setText(text_.youtubeRequiresTwitch);
+	} else if (state.runtimeAvailable && (!state.youtubeEnabled || !state.session.youtubeEnabled)) {
+		youtubeStatusLabel_->setText(text_.youtubeDisabled);
 	} else if (state.runtimeAvailable) {
 		switch (state.session.youtube) {
 		case YouTubeStreamState::Disabled:
@@ -298,7 +322,10 @@ void DockView::applyState(const DockState &state)
 			youtubeStatusLabel_->setText(text_.youtubeConnecting);
 			break;
 		case YouTubeStreamState::Streaming:
-			youtubeStatusLabel_->setText(text_.youtubeStreaming);
+			// The OBS output's start signal proves that RTMPS packet delivery
+			// began. It does not prove that YouTube transitioned the bound
+			// broadcast to live or made its watch page visible.
+			youtubeStatusLabel_->setText(text_.youtubeSending);
 			break;
 		case YouTubeStreamState::Reconnecting:
 			youtubeStatusLabel_->setText(text_.youtubeReconnecting);
@@ -321,7 +348,7 @@ void DockView::applyState(const DockState &state)
 	}
 
 	currentNotice_ = state.notice;
-	youtubeFailureNotice_ = state.runtimeAvailable && state.session.youtube == YouTubeStreamState::Failed;
+	youtubeFailureNotice_ = youtubeFailed;
 	if (youtubeFailureNotice_) {
 		noticeLabel_->setText(text_.noticeYouTubeFailed);
 	} else {

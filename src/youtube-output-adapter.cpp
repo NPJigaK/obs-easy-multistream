@@ -17,6 +17,7 @@
 #include <mutex>
 #include <thread>
 #include <utility>
+#include <util/base.h>
 
 namespace easy_multistream {
 namespace {
@@ -30,6 +31,64 @@ constexpr int kAdapterErrorBase = -1000;
 int adapterError(YouTubeOutputStartResult result) noexcept
 {
 	return kAdapterErrorBase - static_cast<int>(result);
+}
+
+const char *startResultName(YouTubeOutputStartResult result) noexcept
+{
+	switch (result) {
+	case YouTubeOutputStartResult::Accepted:
+		return "accepted";
+	case YouTubeOutputStartResult::RejectedBusy:
+		return "busy";
+	case YouTubeOutputStartResult::RejectedShuttingDown:
+		return "shutting-down";
+	case YouTubeOutputStartResult::RejectedInvalidRequest:
+		return "invalid-request";
+	case YouTubeOutputStartResult::RejectedNativeUnavailable:
+		return "native-output-unavailable";
+	case YouTubeOutputStartResult::RejectedUnsupportedEncoders:
+		return "unsupported-encoders";
+	case YouTubeOutputStartResult::RejectedServiceCreate:
+		return "service-create";
+	case YouTubeOutputStartResult::RejectedOutputCreate:
+		return "output-create";
+	case YouTubeOutputStartResult::RejectedAttach:
+		return "encoder-attach";
+	case YouTubeOutputStartResult::RejectedStart:
+		return "output-start";
+	}
+	return "unknown";
+}
+
+const char *eventName(YouTubeOutputEventKind kind) noexcept
+{
+	switch (kind) {
+	case YouTubeOutputEventKind::Starting:
+		return "starting";
+	case YouTubeOutputEventKind::Started:
+		return "started";
+	case YouTubeOutputEventKind::Reconnecting:
+		return "reconnecting";
+	case YouTubeOutputEventKind::Reconnected:
+		return "reconnected";
+	case YouTubeOutputEventKind::Stopping:
+		return "stopping";
+	case YouTubeOutputEventKind::Stopped:
+		return "stopped";
+	case YouTubeOutputEventKind::Failed:
+		return "failed";
+	case YouTubeOutputEventKind::Released:
+		return "released";
+	}
+	return "unknown";
+}
+
+void logOutputEvent(const YouTubeOutputEvent &event) noexcept
+{
+	const int level = event.kind == YouTubeOutputEventKind::Failed ? LOG_WARNING : LOG_INFO;
+	blog(level, "[obs-easy-multistream] YouTube output %s (lease=%llu.%llu, code=%d)",
+	     eventName(event.kind), static_cast<unsigned long long>(event.lease.generation),
+	     static_cast<unsigned long long>(event.lease.attempt), event.code);
 }
 
 int boundedCode(long long value) noexcept
@@ -176,6 +235,9 @@ public:
 
 	YouTubeOutputStartResult start(YouTubeOutputStartRequest request)
 	{
+		blog(LOG_INFO, "[obs-easy-multistream] YouTube output setup started (lease=%llu.%llu)",
+		     static_cast<unsigned long long>(request.lease.generation),
+		     static_cast<unsigned long long>(request.lease.attempt));
 		if (validateYouTubeServerUrl(request.serverUrl) != YouTubeServerUrlValidationError::None ||
 		    validateYouTubeStreamKey(request.streamKey.view()) != StreamKeyValidationError::None) {
 			emitRejected(request.lease, YouTubeOutputStartResult::RejectedInvalidRequest);
@@ -345,13 +407,22 @@ public:
 			return YouTubeOutputStartResult::Accepted;
 		} catch (...) {
 			if (session) {
-				// No OBS start call is made before the session is installed, so
-				// a setup exception cannot have an RTMP worker to join.
-				session->disconnectSignals();
-				session.reset();
+				// The exception may have occurred after current_ was installed or
+				// after OBS entered its output start path. Use the same asynchronous
+				// teardown barrier as every other terminal path so a live connect
+				// thread is never destroyed in place and current_ cannot remain busy.
+				session->markStartFinished();
+				{
+					std::lock_guard lock(mutex_);
+					startInProgress_ = false;
+				}
+				cv_.notify_all();
+				sendSessionFailure(session, YouTubeOutputStartResult::RejectedOutputCreate);
+				enqueueTeardown(session);
+			} else {
+				clearStartReservation();
+				emitRejected(request.lease, YouTubeOutputStartResult::RejectedOutputCreate);
 			}
-			clearStartReservation();
-			emitRejected(request.lease, YouTubeOutputStartResult::RejectedOutputCreate);
 			return YouTubeOutputStartResult::RejectedOutputCreate;
 		}
 	}
@@ -440,12 +511,20 @@ private:
 
 	void emitRejected(OutputLease lease, YouTubeOutputStartResult result) noexcept
 	{
+		blog(LOG_WARNING,
+		     "[obs-easy-multistream] YouTube output start rejected (lease=%llu.%llu, reason=%s)",
+		     static_cast<unsigned long long>(lease.generation), static_cast<unsigned long long>(lease.attempt),
+		     startResultName(result));
 		emit({lease, YouTubeOutputEventKind::Failed, adapterError(result)});
 		emit({lease, YouTubeOutputEventKind::Released, 0});
 	}
 
 	void sendSessionFailure(const std::shared_ptr<Session> &session, YouTubeOutputStartResult result) noexcept
 	{
+		blog(LOG_WARNING,
+		     "[obs-easy-multistream] YouTube output session failed (lease=%llu.%llu, reason=%s)",
+		     static_cast<unsigned long long>(session->lease.generation),
+		     static_cast<unsigned long long>(session->lease.attempt), startResultName(result));
 		if (session->callbackContext) {
 			session->callbackContext->accepting.store(false, std::memory_order_release);
 			bool expected = false;
@@ -480,6 +559,7 @@ private:
 	void emit(YouTubeOutputEvent event) noexcept
 	{
 		try {
+			logOutputEvent(event);
 			std::shared_ptr<const EventSink> sink;
 			{
 				std::lock_guard lock(mutex_);

@@ -19,7 +19,7 @@ A lightweight OBS Studio plugin intended to add YouTube multistreaming without r
 - Keep manual stream-key setup as an advanced fallback, with the secure YouTube RTMPS destination configured automatically.
 - Avoid cloud relays, telemetry, separate background processes, and a second video encode.
 
-The current development build uses a regular YouTube encoder stream (not a scheduled event): save a reusable custom stream key from YouTube Studio, then enable Auto-start and Auto-stop. The plugin supplies YouTube's standard secure RTMPS destination itself; users do not copy or manage a server URL. This manual path remains supported as a fallback. The planned normal setup is **Connect YouTube** in the dock, followed by Google authorization in the system browser and selection of an existing reusable encoder stream. Automatically creating and managing YouTube broadcasts, titles, privacy settings, and scheduled events is a separate later feature rather than part of the first account-connection implementation.
+The current development build uses a regular YouTube encoder stream (not a scheduled event): save a reusable custom stream key from YouTube Studio, then enable Auto-start and Auto-stop when YouTube offers those controls. The plugin supplies YouTube's standard secure RTMPS destination itself, so users do not copy or manage a server URL. This supports an OBS-only Start/Stop workflow, but the manual-key plugin cannot query whether YouTube actually made the broadcast live or completed it. The planned normal setup is **Connect YouTube** in the dock, followed by Google authorization and explicit broadcast lifecycle management. That account-managed path is required for the plugin itself to verify and control live/complete transitions, metadata, and privacy.
 
 YouTube's automatic Dual stream can create a 9:16 feed from the single 16:9 stream, so Easy Multistream does not need a second local video encoder for the recommended setup. Custom encoder-controlled vertical layouts remain outside the current scope.
 
@@ -47,7 +47,7 @@ The current build provides:
 - a pinned Windows x64 build against OBS Studio 32.2.2;
 - separate installer-free ZIPs for a regular OBS installation and a portable OBS installation, each with a validated directory layout.
 
-The implementation now creates a YouTube output after OBS confirms that its native Twitch output has started. Automated tests cover configuration, state transitions, stale callbacks, failure isolation, and UI behavior; the remaining release gate is a short real-service test with a private or unlisted YouTube stream. See [the YouTube setup note](docs/youtube-setup.md), [the architecture note](docs/architecture.md), [the output integration contract](docs/runtime-output-design.md), and [the security note](docs/security.md).
+The implementation now creates a YouTube output after OBS confirms that its native Twitch output has started. Automated tests cover configuration, state transitions, stale callbacks, failure isolation, and UI behavior. The dock deliberately reports **Sending to YouTube**, not **Live**, because an OBS RTMPS start event does not prove that YouTube has made the broadcast viewable. The remaining release gates include repeated real-service start/stop validation and completion of the account-managed YouTube broadcast lifecycle. See [the YouTube setup note](docs/youtube-setup.md), [the architecture note](docs/architecture.md), [the output integration contract](docs/runtime-output-design.md), and [the security note](docs/security.md).
 
 ## Planned YouTube account connection
 
@@ -67,10 +67,13 @@ This is not enabled in the current build. The internal browser, token, selection
 Until account connection is available, setup remains a normal OBS workflow. The stream-key control will remain available later as the manual fallback:
 
 1. Select **Open YouTube Studio** in the dock. In the browser, use **Stream** rather than a scheduled event.
-2. Create or reuse a custom stream key and turn on YouTube Auto-start and Auto-stop.
+2. Create or reuse a custom stream key. Enable YouTube **Auto-start** and **Auto-stop** when those controls are available.
 3. Copy only the stream key into Easy Multistream, save it, and enable **Also stream to YouTube**. The plugin automatically uses YouTube's standard secure RTMPS destination.
-4. If vertical discovery in the YouTube Shorts feed is wanted, enable YouTube **Dual stream** in the Live Control Room before going live and leave the vertical layout on **Auto**. YouTube then creates the vertical feed from the horizontal stream, normally using a centre crop.
-5. Test the setup as **Private** or **Unlisted** before using it for a public broadcast.
+4. Start and stop streaming with OBS as usual. **Sending to YouTube** means that the encoder connection is carrying video; manual-key mode cannot independently verify YouTube's public live state.
+5. If vertical discovery in the YouTube Shorts feed is wanted, enable YouTube **Dual stream** in the Live Control Room before going live and leave the vertical layout on **Auto**. YouTube then creates the vertical feed from the horizontal stream, normally using a centre crop.
+6. Test the setup as **Private** or **Unlisted** before using it for a public broadcast.
+
+If Live Control Room presents **Go live** or **End stream**, that YouTube broadcast requires manual lifecycle actions and is not the one-button manual-key workflow described above. Use both YouTube actions for that broadcast, or use a regular encoder stream with Auto-start and Auto-stop.
 
 These steps use one YouTube input from OBS. A separately composed 9:16 scene sent through a second local encoder is a different, more expensive workflow and is not part of the initial implementation. See the [detailed YouTube setup note](docs/youtube-setup.md) and the [official YouTube dual-stream instructions](https://support.google.com/youtube/answer/2474026?hl=en).
 
@@ -158,8 +161,8 @@ The build is self-contained inside this repository. It downloads pinned OBS, Qt,
 The first build also compiles the OBS development targets and can take several minutes. A successful build creates both packages:
 
 ```text
-release\obs-easy-multistream-0.4.2-windows-x64-obs32.zip
-release\obs-easy-multistream-0.4.2-windows-x64-obs32-portable.zip
+release\obs-easy-multistream-0.4.3-windows-x64-obs32.zip
+release\obs-easy-multistream-0.4.3-windows-x64-obs32-portable.zip
 ```
 
 The regular ZIP contains one `obs-easy-multistream` folder for the standard OBS plugin directory. The `-portable` ZIP is structured to be extracted directly into an OBS Studio 32.2.2 portable root containing `bin\64bit\obs64.exe`. There is no installer yet. Treat local artifacts as test builds until the real Twitch + YouTube validation is recorded.

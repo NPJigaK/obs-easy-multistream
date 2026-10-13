@@ -65,7 +65,7 @@ P0は安全性・所有権・秘密情報・native出力保護に関わる項目
 | ID | 優先度 | 前提と操作 | 合格条件 | 区分 |
 |---|---|---|---|---|
 | RT-START-01 | P0 | recognized Twitch、YouTube有効、keyあり。native開始が受理され、`STREAMING_STARTED`後にYouTube開始effectを処理する | YouTube output/serviceを1組だけ作成し、`obs_output_start()`の戻り値がtrueでも状態は`Connecting`のまま。nativeへStart/Stopを呼ばない | 自動 |
-| RT-START-02 | P1 | RT-START-01後にYouTube outputの`start`シグナルを1回配送 | YouTubeだけが`Streaming`になり、開始通知が1回だけ進む。遅延中に`Streaming`を表示しない | 自動＋手動 |
+| RT-START-02 | P1 | RT-START-01後にYouTube outputの`start`シグナルを1回配送 | YouTube transportだけが`Streaming`になり、開始通知が1回だけ進む。手動キーモードのUIは「YouTubeへ送信中」と表示し、YouTube broadcastがLiveだとは断定しない | 自動＋手動 |
 | RT-START-03 | P1 | 同じYouTube leaseに重複した`start`、`reconnect_success`、遅延イベントを配送 | 状態・revision・effectが重複して進まない。二重outputを作らない | 自動 |
 | RT-START-04 | P0 | `obs_output_start()`がfalseを返す | `youtubeReleased(lease)`相当の完全releaseを1回だけ行い、YouTubeは`Failed`。native Twitchは`Streaming`のまま | 自動＋手動 |
 | RT-START-05 | P0 | startはtrueだが`start`シグナルなし。遅延後に接続エラーまたはreleaseを配送 | start受理を失敗と誤判定しない。タイムアウトで別outputを重ねず、terminal release後だけ`Failed`に遷移する | 自動 |
@@ -208,7 +208,7 @@ generation invalidation / new work拒否
 - [x] 現在のCTestがすべて通る。
 - [x] start acceptedとstart signalを分けた状態機械テストが通る。
 - [x] リポジトリ内の隔離portable OBS 32.2.2で、0.1.0基礎buildのload、Startup complete、clean unload、memory leaks 0を確認した。
-- [ ] 0.4.2で初回dock表示、YouTube Studioリンク、URL入力欄が存在しないこと、キー保存直後の詳細維持、明示的なcompact化、表示済みmarker保存、2回目の非表示、トレイ復帰後の表示、Toolsメニューからの再表示を確認した。
+- [ ] 0.4.3で初回dock表示、YouTube Studioリンク、URL入力欄が存在しないこと、キー保存直後の詳細維持、明示的なcompact化、表示済みmarker保存、2回目の非表示、トレイ復帰後の表示、Toolsメニューからの再表示を確認した。
 - [ ] `obs_output_start()`同期拒否とnative StartStreaming同期拒否を別々にテストした。
 - [ ] output error、YouTube-only disconnect、credential failure、missing/invalid key、unsupported codecをテストした。
 - [ ] stop、duplicate stop、rapid stop-start、profile change、EXITをテストした。
