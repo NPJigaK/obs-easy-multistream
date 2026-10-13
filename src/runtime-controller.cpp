@@ -11,6 +11,7 @@
 #include <deque>
 #include <mutex>
 #include <utility>
+#include <util/base.h>
 
 namespace easy_multistream {
 
@@ -19,6 +20,12 @@ namespace {
 bool hasManualYouTubeDestination(const RuntimeSettings &settings) noexcept
 {
 	return settings.youtubeConnectionMode == YouTubeConnectionMode::Manual && settings.youtubeKeyAvailable;
+}
+
+void logLease(int level, const char *message, OutputLease lease) noexcept
+{
+	blog(level, "[obs-easy-multistream] %s (lease=%llu.%llu)", message,
+	     static_cast<unsigned long long>(lease.generation), static_cast<unsigned long long>(lease.attempt));
 }
 
 } // namespace
@@ -461,9 +468,11 @@ void RuntimeController::applyEffect(const SessionEffect &effect)
 {
 	switch (effect.kind) {
 	case SessionEffectKind::StartYouTube:
+		logLease(LOG_INFO, "YouTube start requested", effect.lease);
 		startYouTube(effect.lease);
 		break;
 	case SessionEffectKind::StopYouTube:
+		logLease(LOG_INFO, "YouTube stop requested", effect.lease);
 		if (pendingDestinationPreparation_.has_value() &&
 		    pendingDestinationPreparation_->outputLease == effect.lease) {
 			// No OBS output exists yet.  Cancelling the provider is the complete
@@ -489,6 +498,7 @@ void RuntimeController::startYouTube(OutputLease lease)
 	    *current.youtubeLease != lease || current.youtube != YouTubeStreamState::Connecting ||
 	    !settings_.youtubeEnabled || !hasConfiguredYouTubeDestination(settings_) || pendingOutputStop_.has_value() ||
 	    pendingDestinationPreparation_.has_value()) {
+		logLease(LOG_WARNING, "YouTube start skipped because runtime prerequisites changed", lease);
 		completeRejectedStart(lease);
 		return;
 	}
@@ -496,6 +506,7 @@ void RuntimeController::startYouTube(OutputLease lease)
 	if (settings_.youtubeConnectionMode == YouTubeConnectionMode::Account) {
 		if (!destinationProvider_ || !settings_.youtubeAccountDestinationAvailable ||
 		    !current.nativeLease.has_value() || current.native != NativeStreamState::Streaming) {
+			logLease(LOG_WARNING, "YouTube account destination is not ready", lease);
 			applyTransition(coordinator_.youtubeSetupRequired(lease));
 			return;
 		}
@@ -649,11 +660,13 @@ void RuntimeController::startYouTube(OutputLease lease)
 			key = readYouTubeKey_();
 		}
 	} catch (...) {
+		logLease(LOG_WARNING, "YouTube credential read failed", lease);
 		completeRejectedStart(lease);
 		return;
 	}
 
 	if (key.empty() || validateYouTubeStreamKey(key.view()) != StreamKeyValidationError::None) {
+		logLease(LOG_WARNING, "YouTube credential is missing or invalid", lease);
 		completeRejectedStart(lease);
 		return;
 	}
