@@ -117,6 +117,7 @@ easy_multistream::DockText loadDockText()
 	text.showSettings = moduleText("Dock.Settings.Show");
 	text.hideSettings = moduleText("Dock.Settings.Hide");
 	text.openYouTubeStudio = moduleText("Dock.OpenYouTubeStudio");
+	text.verifyOnYouTube = moduleText("Dock.VerifyOnYouTube");
 	text.profileLabel = moduleText("Dock.Profile");
 	text.enableYouTube = moduleText("Dock.EnableYouTube");
 	text.credentialLabel = moduleText("Dock.Credential.Label");
@@ -136,7 +137,7 @@ easy_multistream::DockText loadDockText()
 	text.youtubeRequiresTwitch = moduleText("Dock.YouTube.RequiresTwitch");
 	text.youtubeNotStreaming = moduleText("Dock.YouTube.NotStreaming");
 	text.youtubeConnecting = moduleText("Dock.YouTube.Connecting");
-	text.youtubeStreaming = moduleText("Dock.YouTube.Streaming");
+	text.youtubeSending = moduleText("Dock.YouTube.Sending");
 	text.youtubeReconnecting = moduleText("Dock.YouTube.Reconnecting");
 	text.youtubeStopping = moduleText("Dock.YouTube.Stopping");
 	text.youtubeFailed = moduleText("Dock.YouTube.Failed");

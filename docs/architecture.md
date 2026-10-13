@@ -12,7 +12,7 @@ The planned first useful release is intentionally narrow:
 - reuse of the primary H.264 and AAC encoders, with no second video encode
 - one OBS Start/Stop workflow
 - YouTube failure isolation: a secondary failure must not stop Twitch
-- one manually configured YouTube custom stream key with YouTube Auto-start and Auto-stop; the secure RTMPS destination is fixed internally, and this remains the current implementation and future advanced fallback
+- one manually configured YouTube stream key; the secure RTMPS destination is fixed internally, and this remains the current implementation and future advanced fallback. Its RTMPS connection state is transport-only and must never be presented as proof that a YouTube broadcast is live
 - optional YouTube automatic Dual stream, where YouTube creates a vertical feed from the single horizontal input
 - a standard OBS dock using public Frontend and Qt APIs
 

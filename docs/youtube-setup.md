@@ -12,13 +12,15 @@ To set it up:
 2. Open **Stream**. If the direct link does not reach that screen, choose **Create → Go live → Stream** in YouTube Studio. Do not use a scheduled event for this workflow.
 3. Make sure live streaming is enabled for the channel. YouTube may require verification or an initial activation period before the first stream.
 4. Create a custom stream key, or select an existing reusable custom stream key.
-5. Enable YouTube **Auto-start** and **Auto-stop** for the stream.
+5. Enable YouTube **Auto-start** and **Auto-stop** when those controls are available for the regular encoder stream.
 6. Enter the matching stream key in Easy Multistream. The key is stored as a secret and is not written to the OBS profile. Do not copy the Stream URL: the plugin automatically uses YouTube's standard secure RTMPS destination.
 7. Enable **Also stream to YouTube** in the dock.
 8. If a vertical version should also appear in the YouTube Shorts feed, enable **Dual stream** in the Live Control Room before starting. For the initial workflow, leave the vertical preview set to **Auto**. YouTube creates the 9:16 feed from the horizontal input, normally using a centre crop.
-9. For the first test, set the YouTube visibility to **Private** or **Unlisted**, start OBS, and check both the horizontal player and the vertical preview before using a public stream.
+9. For the first test, set the YouTube visibility to **Private** or **Unlisted**, start OBS, and verify both the horizontal player and the vertical preview in Live Control Room.
 
-The regular OBS Start/Stop button remains the only local action. Once configured, Easy Multistream sends the same horizontal H.264/AAC stream to YouTube while OBS continues to use its native Twitch settings.
+The regular OBS Start/Stop button remains the only local encoder action. Once configured, Easy Multistream sends the same horizontal H.264/AAC stream to YouTube while OBS continues to use its native Twitch settings. The current manual-key connection cannot query the YouTube broadcast resource, so **Sending to YouTube** means that RTMPS packet delivery started; it does not certify that the watch page is live.
+
+If Live Control Room presents **Go live** or **End stream**, the selected YouTube broadcast requires manual lifecycle actions. Use both actions for that broadcast. It is not compatible with the OBS-only manual-key workflow above unless the broadcast can instead be configured for Auto-start and Auto-stop. The planned Google account connection and YouTube Live Streaming API lifecycle will let the plugin create, transition, verify, and complete broadcasts itself.
 
 ## What is not part of the first workflow
 
